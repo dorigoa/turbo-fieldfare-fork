@@ -325,6 +325,7 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
 enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
     case invalidStreamedTileBinding(String)
     case allocationFailed(String)
+    case unsupportedWeightBits(Int)
 
     public var description: String {
         switch self {
@@ -332,17 +333,54 @@ enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
             return "invalid streamed tile binding: \(reason)"
         case .allocationFailed(let label):
             return "failed to allocate \(label)"
+        case .unsupportedWeightBits(let bits):
+            return "routed experts with \(bits)-bit weights are not supported; expected 4 or 8"
         }
     }
 }
 
+/// Batched routed-expert phases of the prefill MoE.
+///
+/// `weightBits` selects the kernels: 4 uses
+/// `prefill_grouped_routed_moe_batched_phase1` and `_down` from
+/// `prefill.metal`, 8 their INT8 twins in `prefill_moe_int8.metal`. Both sets
+/// share the buffer indices, the `PrefillStreamedRoutedBlobsMSL` argument
+/// buffer, the parameter struct, the scratch layout and the dispatch geometry,
+/// so the metadata, argument-buffer and encoding methods keep one shape for
+/// both widths.
 final class PrefillGroupedRoutedMoE {
+    static let supportedWeightBits: Set<Int> = [4, 8]
+
+    private struct KernelNames {
+        let phase1: String
+        let down: String
+
+        init?(weightBits: Int) {
+            switch weightBits {
+            case 4:
+                phase1 = "prefill_grouped_routed_moe_batched_phase1"
+                down = "prefill_grouped_routed_moe_batched_down"
+            case 8:
+                phase1 = "prefill_grouped_routed_moe_batched_phase1_int8"
+                down = "prefill_grouped_routed_moe_batched_down_int8"
+            default:
+                return nil
+            }
+        }
+    }
+
     private let batchedPhase1PSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
 
+    /// Weight width of the routed experts the batched phases read.
+    let weightBits: Int
+
     func makeStreamedArgumentBuffer(device: MTLDevice,
                                            binding: PrefillStreamedTileBinding) throws -> PrefillStreamedTileArgumentBuffer {
+        if weightBits == 8 {
+            try Self.validateInt8ExpertViews(binding)
+        }
         guard let buffer = device.makeBuffer(length: streamedArgEncoder.encodedLength,
                                              options: .storageModeShared) else {
             throw PrefillGroupedRoutedMoEError.allocationFailed("prefill streamed expert argument buffer")
@@ -358,14 +396,52 @@ final class PrefillGroupedRoutedMoE {
         return PrefillStreamedTileArgumentBuffer(buffer: buffer)
     }
 
-    init(context: MetalContext) throws {
-        self.batchedPhase1PSO = try context.pipeline("prefill_grouped_routed_moe_batched_phase1")
-        self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
-        guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
-            throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
+    init(context: MetalContext, weightBits: Int = 4) throws {
+        guard let kernels = KernelNames(weightBits: weightBits) else {
+            throw PrefillGroupedRoutedMoEError.unsupportedWeightBits(weightBits)
+        }
+        self.weightBits = weightBits
+        self.batchedPhase1PSO = try context.pipeline(kernels.phase1)
+        self.batchedDownPSO = try context.pipeline(kernels.down)
+        guard let streamedFn = context.library.makeFunction(name: kernels.phase1) else {
+            throw MetalError.missingFunction(kernels.phase1)
         }
         self.streamedArgEncoder = streamedFn.makeArgumentEncoder(
             bufferIndex: PrefillGroupedRoutedMoEBufferIndex.expertArgumentState)
+    }
+
+    /// The INT8 kernels read each weight row through 4-byte loads, so every
+    /// expert blob must start on a 4-byte boundary. The INT4 kernels read
+    /// single bytes and keep their existing contract, unchecked here.
+    static func validateInt8ExpertViews(_ binding: PrefillStreamedTileBinding) throws {
+        for (expert, view) in zip(binding.expertIDs, binding.views)
+        where !view.offset.isMultiple(of: 4) {
+            throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                "INT8 expert \(expert) view offset \(view.offset) is not 4-byte aligned")
+        }
+    }
+
+    /// Sub-tensor offsets inside an INT8 expert blob: weights on 4-byte
+    /// boundaries for the word loads, BF16 scales and biases on 2-byte ones.
+    /// The installed layout (plan §2.5) puts every offset on 16 bytes.
+    static func int8ExpertOffsetsAreAligned(_ offsets: MoEExpertOffsets) -> Bool {
+        [offsets.gateWOff, offsets.upWOff, offsets.downWOff]
+            .allSatisfy { $0.isMultiple(of: 4) }
+            && [offsets.gateSOff, offsets.gateBOff, offsets.upSOff,
+                offsets.upBOff, offsets.downSOff, offsets.downBOff]
+            .allSatisfy { $0.isMultiple(of: 2) }
+    }
+
+    static func int8ParamsAreAligned(_ params: PrefillGroupedRoutedMoEStreamedParams) -> Bool {
+        int8ExpertOffsetsAreAligned(MoEExpertOffsets(gateWOff: params.gateWOff,
+                                                     gateSOff: params.gateSOff,
+                                                     gateBOff: params.gateBOff,
+                                                     upWOff: params.upWOff,
+                                                     upSOff: params.upSOff,
+                                                     upBOff: params.upBOff,
+                                                     downWOff: params.downWOff,
+                                                     downSOff: params.downSOff,
+                                                     downBOff: params.downBOff))
     }
 
     func makeStreamedMetadataBuffers(
@@ -402,6 +478,10 @@ final class PrefillGroupedRoutedMoE {
         guard params.pairCount > 0,
               params.liveExpertCount == UInt32(binding.views.count),
               pairMicrobatchRows > 0 else { return 0 }
+        if weightBits == 8 {
+            precondition(Self.int8ParamsAreAligned(params),
+                         "INT8 routed expert offsets need 4-byte weights and 2-byte scales and biases")
+        }
         var consumed: UInt32 = 0
         var microbatchCount = 0
         while consumed < params.pairCount {
