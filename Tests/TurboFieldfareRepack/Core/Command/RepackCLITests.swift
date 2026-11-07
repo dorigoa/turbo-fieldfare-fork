@@ -1,8 +1,133 @@
 import Foundation
 import Testing
+@testable import TurboFieldfareRepackCore
 
 @Suite(.serialized)
 struct RepackCLITests {
+    @Test func helpNamesBothVariantsAndTheDryRun() throws {
+        let result = try run(["--help"])
+
+        #expect(result.status == 0)
+        #expect(result.stdout.contains("--variant int4|int8"))
+        #expect(result.stdout.contains("--dry-run"))
+        for variant in SupportedModelVariant.allCases {
+            #expect(result.stdout.contains(variant.displayName))
+        }
+    }
+
+    @Test func unknownVariantIsRejected() throws {
+        let output = temporaryOutput("unknown-variant")
+        defer { clean(output) }
+        let result = try run(["--output", output, "--variant", "int6"])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("unknown variant int6"))
+    }
+
+    @Test func conflictingVariantsAreRejected() throws {
+        let output = temporaryOutput("variant-twice")
+        defer { clean(output) }
+        let result = try run(["--output", output, "--variant", "int4", "--variant", "int8"])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("--variant was given twice"))
+    }
+
+    @Test func dryRunDoesNotResume() throws {
+        let output = temporaryOutput("dry-run-resume")
+        defer { clean(output) }
+        let result = try run(["--dry-run", "--output", output, "--resume"])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("mutually exclusive"))
+    }
+
+    @Test func discardHasNoDryRun() throws {
+        let output = temporaryOutput("dry-run-discard")
+        defer { clean(output) }
+        let result = try run(["--discard-partial", "--output", output, "--dry-run"])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("--discard-partial only accepts"))
+    }
+
+    /// Verification reads the variant from the manifest it checks.
+    @Test func verificationTakesNoVariantOrDryRun() throws {
+        for extra in [["--variant", "int8"], ["--dry-run"]] {
+            let result = try run(["--verify-install", "--input-gturbo", "/tmp/missing.gturbo"]
+                                 + extra)
+            #expect(result.status == 2, "\(extra) was accepted")
+            #expect(result.stderr.contains("verification accepts only --input-gturbo"))
+        }
+    }
+
+    /// The image pack follows its text model; vision commands are unchanged.
+    @Test func visionCommandsTakeNoVariantOrDryRun() throws {
+        let output = temporaryOutput("vision-variant")
+            .replacingOccurrences(of: ".gturbo", with: ".vision.gturbo")
+        defer { clean(output) }
+        for extra in [["--variant", "int8"], ["--dry-run"]] {
+            let result = try run(["--vision-output", output,
+                                  "--text-model", "/tmp/missing-text.gturbo"] + extra)
+            #expect(result.status == 2, "\(extra) was accepted")
+            #expect(result.stderr.contains("do not accept text install arguments"))
+        }
+    }
+
+    @Test func eightBitResumeWithoutStateFailsBeforeNetwork() throws {
+        let output = temporaryOutput("missing-resume-8bit")
+        defer { clean(output) }
+        let result = try run(["--output", output, "--resume", "--variant", "int8"])
+
+        #expect(result.status == 1)
+        #expect(result.stderr.contains("no resumable install state exists"))
+    }
+
+    @Test func discardForOneVariantKeepsTheOthersDownload() throws {
+        let output = temporaryOutput("discard-variant")
+        defer { clean(output) }
+        try saveDownload(of: .int4, at: output)
+
+        let refused = try run(["--discard-partial", "--output", output, "--variant", "int8"])
+        #expect(refused.status == 1)
+        #expect(refused.stderr.contains("pass --variant int4"))
+        #expect(FileManager.default.fileExists(atPath: output + ".resume.json"))
+        #expect(FileManager.default.fileExists(atPath: output + ".partial"))
+
+        let discarded = try run(["--discard-partial", "--output", output, "--variant", "int4"])
+        #expect(discarded.status == 0)
+        #expect(discarded.stdout.contains("Discarded saved 4-bit download"))
+        #expect(!FileManager.default.fileExists(atPath: output + ".resume.json"))
+        #expect(!FileManager.default.fileExists(atPath: output + ".partial"))
+    }
+
+    /// A resume under the wrong variant fails on the saved checkpoint, before
+    /// any request, and says which variant the download belongs to.
+    @Test func resumeUnderTheWrongVariantNamesTheSavedOne() throws {
+        let output = temporaryOutput("resume-wrong-variant")
+        defer { clean(output) }
+        try saveDownload(of: .int8, at: output)
+
+        let result = try run(["--output", output, "--resume"])
+        #expect(result.status == 1)
+        #expect(result.stderr.contains(SupportedModelVariant.int8.repoID))
+        #expect(result.stderr.contains("pass --variant int8"))
+        #expect(FileManager.default.fileExists(atPath: output + ".resume.json"))
+    }
+
+    private func saveDownload(of variant: SupportedModelVariant, at output: String) throws {
+        let paths = try RemoteInstallPaths(outputDirectory: output)
+        try FileManager.default.createDirectory(atPath: paths.partialDirectory,
+                                                withIntermediateDirectories: true)
+        try RemoteInstallCheckpoint(
+            repoID: variant.repoID, requestedRevision: variant.revision,
+            resolvedCommit: variant.revision,
+            sourceIndexSHA256: variant.sourceIndexSHA256,
+            planFingerprint: String(repeating: "0", count: 64),
+            totalSourceBytes: 1
+        ).write(to: paths.checkpointFile, parentDirectory: paths.parentDirectory)
+    }
+
     @Test func resumeAndDiscardAreMutuallyExclusive() throws {
         let output = temporaryOutput("exclusive")
         defer { clean(output) }
@@ -73,6 +198,7 @@ struct RepackCLITests {
             output + ".install-state",
             output + ".install-state.cleanup",
             output + ".install.lock",
+            output + ".resume.json",
         ] {
             try? FileManager.default.removeItem(atPath: path)
         }
