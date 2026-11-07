@@ -30,6 +30,27 @@ import Testing
         #expect(variant.approximateDownloadBytes > 24_265_359_360)
     }
 
+    /// Pinned from a metadata-only dry run of the 8-bit source (S1). The
+    /// parts are the figures that run printed; see the catalog comments.
+    @Test func eightBitSizesComeFromTheDryRun() {
+        let variant = SupportedModelVariant.int8
+        let payloadRanges: UInt64 = 26_939_947_964
+        let sourceMetadata: UInt64 = 413_177
+        let tokenizerDownload: UInt64 = 32_189_832
+        #expect(variant.approximateDownloadBytes
+                == payloadRanges + sourceMetadata + tokenizerDownload)
+
+        let residentFile: UInt64 = 2_545_592_786
+        let expertFiles: UInt64 = 30 * 809_500_672
+        let layout: UInt64 = 8_465_996
+        let tokenizerInstalled: UInt64 = 32_202_012
+        let measured = residentFile + expertFiles + layout + tokenizerInstalled
+        #expect(variant.installedBytes == 26_871_300_000)
+        // Room for manifest.json and verified-install.json (about 14 KB).
+        #expect(variant.installedBytes >= measured + 16_384)
+        #expect(variant.installedBytes - measured < 100_000)
+    }
+
     @Test func variantsAreFoundByEveryIdentityTheyLeaveBehind() {
         for variant in SupportedModelVariant.allCases {
             #expect(SupportedModelVariant.variant(forSourceIndexSHA256: variant.sourceIndexSHA256)
