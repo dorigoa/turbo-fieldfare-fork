@@ -39,9 +39,19 @@ enum RemoteSnapshotLoader {
                                         audit: audit)
 
         let metadata = try IndexLoader.load(snapshotDir: metadataDirectory)
-        if requireKnownSource && SourceFingerprint.modelID(forIndexSha256: metadata.indexSha256Hex) == nil {
-            throw RepackError.sourceFingerprintRejected(path: metadata.indexPath,
-                                                        sha256: metadata.indexSha256Hex)
+        if requireKnownSource {
+            guard let pinnedModelID = SourceFingerprint.modelID(
+                forIndexSha256: metadata.indexSha256Hex) else {
+                throw RepackError.sourceFingerprintRejected(path: metadata.indexPath,
+                                                            sha256: metadata.indexSha256Hex)
+            }
+            // Two variants are pinned now; an index that is known but pinned
+            // for the other repository is not this source.
+            guard pinnedModelID == remote.repoID else {
+                throw RepackError.configurationInvalid(
+                    detail: "source index \(metadata.indexSha256Hex) is pinned for "
+                        + "\(pinnedModelID), not \(remote.repoID)")
+            }
         }
         let arch = try ArchInfo.load(configPath: metadata.configPath)
 

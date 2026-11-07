@@ -50,6 +50,28 @@ public struct RemoteStreamingRepackOptions: Sendable {
         self.rangeRetryAttempts = rangeRetryAttempts
         self.retryBaseDelayNs = retryBaseDelayNs
     }
+
+    /// The same request, planned but not executed: source metadata, shard
+    /// headers and header-only probes of the small files, then the plan and
+    /// the free-space check. No payload is fetched and no output is kept.
+    public func asDryRun() -> RemoteStreamingRepackOptions {
+        RemoteStreamingRepackOptions(repoID: repoID,
+                                     revision: revision,
+                                     outputDir: outputDir,
+                                     token: token,
+                                     requireKnownSource: requireKnownSource,
+                                     copyAuditPath: copyAuditPath,
+                                     rangeChunkBytes: rangeChunkBytes,
+                                     writeTileBytes: writeTileBytes,
+                                     minFreeReserveBytes: minFreeReserveBytes,
+                                     overwrite: overwrite,
+                                     resume: resume,
+                                     dryRunSpaceCheck: true,
+                                     downloadSession: downloadSession,
+                                     baseURL: baseURL,
+                                     rangeRetryAttempts: rangeRetryAttempts,
+                                     retryBaseDelayNs: retryBaseDelayNs)
+    }
 }
 
 public struct RemoteStreamingRepackResult: Sendable {
@@ -63,6 +85,10 @@ public struct RemoteStreamingRepackResult: Sendable {
     public let reusedBytes: UInt64
     public let downloadedThisRunBytes: UInt64
     public let dryRun: Bool
+    /// The planned output: bits per slot, file sizes, stride, alignment.
+    public let summary: RemoteRepackPlanSummary
+    /// Small-file sizes resolved by a dry run; nil after a real install.
+    public let metadataEstimate: RemoteRepackMetadataEstimate?
 }
 
 public final class RemoteStreamingRepacker {
@@ -137,6 +163,15 @@ public final class RemoteStreamingRepacker {
     }
 
     public static func discardPartial(outputDirectory: String) throws {
+        try discardPartial(outputDirectory: outputDirectory, expectedRepoID: nil)
+    }
+
+    /// Discards a saved download only if its checkpoint names `expectedRepoID`,
+    /// so asking to drop one variant's download cannot remove another's. A
+    /// missing or unreadable checkpoint is still discarded: that is the
+    /// recovery path for a damaged install state.
+    public static func discardPartial(outputDirectory: String,
+                                      expectedRepoID: String?) throws {
         let lock = try InstallLock.acquire(outputDirectory: outputDirectory)
         defer { withExtendedLifetime(lock) {} }
         let paths = lock.paths
@@ -144,6 +179,13 @@ public final class RemoteStreamingRepacker {
         let hasCheckpoint = try Posix.entryKind(paths.checkpointFile) != .absent
         guard hasPartial || hasCheckpoint else {
             throw RepackError.installStateMissing(path: paths.checkpointFile)
+        }
+        if let expectedRepoID,
+           hasCheckpoint,
+           let saved = try? RemoteInstallCheckpoint.load(from: paths.checkpointFile),
+           saved.repoID != expectedRepoID {
+            throw RepackError.installStateIncompatible(
+                detail: "saved download belongs to \(saved.repoID), not \(expectedRepoID)")
         }
         if hasPartial {
             try FileManager.default.removeItem(atPath: paths.partialDirectory)
@@ -165,7 +207,8 @@ public final class RemoteStreamingRepacker {
             guard saved.repoID == options.repoID,
                   saved.requestedRevision == options.revision else {
                 throw RepackError.installStateIncompatible(
-                    detail: "saved download belongs to a different source")
+                    detail: "saved download belongs to a different source "
+                        + "(\(saved.repoID) at \(saved.requestedRevision))")
             }
         }
         let retryPolicy = RemoteRetryPolicy(attempts: options.rangeRetryAttempts,
@@ -192,6 +235,9 @@ public final class RemoteStreamingRepacker {
                                                   rangeChunkBytes: options.rangeChunkBytes,
                                                   layoutMode: "identity",
                                                   layoutOrderSha256: nil)
+        // Derives the manifest's bits per slot now, so a source the manifest
+        // cannot describe fails before the payload transfer, not after it.
+        let summary = try RemoteRepackPlanSummary(plan: plan, rangePlan: rangePlan)
         var checkpoint = saved ?? RemoteInstallCheckpoint(
             repoID: options.repoID,
             requestedRevision: options.revision,
@@ -253,6 +299,7 @@ public final class RemoteStreamingRepacker {
         audit.packedExpertLayoutMode = "identity"
 
         if options.dryRunSpaceCheck {
+            let estimate = try await metadataEstimate(snapshot: snapshot, remote: remote)
             if saved == nil {
                 try? FileManager.default.removeItem(atPath: paths.partialDirectory)
             }
@@ -267,7 +314,9 @@ public final class RemoteStreamingRepacker {
                                                    $0 + $1.sourceBytes
                                                },
                                                downloadedThisRunBytes: 0,
-                                               dryRun: true)
+                                               dryRun: true,
+                                               summary: summary,
+                                               metadataEstimate: estimate)
         }
 
         if saved == nil {
@@ -374,8 +423,49 @@ public final class RemoteStreamingRepacker {
                                            reusedBytes: reusedBytes,
                                            downloadedThisRunBytes:
                                                audit.remoteBytesDownloaded - payloadDownloadStart,
-                                           dryRun: false)
+                                           dryRun: false,
+                                           summary: summary,
+                                           metadataEstimate: nil)
     }
+
+    /// Small files an install fetches or copies after the payload, sized with
+    /// header-only requests. Optional tokenizer files that are absent upstream
+    /// are skipped exactly as the install skips them.
+    private func metadataEstimate(snapshot: RemoteSnapshot,
+                                  remote: HuggingFaceRemoteSource) async throws
+        -> RemoteRepackMetadataEstimate {
+        var sourceBytes = snapshot.shardHeaders.reduce(UInt64(0)) { $0 + $1.payloadBaseOffset }
+        for name in ["model.safetensors.index.json", "config.json"] {
+            sourceBytes += snapshot.remoteFiles[name]?.size ?? 0
+        }
+        var tokenizerFiles: [String: UInt64] = [:]
+        if let config = snapshot.remoteFiles["config.json"] {
+            tokenizerFiles["config.json"] = config.size
+        }
+        let pinned = remote.pinned(commit: snapshot.resolvedCommit)
+        for file in Self.tokenizerSidecars {
+            try Task.checkCancellation()
+            do {
+                let info = try await pinned.resolveFileInfo(filename: file.name, audit: audit)
+                tokenizerFiles[file.name] = info.size
+            } catch {
+                if file.required || !isRemoteNotFound(error) {
+                    throw error
+                }
+            }
+        }
+        return RemoteRepackMetadataEstimate(sourceMetadataBytes: sourceBytes,
+                                            tokenizerFiles: tokenizerFiles)
+    }
+
+    /// Tokenizer files copied into `tokenizer/`, with their size caps.
+    private static let tokenizerSidecars: [(name: String, cap: UInt64, required: Bool)] = [
+        ("tokenizer.json", 64 * 1024 * 1024, true),
+        ("tokenizer_config.json", 4 * 1024 * 1024, true),
+        ("special_tokens_map.json", 1 * 1024 * 1024, false),
+        ("chat_template.jinja", 4 * 1024 * 1024, false),
+        ("chat_template.json", 4 * 1024 * 1024, false),
+    ]
 
     private func validateOptions() throws {
         guard options.rangeChunkBytes > 0,
@@ -519,14 +609,7 @@ public final class RemoteStreamingRepacker {
         }
 
         let pinned = remote.pinned(commit: snapshot.resolvedCommit)
-        let tokenizerFiles: [(name: String, cap: UInt64, required: Bool)] = [
-            ("tokenizer.json", 64 * 1024 * 1024, true),
-            ("tokenizer_config.json", 4 * 1024 * 1024, true),
-            ("special_tokens_map.json", 1 * 1024 * 1024, false),
-            ("chat_template.jinja", 4 * 1024 * 1024, false),
-            ("chat_template.json", 4 * 1024 * 1024, false),
-        ]
-        for file in tokenizerFiles {
+        for file in Self.tokenizerSidecars {
             try Task.checkCancellation()
             let info: RemoteFileInfo
             do {
@@ -564,30 +647,7 @@ public final class RemoteStreamingRepacker {
                                metadata: IndexLoader.SourceMetadata,
                                expertStride: UInt64,
                                resolvedCommit: String) throws {
-        var bits = GTurboJSON.QuantBitWidths(
-            embedding: 4,
-            attention: 4,
-            router: 8,
-            sharedExpert: 8,
-            routedExpert: 4)
-        for e in plan.resident.entries {
-            if e.name == "language_model.model.embed_tokens.weight", let s = e.quantSpec {
-                bits.embedding = s.bits
-            }
-            if e.name.hasSuffix(".self_attn.q_proj.weight"), let s = e.quantSpec {
-                bits.attention = s.bits
-            }
-            if e.name.hasSuffix(".router.proj.weight"), let s = e.quantSpec {
-                bits.router = s.bits
-            }
-            if e.name.hasSuffix(".mlp.gate_proj.weight"), let s = e.quantSpec {
-                bits.sharedExpert = s.bits
-            }
-        }
-        if let layer = plan.layers.first(where: { !$0.subTensors.isEmpty }),
-           let routedBits = layer.subTensors.first?.bitsForWeights {
-            bits.routedExpert = routedBits
-        }
+        let bits = try plan.manifestQuantBitWidths()
         let files = audit.outputFiles.map {
             ($0.relativePath, GTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }
