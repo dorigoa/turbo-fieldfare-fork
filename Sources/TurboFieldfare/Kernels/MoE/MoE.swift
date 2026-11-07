@@ -28,8 +28,48 @@ public struct MoEExpertOffsets {
     }
 }
 
+enum MoEError: Error, Equatable, CustomStringConvertible {
+    case unsupportedRoutedWeightBits(Int)
+
+    var description: String {
+        switch self {
+        case .unsupportedRoutedWeightBits(let bits):
+            "routed experts with \(bits)-bit weights are not supported; expected 4 or 8"
+        }
+    }
+}
+
+/// Router and routed-expert decode kernels.
+///
+/// `routedWeightBits` selects the routed phases: 4 uses the INT4 kernels of
+/// `moe.metal`, 8 their INT8 twins in `moe_int8.metal`. Both sets share the
+/// argument-buffer layout, the bindings and the dispatch geometry, so the
+/// `encodeRouted*` methods and the argument-buffer helpers keep one shape for
+/// both widths. The router is INT8 in both checkpoints and does not change.
 final class MoE {
     static let maxStreamedExperts = 8
+    static let supportedRoutedWeightBits: Set<Int> = [4, 8]
+
+    private struct RoutedKernelNames {
+        let phase1: String
+        let phase1Subset: String
+        let phase2Reduce: String
+
+        init?(routedWeightBits: Int) {
+            switch routedWeightBits {
+            case 4:
+                phase1 = "moe_phase1_gate_up_act_u16load"
+                phase1Subset = "moe_phase1_gate_up_act_subset_u16load"
+                phase2Reduce = "moe_phase2_down_reduce_k8"
+            case 8:
+                phase1 = "moe_phase1_gate_up_act_int8"
+                phase1Subset = "moe_phase1_gate_up_act_subset_int8"
+                phase2Reduce = "moe_phase2_down_reduce_k8_int8"
+            default:
+                return nil
+            }
+        }
+    }
 
     private static let realDecodeD: UInt32 = 2816
     private static let realDecodeF: UInt32 = 704
@@ -53,16 +93,23 @@ final class MoE {
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
-    private let phase1U16PSO: MTLComputePipelineState
-    private let phase1U16SpecializedPSO: MTLComputePipelineState
-    private let phase1SubsetU16PSO: MTLComputePipelineState
-    private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
+    private let phase1PSO: MTLComputePipelineState
+    private let phase1SpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetPSO: MTLComputePipelineState
+    private let phase1SubsetSpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
-    init(context: MetalContext) throws {
+    /// Weight width of the routed experts the `encodeRouted*` methods read.
+    let routedWeightBits: Int
+
+    init(context: MetalContext, routedWeightBits: Int = 4) throws {
+        guard let routedKernels = RoutedKernelNames(routedWeightBits: routedWeightBits) else {
+            throw MoEError.unsupportedRoutedWeightBits(routedWeightBits)
+        }
+        self.routedWeightBits = routedWeightBits
         let routerName = "router_gemv_gemma4_r4"
         self.routerGemvPSO = try context.pipeline(
             routerName,
@@ -76,24 +123,24 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
             constants: Self.realDecodeRouterConstants)
-        self.phase1U16PSO = try context.pipeline("moe_phase1_gate_up_act_u16load")
-        self.phase1U16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_u16load",
+        self.phase1PSO = try context.pipeline(routedKernels.phase1)
+        self.phase1SpecializedPSO = try context.pipeline(
+            routedKernels.phase1,
             constants: Self.realDecodeMoEConstants)
-        self.phase1SubsetU16PSO = try context.pipeline("moe_phase1_gate_up_act_subset_u16load")
-        self.phase1SubsetU16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_subset_u16load",
+        self.phase1SubsetPSO = try context.pipeline(routedKernels.phase1Subset)
+        self.phase1SubsetSpecializedPSO = try context.pipeline(
+            routedKernels.phase1Subset,
             constants: Self.realDecodeMoEConstants)
-        self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
+        self.phase2ReduceK8PSO = try context.pipeline(routedKernels.phase2Reduce)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8",
+            routedKernels.phase2Reduce,
             constants: Self.realDecodeMoEConstants)
 
         guard let logits = context.device.makeBuffer(
             length: 256 * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let phase1Function = context.library.makeFunction(
-                name: "moe_phase1_gate_up_act_u16load") else {
+                name: routedKernels.phase1) else {
             throw MetalError.noDevice
         }
         self.routerLogits = logits
@@ -189,14 +236,15 @@ final class MoE {
         topK: UInt32
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
+        validate(routedOffsets: routedOffsets)
         var dimension = d
         var intermediate = f
         var expertCount = topK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
-                ? phase1U16SpecializedPSO
-                : phase1U16PSO)
+                ? phase1SpecializedPSO
+                : phase1PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
@@ -228,6 +276,7 @@ final class MoE {
     ) {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
+        validate(routedOffsets: routedOffsets)
         precondition(activeSlotIndices.count == Int(activeCount))
         var dimension = d
         var intermediate = f
@@ -236,8 +285,8 @@ final class MoE {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
-                ? phase1SubsetU16SpecializedPSO
-                : phase1SubsetU16PSO)
+                ? phase1SubsetSpecializedPSO
+                : phase1SubsetPSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for slot in activeSlotIndices {
             encoder.useResource(routedBlobs[Int(slot)], usage: .read)
@@ -271,6 +320,7 @@ final class MoE {
         topK: UInt32
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
+        validate(routedOffsets: routedOffsets)
         var dimension = d
         var intermediate = f
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -297,6 +347,23 @@ final class MoE {
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
         precondition(topK == UInt32(Self.maxStreamedExperts))
         precondition(routedBlobs.count == Int(topK))
+    }
+
+    /// The INT8 kernels read weight rows through 4-byte loads and BF16 scales
+    /// and biases in place, so their sub-tensor offsets must be 4- and 2-byte
+    /// aligned. The INT4 kernels keep their existing contract, unchecked here.
+    private func validate(routedOffsets offsets: MoEExpertOffsets) {
+        guard routedWeightBits == 8 else { return }
+        precondition(Self.int8RoutedOffsetsAreAligned(offsets),
+                     "INT8 routed expert offsets need 4-byte weights and 2-byte scales and biases")
+    }
+
+    static func int8RoutedOffsetsAreAligned(_ offsets: MoEExpertOffsets) -> Bool {
+        [offsets.gateWOff, offsets.upWOff, offsets.downWOff]
+            .allSatisfy { $0.isMultiple(of: 4) }
+            && [offsets.gateSOff, offsets.gateBOff, offsets.upSOff,
+                offsets.upBOff, offsets.downSOff, offsets.downBOff]
+            .allSatisfy { $0.isMultiple(of: 2) }
     }
 
     private func encodeRoutedArgumentBuffer(_ buffer: MTLBuffer,
