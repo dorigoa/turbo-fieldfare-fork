@@ -95,6 +95,12 @@ import Darwin
 
     static func quant(sharedExpertBits: Int = 4,
                       routerBits: Int = 8) -> [String: Any] {
+        quant(embedding: 4, attention: 4, router: routerBits,
+              sharedExpert: sharedExpertBits, routedExpert: 4)
+    }
+
+    static func quant(embedding: Int, attention: Int, router: Int,
+                      sharedExpert: Int, routedExpert: Int) -> [String: Any] {
         func slot(_ bits: Int) -> [String: Any] {
             [
                 "weightBits": bits,
@@ -105,12 +111,53 @@ import Darwin
             ]
         }
         return [
-            "embedding": slot(4),
-            "attention": slot(4),
-            "router": slot(routerBits),
-            "sharedExpert": slot(sharedExpertBits),
-            "routedExpert": slot(4),
+            "embedding": slot(embedding),
+            "attention": slot(attention),
+            "router": slot(router),
+            "sharedExpert": slot(sharedExpert),
+            "routedExpert": slot(routedExpert),
         ]
+    }
+
+    /// The 8-bit checkpoint packs every quantized slot at 8 bits.
+    static func quantAffine8() -> [String: Any] {
+        quant(embedding: 8, attention: 8, router: 8, sharedExpert: 8, routedExpert: 8)
+    }
+
+    @Test func productionManifestAcceptsTheAffine8Profile() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quantAffine8()],
+            config: .gemma4_26B_A4B)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        let quant = try #require(manifest.quant)
+        #expect(try QuantProfile(manifestQuant: quant) == .affine8)
+    }
+
+    /// Slot-by-slot acceptance would let these through; each pairs bit widths
+    /// from the two profiles and so has no kernel set.
+    @Test(arguments: [
+        (8, 4, 8, 4, 4),
+        (4, 8, 8, 4, 4),
+        (4, 4, 8, 4, 8),
+        (8, 8, 8, 8, 4),
+        (8, 8, 8, 4, 8),
+        (8, 8, 4, 8, 8),
+    ])
+    func productionManifestRejectsMixedProfiles(
+        bits: (Int, Int, Int, Int, Int)
+    ) throws {
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(embedding: bits.0, attention: bits.1, router: bits.2,
+                                 sharedExpert: bits.3, routedExpert: bits.4)],
+            config: .gemma4_26B_A4B)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: config)
+        } throws: { error in
+            guard case ModelError.indexCorrupt(let detail) = error else { return false }
+            return detail.contains("unsupported quantization profile")
+        }
     }
 
     @Test func loadsValidManifest() throws {

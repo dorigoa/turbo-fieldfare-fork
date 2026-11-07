@@ -139,4 +139,72 @@ import Foundation
     @Test func contextCeilingComesFromTheCheckpoint() {
         #expect(config.maxPositionEmbeddings == 262_144)
     }
+
+    // MARK: - Footprint per quantization profile
+
+    /// Every figure above is the 4-bit pack's; naming its footprint must not
+    /// move any of them.
+    @Test func explicitAffine4FootprintMatchesTheDefaults() {
+        for context in [4_096, 8_192, 131_072, 262_144] {
+            for slots in [8, 16, 32] {
+                #expect(ContextAdmission.minimumHostMemoryBytes(
+                            config: config, maxContext: context, expertCacheSlots: slots,
+                            footprint: .affine4Measured)
+                        == ContextAdmission.minimumHostMemoryBytes(
+                            config: config, maxContext: context, expertCacheSlots: slots))
+            }
+        }
+        #expect(ModelFootprint.affine4Measured.nonKVRuntimeBytes
+                == ContextAdmission.nonKVRuntimeFootprintBytes)
+        #expect(ModelFootprint.affine4Measured.hostReserveBytes
+                == ContextAdmission.hostReserveBytes)
+        #expect(ModelFootprint.forProfile(.affine4) == .affine4Measured)
+        #expect(ModelFootprint.forProfile(.affine8) == .affine8Provisional)
+    }
+
+    /// The 8-bit pack is refused on an 8 GB Mac at every context and admitted
+    /// on a 16 GB Mac at the app's default sizes.
+    @Test func affine8IsRefusedOnEightGigabytesAndAdmittedOnSixteen() {
+        let footprint = ModelFootprint.affine8Provisional
+        for context in [4_096, 8_192, 32_768] {
+            let eight = ContextAdmission.availability(config: config, maxContext: context,
+                                                      hostMemoryBytes: eightGigabyteHost,
+                                                      footprint: footprint)
+            #expect(eight != .available, "context \(context)")
+            #expect(ContextAdmission.availability(config: config, maxContext: context,
+                                                  hostMemoryBytes: sixteenGigabyteHost,
+                                                  footprint: footprint) == .available,
+                    "context \(context)")
+        }
+        let message = ContextAdmission.needDescription(config: config, maxContext: 8_192,
+                                                       hostMemoryBytes: eightGigabyteHost,
+                                                       footprint: footprint)
+        #expect(message.contains("needs 16 GB"))
+    }
+
+    @Test func affine8ChargesExtraSlotsAtItsOwnStride() {
+        let footprint = ModelFootprint.affine8Provisional
+        let page = Int(getpagesize())
+        let slotBytes = ((6_324_224 + page - 1) / page) * page
+        let baseline = ContextAdmission.minimumHostMemoryBytes(
+            config: config, maxContext: 8_192, footprint: footprint)
+        #expect(ContextAdmission.minimumHostMemoryBytes(
+                    config: config, maxContext: 8_192, expertCacheSlots: 32,
+                    footprint: footprint)
+                == baseline + UInt64(16 * 30 * slotBytes))
+    }
+
+    @Test func footprintIsReadFromTheInstalledManifest() throws {
+        let (affine8Directory, _) = try ManifestReaderTests.writeToyManifest(
+            ["quant": ManifestReaderTests.quantAffine8()],
+            config: config)
+        defer { try? FileManager.default.removeItem(at: affine8Directory) }
+        #expect(try ModelFootprint.forModelDirectory(affine8Directory) == .affine8Provisional)
+
+        let (affine4Directory, _) = try ManifestReaderTests.writeToyManifest(
+            ["quant": ManifestReaderTests.quant()],
+            config: config)
+        defer { try? FileManager.default.removeItem(at: affine4Directory) }
+        #expect(try ModelFootprint.forModelDirectory(affine4Directory) == .affine4Measured)
+    }
 }

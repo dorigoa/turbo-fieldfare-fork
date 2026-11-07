@@ -141,6 +141,12 @@ public final class MetalContext: @unchecked Sendable {
         "fused",
         "prefill",
         "vision",
+        // INT8 affine modules come after the 4-bit ones they may reuse
+        // structs, helpers and function constants from.
+        "dequant_int8_dense",
+        "moe_int8",
+        "prefill_int8",
+        "prefill_moe_int8",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -148,13 +154,18 @@ public final class MetalContext: @unchecked Sendable {
         "attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
+        "dequant_int8_dense": "Metal/Quant",
         "fused": "Metal/Fusions",
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
+        "moe_int8": "Metal/MoE",
         "prefill": "Metal/Prefill",
+        "prefill_int8": "Metal/Prefill",
+        "prefill_moe_int8": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",
+        "tensorops_int8": "Metal/TensorCore",
         "utility": "Metal/Primitives",
         "vision": "Metal/Vision",
         "vision_register_gemm": "Metal/Vision",

@@ -35,6 +35,16 @@ public struct Model {
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
+    /// The quantization profile this model was packed with. `Model.load`
+    /// admits only manifests that carry `quant` (runtime schema) and map to a
+    /// profile (`ManifestReader`), so a loaded model always has one.
+    public var quantProfile: QuantProfile {
+        guard let quant = manifest.quant,
+              let profile = try? QuantProfile(manifestQuant: quant) else {
+            preconditionFailure("a loaded model must carry a supported quantization profile")
+        }
+        return profile
+    }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex

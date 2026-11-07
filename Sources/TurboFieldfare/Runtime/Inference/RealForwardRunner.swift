@@ -226,8 +226,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private var rdadviseAdaptiveState: RDAdviceAdaptivePolicyState
     private var rdadviseAdaptivePosition: Int = -1
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
+    /// Refuses a profile this runner has no kernel set for. Only `affine4`
+    /// runs until the 8-bit kernels are wired in; an 8-bit model must fail
+    /// here rather than reach the 4-bit unpack with 8-bit bytes.
+    static func requireSupportedProfile(_ profile: QuantProfile) throws {
+        guard profile == .affine4 else {
+            throw QuantProfileError.runtimeKernelsUnavailable(profile)
+        }
+    }
+
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
+        try RealForwardRunner.requireSupportedProfile(model.quantProfile)
         self.model = model
         self.ctx = context
         self.cfg = model.config

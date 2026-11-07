@@ -139,22 +139,24 @@ public enum ManifestReader {
     }
 
     private static func validateQuant(_ quant: ManifestQuant) throws {
-        let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4]),
-            ("attention", quant.attention, [4]),
-            ("router", quant.router, [8]),
-            ("sharedExpert", quant.sharedExpert, [4, 8]),
-            ("routedExpert", quant.routedExpert, [4]),
+        let slots: [(String, ManifestQuantSlot)] = [
+            ("embedding", quant.embedding),
+            ("attention", quant.attention),
+            ("router", quant.router),
+            ("sharedExpert", quant.sharedExpert),
+            ("routedExpert", quant.routedExpert),
         ]
-        for (name, slot, allowedBits) in slots {
-            guard allowedBits.contains(slot.weightBits),
-                  slot.scheme.lowercased() == "affine",
+        for (name, slot) in slots {
+            guard slot.scheme.lowercased() == "affine",
                   slot.scaleType.lowercased() == "bf16",
                   slot.biasType.lowercased() == "bf16",
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
         }
+        // Bit widths are accepted only as one of the profiles the runtime
+        // has kernels for, never slot by slot.
+        _ = try QuantProfile(manifestQuant: quant)
     }
 
     private static func validateArch(_ a: ManifestArch,
