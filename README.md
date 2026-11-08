@@ -58,7 +58,8 @@ Mac app and its sibling decode-service executable.
 
 When the app opens, choose **Download Model** and let TurboFieldfare fetch and repack
 the pinned model (about 15 GB). Once it is ready, choose **Load Model**, type
-your prompt, and press **Generate**.
+your prompt, and press **Generate**. The 4-bit model is the default; see
+[Model variants](#model-variants) for the experimental 8-bit one.
 
 ## At a glance
 
@@ -69,13 +70,16 @@ your prompt, and press **Generate**.
 | Memory          | ~2 GB of weights and 4K KV cache                                                                                         |
 | Storage         | About 14.3 GB for the text model, plus about 1.1 GB for the optional image pack                                          |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
+| 8-bit variant   | Experimental, pending validation: MLX affine 8-bit in every slot; about 26.9 GB installed; needs 16 GB of RAM (estimate). See [Model variants](#model-variants) |
 | Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
 | M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
 | M5 measured decode | [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
 | Community Reports | [Here](docs/COMMUNITY_BENCHMARKS.md#community-results) |
 
-The measured result is a reference point, not a performance ceiling. Prompt
-length, generated length, page-cache state, and hardware all affect throughput.
+Apart from the 8-bit row, the table describes the default 4-bit model, and
+every measured figure comes from it. The measured result is a reference point, not a performance
+ceiling. Prompt length, generated length, page-cache state, and hardware all
+affect throughput.
 See [community benchmark results](docs/COMMUNITY_BENCHMARKS.md#community-results)
 from other Macs, or follow the
 [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) to add your own.
@@ -99,13 +103,39 @@ The Swift package exposes six products:
 
 ### Requirements
 
-- An Apple Silicon Mac; the validated target is an 8 GB M2 MacBook Air
+- An Apple Silicon Mac; the validated target is an 8 GB M2 MacBook Air. The
+  experimental 8-bit variant needs 16 GB of RAM or more
 - macOS 26 with Metal 4
 - Apple Command Line Tools or Xcode with Swift 6.2+ and the macOS 26 SDK or newer
-- Enough free storage for the ~14.3 GB model installation
+- Enough free storage for the model installation: about 14.3 GB for the 4-bit
+  model, about 26.9 GB for the 8-bit one
 - An internet connection for the first model install
 
 The package is arm64-only. Older macOS and Metal versions are not supported.
+
+### Model variants
+
+TurboFieldfare installs either of two pinned MLX quantizations of the same
+Gemma 4 26B-A4B IT checkpoint. They share the architecture, tokenizer, and
+tensor names; only the weight bit widths differ.
+
+| Variant | Source | Download | Installed | Memory |
+| --- | --- | ---: | ---: | --- |
+| 4-bit (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | About 14.6 GB | About 14.3 GB | 8 GB Mac or larger |
+| 8-bit (experimental, pending validation) | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | About 27.0 GB | About 26.9 GB | 16 GB Mac or larger (estimate) |
+
+No speed or quality result has been published for the 8-bit variant yet. Its
+sizes are planned from the pinned checkpoint's metadata with `--dry-run`, not
+read from a completed install. Its memory check uses a conservative estimate
+that refuses an 8 GB Mac at every context length; a measurement will replace
+it.
+
+Install each variant in its own directory: `gemma4.gturbo` for the 4-bit model
+and `gemma4-8bit.gturbo` for the 8-bit one. Both can stay installed. The Mac app
+switches between them with **Settings > Model Variant**. The CLI and the server
+use the directory passed with `--model`, read its variant from the manifest,
+size the memory check for it, and report it. A build from before the 8-bit
+variant refuses an 8-bit installation when it loads it.
 
 ### Prompting the model
 
@@ -143,8 +173,9 @@ swift build -c release
 ```
 
 Build the complete package so the app and its sibling decode service are both
-available. New installs from this checkout default to `scratch/gemma4.gturbo`;
-the app remembers a location you choose.
+available. New installs from this checkout default to `scratch/gemma4.gturbo`,
+or `scratch/gemma4-8bit.gturbo` for the 8-bit variant; the app remembers a
+location you choose for each variant.
 
 #### Build a Mac app
 
@@ -162,7 +193,9 @@ account is required.
 
 #### Install the model
 
-Choose **Download Model** to install, or **Change…** to pick a destination.
+Choose the variant first with **Settings > Model Variant**; the 4-bit model
+is the default. Choose **Download Model** to install, or **Change…** to pick a
+destination.
 To reuse a model, choose **Use Existing Model…** and select its `.gturbo`
 folder or parent folder. If several models are found, pick one.
 Keep the optional image pack beside its text model: `gemma4.gturbo` and
@@ -174,10 +207,11 @@ directly into the `.gturbo` layout as they arrive. This avoids a second full
 checkpoint on disk and keeps scratch memory bounded.
 
 The first installation transfers about 15 GB through bounded Hugging Face
-range requests. Network speed and Hugging Face response times vary, so it can
-take a while. The completed `.gturbo` installation occupies about 14.3 GB and
-is accepted only after its manifest and file hashes have been validated.
-Installation does not load the model into memory.
+range requests, or about 27 GB for the 8-bit variant. Network speed and
+Hugging Face response times vary, so it can take a while. The completed
+`.gturbo` installation occupies about 14.3 GB (about 26.9 GB for the 8-bit
+variant) and is accepted only after its manifest and file hashes have been
+validated. Installation does not load the model into memory.
 
 #### Load and generate
 
@@ -238,10 +272,35 @@ swift run -c release TurboFieldfareRepack \
   --output scratch/gemma4.gturbo
 ```
 
+The commands above install the default 4-bit model. Add `--variant int8` to
+install the 8-bit variant, in its own directory:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --variant int8 \
+  --output scratch/gemma4-8bit.gturbo
+```
+
+`--variant` accepts `int4` (the default) and `int8`. A resumed download needs
+the `--variant` it was started with, and a discard given a `--variant` removes
+only a download of that variant.
+
+Preview an installation without downloading any payload. `--dry-run` reads
+only the source metadata and shard headers, then prints the download and
+output sizes, the bits of every quantization slot, and the expert stride:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --variant int8 \
+  --dry-run \
+  --output scratch/gemma4-8bit.gturbo
+```
+
 The runtime accepts only a completed `.gturbo` directory with a final
 `manifest.json`.
 
-Verify an existing installation without loading the model:
+Verify an existing installation without loading the model. The verifier reads
+the variant from the installed manifest, so it takes no `--variant`:
 
 ```bash
 swift run -c release TurboFieldfareRepack \
@@ -303,6 +362,10 @@ This formats messages in the same way as the Mac app. The CLI response limit
 is set with `--max-new`, which defaults to 1,024 tokens. The Mac app can
 generate until the selected context window is full.
 
+Every CLI command takes either variant: pass `--model scratch/gemma4-8bit.gturbo`
+to run the 8-bit one. The CLI reads the variant from the model's manifest and
+needs no other flag.
+
 Common generation options include `--max-context`, `--temperature`, `--top-k`,
 `--top-p`, `--repetition-penalty`, `--seed`, and repeatable `--stop` strings.
 Runtime options include `--expert-cache-slots`, `--expert-cache-policy`,
@@ -314,8 +377,13 @@ for the complete option list:
 swift run -c release TurboFieldfareCLI --help
 ```
 
-Generated text goes to standard output. Timing statistics go to standard error;
-add `--quiet` to suppress that footer in scripts.
+Generated text goes to standard output. Timing statistics go to standard error
+in a two-line footer: a variant line such as
+`[variant=8-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit]`,
+then the `[stop=...]` timing line, which keeps its format and stays last. Add
+`--quiet` to suppress that footer in scripts. When the selected context exceeds
+the memory estimate for the model's variant, the CLI prints a `[memory: ...]`
+warning that names the variant, and continues.
 
 ### Local OpenAI-compatible server
 
@@ -331,6 +399,10 @@ It listens on `http://127.0.0.1:8080/v1` and supports Chat Completions,
 streaming, function tools, and single-prefix prompt reuse. The client must
 authorize and run every tool call. Keep the server on loopback; it has no
 remote authentication or TLS.
+
+Requests name the 4-bit model as `gemma-4-26b-a4b-it`. An 8-bit model answers
+to its manifest's model ID, `mlx-community/gemma-4-26b-a4b-it-8bit`;
+`--model-id` sets another name for either.
 
 See [Local server](docs/OPENAI_SERVER.md) for a test request, Python and
 OpenCode setup, prompt reuse, tool handling, and the supported API subset.

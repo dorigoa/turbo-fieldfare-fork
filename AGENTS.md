@@ -18,6 +18,8 @@ Mac app.
 ```bash
 swift run -c release TurboFieldfareRepack --output scratch/gemma4.gturbo
 swift run -c release TurboFieldfareRepack --output scratch/gemma4.gturbo --resume
+swift run -c release TurboFieldfareRepack --variant int8 --dry-run --output scratch/gemma4-8bit.gturbo
+swift run -c release TurboFieldfareRepack --variant int8 --output scratch/gemma4-8bit.gturbo
 swift build -c release
 .build/release/TurboFieldfareMac
 Scripts/build_app.sh
@@ -25,9 +27,13 @@ swift run -c release TurboFieldfareCLI \
   --model scratch/gemma4.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
+swift run -c release TurboFieldfareCLI \
+  --model scratch/gemma4-8bit.gturbo \
+  --prompt "The capital of France is" \
+  --max-new 64
 ```
 
-The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB. Cancellation preserves verified completed ranges; continue them with `--resume` or remove them with `--discard-partial --output scratch/gemma4.gturbo`.
+The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB for the default 4-bit model (`--variant int4`) and about 27 GB for the experimental 8-bit one (`--variant int8`), which needs a 16 GB Mac or larger; do not download the 8-bit checkpoint unless the user asks. `--dry-run` reads only metadata and shard headers. Keep each variant in its own directory. Cancellation preserves verified completed ranges; continue them with `--resume` and the same `--variant`, or remove them with `--discard-partial --output scratch/gemma4.gturbo`. The CLI and server read the variant from the manifest of the `--model` directory and print it.
 
 ## Local server
 
@@ -53,7 +59,7 @@ or Preview macros. Run `ruby Scripts/check_swiftui_macros.rb --self-test` and
 
 ## Test rules
 
-Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo` or `scratch/gemma4-8bit.gturbo` (the variant the run uses), and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 
@@ -62,11 +68,11 @@ directory so settings and history stay separate. `TURBO_FIELDFARE_MODEL_PATH`
 overrides the saved model location and disables location changes in the UI.
 See [Build a Mac app](README.md#build-a-mac-app) for bundle instructions.
 
-For performance results, build release once and follow the [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable experimental controls or profiling.
+For performance results, build release once and follow the [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable experimental controls or profiling. Name the model variant in every result.
 
 Do not download a full checkpoint, duplicate the `.gturbo` model, create a worktree, or purge caches just to run tests.
 
-Report the commit, hardware and RAM, macOS, Swift version, exact command, exit code, complete timing footer or error, and every protocol deviation. Treat results as measurements, not performance ceilings.
+Report the commit, hardware and RAM, macOS, Swift version, model variant, exact command, exit code, complete timing footer or error, and every protocol deviation. Treat results as measurements, not performance ceilings.
 
 ## App controls
 

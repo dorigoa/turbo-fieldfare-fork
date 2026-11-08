@@ -14,6 +14,11 @@ The frozen prompts are in
 Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 `64`, Top-P `0.95`, a 4,096-token context, and up to 1,024 generated tokens.
 
+Every report must name the model variant it ran, `4-bit` or `8-bit`. The
+protocol is the same for both; only the model directory changes. Results from
+different variants are separate measurements and are never compared as one
+series.
+
 ## Prepare the Mac
 
 Install the model with the [README instructions](../README.md#command-line-interface),
@@ -32,6 +37,19 @@ pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|Tu
 
 Continue only when that command prints nothing.
 
+Choose the model in the same shell that runs the commands below. The default
+4-bit model:
+
+```bash
+model=scratch/gemma4.gturbo
+```
+
+Or the experimental 8-bit variant, which needs 16 GB of RAM or more:
+
+```bash
+model=scratch/gemma4-8bit.gturbo
+```
+
 ## Record the machine
 
 ```bash
@@ -43,7 +61,8 @@ mkdir -p benchmark-results/system benchmark-results/warmup benchmark-results/mea
   swift --version
   system_profiler SPHardwareDataType |
     awk -F': ' '/Model Name|Model Identifier|Chip|Total Number of Cores|Memory/ { print $1 ": " $2 }'
-  shasum -a 256 scratch/gemma4.gturbo/manifest.json
+  echo "model: $model"
+  shasum -a 256 "$model/manifest.json"
   shasum -a 256 docs/benchmark-prompts/real-generation-v1/*.json
 } 2>&1 | tee benchmark-results/system/system.txt
 ```
@@ -66,7 +85,7 @@ for case_seed in \
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
   .build/release/TurboFieldfareCLI \
-    --model scratch/gemma4.gturbo \
+    --model "$model" \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --max-new 1024 \
     --max-context 4096 \
@@ -89,7 +108,7 @@ for case_seed in \
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
   .build/release/TurboFieldfareCLI \
-    --model scratch/gemma4.gturbo \
+    --model "$model" \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --max-new 1024 \
     --max-context 4096 \
@@ -101,19 +120,25 @@ for case_seed in \
     2> "benchmark-results/measured/${case_id}.stderr"
 done
 
-grep -h '^\[stop=' benchmark-results/measured/*.stderr |
+grep -h -E '^\[(variant|stop)=' benchmark-results/measured/*.stderr |
   tee benchmark-results/summary.txt
 ```
 
-Every measured footer must say `stop=endOfTurn`. Read the three output files as
+Each measured footer has two lines: `[variant=...]` names the model variant
+and the model ID from its manifest, and `[stop=...]` carries the timing. Every
+measured footer must say `stop=endOfTurn`, and all three must name the same
+variant. Read the three output files as
 well: reject the result if an answer loops, repeats a block, or ends incomplete.
 Report the prompt and generated token counts from each footer because different
 output tokens create a different routing workload.
 
 ## Report the result
 
-Open an issue titled `Benchmark: <chip>, <memory>, <macOS version>` and include:
+Open an issue titled `Benchmark: <chip>, <memory>, <macOS version>, <variant>`
+and include:
 
+- the model variant, `4-bit` or `8-bit` (required), as the footers'
+  `[variant=...]` lines show it;
 - `benchmark-results/system/system.txt`;
 - `benchmark-results/summary.txt`;
 - the three measured stdout and stderr files;
@@ -121,15 +146,16 @@ Open an issue titled `Benchmark: <chip>, <memory>, <macOS version>` and include:
   workload; and
 - any output-quality problem or protocol change.
 
-Compare rows only when the case, prompt tokens, generated tokens, settings, and
-stop reason match. The [reference M5 range](BENCHMARKS.md#m5-measured-decode)
+Compare rows only when the variant, case, prompt tokens, generated tokens,
+settings, and stop reason match. The [reference M5 range](BENCHMARKS.md#m5-measured-decode)
 uses controlled non-repeating continuations for stable token-for-token
 measurement, while this public protocol checks autonomous product generation.
 
 ## Community results
 
 These measurements were submitted by GitHub users. They are collected here
-for reference, not as a controlled hardware comparison.
+for reference, not as a controlled hardware comparison. Every row below ran
+the 4-bit model; no 8-bit result has been submitted yet.
 Prompt length, generated tokens, storage, cache state, and the number of runs
 all affect decode speed.
 
