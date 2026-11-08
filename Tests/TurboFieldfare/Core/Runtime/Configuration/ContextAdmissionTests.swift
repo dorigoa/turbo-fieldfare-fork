@@ -159,13 +159,34 @@ import Foundation
         #expect(ModelFootprint.affine4Measured.hostReserveBytes
                 == ContextAdmission.hostReserveBytes)
         #expect(ModelFootprint.forProfile(.affine4) == .affine4Measured)
-        #expect(ModelFootprint.forProfile(.affine8) == .affine8Provisional)
+        #expect(ModelFootprint.forProfile(.affine8) == .affine8Measured)
+        #expect(ModelFootprint.affine8Provisional == .affine8Measured)
+    }
+
+    /// S9's measurements on a 32 GB M5 (`/usr/bin/time -l`, long-synthesis
+    /// prompt, 256 new tokens): the projection must cover every peak physical
+    /// footprint the 8-bit pack reached, at each context and slot count.
+    @Test func affine8ProjectionCoversTheMeasuredFootprints() {
+        let measured: [(context: Int, slots: Int, peakFootprint: UInt64)] = [
+            (4_096, 16, 3_653_817_216),
+            (4_096, 32, 6_694_919_872),
+            (8_192, 16, 3_732_067_200),
+            (8_192, 32, 6_783_786_712),
+        ]
+        for run in measured {
+            let projected = ContextAdmission.projectedFootprintBytes(
+                config: config, maxContext: run.context, expertCacheSlots: run.slots,
+                footprint: .affine8Measured)
+            #expect(projected >= run.peakFootprint, "context \(run.context), \(run.slots) slots")
+            #expect(projected - run.peakFootprint < 1 << 29,
+                    "context \(run.context), \(run.slots) slots: margin above half a GiB")
+        }
     }
 
     /// The 8-bit pack is refused on an 8 GB Mac at every context and admitted
     /// on a 16 GB Mac at the app's default sizes.
     @Test func affine8IsRefusedOnEightGigabytesAndAdmittedOnSixteen() {
-        let footprint = ModelFootprint.affine8Provisional
+        let footprint = ModelFootprint.affine8Measured
         for context in [4_096, 8_192, 32_768] {
             let eight = ContextAdmission.availability(config: config, maxContext: context,
                                                       hostMemoryBytes: eightGigabyteHost,
@@ -183,7 +204,7 @@ import Foundation
     }
 
     @Test func affine8ChargesExtraSlotsAtItsOwnStride() {
-        let footprint = ModelFootprint.affine8Provisional
+        let footprint = ModelFootprint.affine8Measured
         let page = Int(getpagesize())
         let slotBytes = ((6_324_224 + page - 1) / page) * page
         let baseline = ContextAdmission.minimumHostMemoryBytes(
@@ -199,7 +220,7 @@ import Foundation
             ["quant": ManifestReaderTests.quantAffine8()],
             config: config)
         defer { try? FileManager.default.removeItem(at: affine8Directory) }
-        #expect(try ModelFootprint.forModelDirectory(affine8Directory) == .affine8Provisional)
+        #expect(try ModelFootprint.forModelDirectory(affine8Directory) == .affine8Measured)
 
         let (affine4Directory, _) = try ManifestReaderTests.writeToyManifest(
             ["quant": ManifestReaderTests.quant()],
