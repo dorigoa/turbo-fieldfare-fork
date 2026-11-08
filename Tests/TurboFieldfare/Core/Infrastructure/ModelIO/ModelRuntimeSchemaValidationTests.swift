@@ -197,6 +197,139 @@ import Testing
         }
     }
 
+    // MARK: - affine8 resident alignment (D11)
+
+    /// One quantized resident weight per manifest slot the rule covers.
+    private static let affine8QuantizedResidentWeights = [
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.layers.0.self_attn.q_proj.weight",
+        "language_model.model.layers.1.self_attn.o_proj.weight",
+        "language_model.model.layers.0.mlp.down_proj.weight",
+        "language_model.model.layers.1.router.proj.weight",
+    ]
+
+    @Test func acceptsAnAffine8InstallAlignedToSixteenBytes() throws {
+        let directory = try AffineToyModel.write(profile: .affine8)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let model = try Model.load(directoryURL: directory, device: device,
+                                   expecting: AffineToyModel.config)
+        #expect(model.quantProfile == .affine8)
+        let quantized = model.residentIndex.entries.values.filter { $0.dtype == 0 }
+        #expect(!quantized.isEmpty)
+        #expect(quantized.allSatisfy {
+            $0.fileOffset % Model.affine8ResidentWeightAlignment == 0
+        })
+    }
+
+    @Test(arguments: affine8QuantizedResidentWeights)
+    func rejectsAnAffine8ResidentWeightOffTheSixteenByteGrid(name: String) throws {
+        let model = try loadAffineToy(.affine8)
+        for shift: UInt64 in [2, 4, 8] {
+            let index = try shiftingResidentWeight(model.residentIndex, name: name, by: shift)
+            let detail = try #require(schemaFailure(
+                residentIndex: index, layout: model.packedExpertsLayout,
+                manifest: model.manifest, config: AffineToyModel.config))
+            #expect(detail.contains(name))
+            #expect(detail.contains("16-byte"))
+            #expect(detail.contains("reinstall"))
+        }
+    }
+
+    @Test func refusesToLoadAMisalignedAffine8Install() throws {
+        let name = "language_model.model.layers.0.self_attn.k_proj.weight"
+        let directory = try AffineToyModel.write(profile: .affine8, shiftedResidentWeight: name)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        do {
+            _ = try Model.load(directoryURL: directory, device: device,
+                               expecting: AffineToyModel.config)
+            Issue.record("a misaligned affine8 install loaded")
+        } catch let error as ModelError {
+            let detail = String(describing: error)
+            #expect(detail.contains(name))
+            #expect(detail.contains("reinstall"))
+        }
+    }
+
+    /// The rule is `affine8` only: a 4-bit install keeps its 2-byte weight
+    /// grid, 4-bit weights off the 16-byte grid still load, and an 8-bit
+    /// router in an `affine4` model keeps its byte grid.
+    @Test func affine4KeepsItsResidentAlignmentRules() throws {
+        let model = try loadAffineToy(.affine4)
+        let projection = "language_model.model.layers.0.self_attn.q_proj.weight"
+        let router = "language_model.model.layers.0.router.proj.weight"
+        for (name, shift) in [(projection, UInt64(2)), (projection, 4), (router, 1), (router, 4)] {
+            let index = try shiftingResidentWeight(model.residentIndex, name: name, by: shift)
+            #expect(schemaFailure(residentIndex: index, layout: model.packedExpertsLayout,
+                                      manifest: model.manifest,
+                                      config: AffineToyModel.config) == nil,
+                    "\(name) shifted by \(shift)")
+        }
+        let odd = try shiftingResidentWeight(model.residentIndex, name: projection, by: 1)
+        #expect(schemaFailure(residentIndex: odd, layout: model.packedExpertsLayout,
+                                  manifest: model.manifest,
+                                  config: AffineToyModel.config) != nil)
+    }
+
+    /// The routed checks the INT8 routed kernels rely on (weights on 4 bytes,
+    /// scales and biases on 2) already hold for both widths.
+    @Test func rejectsAffine8RoutedRolesOffTheirGrid() throws {
+        let model = try loadAffineToy(.affine8)
+        let gate = try #require(model.packedExpertsLayout.layers[0].experts[0].subTensors["gate"])
+        let scales = try #require(
+            model.packedExpertsLayout.layers[0].experts[0].subTensors["gate_scales"])
+        for (role, entry) in [
+            ("gate", SubTensorEntry(offset: gate.offset + 2, size: gate.size, dtype: gate.dtype,
+                                    shape: gate.shape, bits: gate.bits)),
+            ("gate_scales", SubTensorEntry(offset: scales.offset + 1, size: scales.size,
+                                           dtype: scales.dtype, shape: scales.shape,
+                                           bits: scales.bits)),
+        ] {
+            let layout = replacingRoleForAllExperts(model.packedExpertsLayout,
+                                                    layer: 0, role: role, with: entry)
+            #expect(throws: ModelError.self) {
+                try Model.validateRuntimeSchema(
+                    residentIndex: model.residentIndex,
+                    layout: layout,
+                    manifest: model.manifest,
+                    config: AffineToyModel.config)
+            }
+        }
+    }
+
+    private func loadAffineToy(_ profile: QuantProfile) throws -> Model {
+        let directory = try AffineToyModel.write(profile: profile)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        return try Model.load(directoryURL: directory, device: device,
+                              expecting: AffineToyModel.config)
+    }
+
+    /// Moves one resident weight forward by `shift` bytes, keeping its size,
+    /// scales and biases, so only its alignment changes.
+    private func shiftingResidentWeight(_ index: ResidentIndex,
+                                        name: String,
+                                        by shift: UInt64) throws -> ResidentIndex {
+        let entry = try #require(index.entries[name])
+        var entries = index.entries
+        entries[name] = copy(entry, fileOffset: entry.fileOffset + shift)
+        return ResidentIndex(header: index.header, entries: entries)
+    }
+
+    /// The schema failure's text, or nil when the schema is accepted.
+    private func schemaFailure(residentIndex: ResidentIndex,
+                               layout: PackedExpertsLayout,
+                               manifest: Manifest,
+                               config: ArchConfig) -> String? {
+        do {
+            try Model.validateRuntimeSchema(residentIndex: residentIndex,
+                                            layout: layout,
+                                            manifest: manifest,
+                                            config: config)
+            return nil
+        } catch {
+            return String(describing: error)
+        }
+    }
+
     private func loadToy() throws -> Model {
         let directory = try ModelLoaderTests.writeToySynthetic()
         let device = try #require(MTLCreateSystemDefaultDevice())

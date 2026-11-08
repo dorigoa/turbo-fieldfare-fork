@@ -515,6 +515,12 @@ extension Model {
         }
     }
 
+    /// Byte alignment every quantized resident weight of an `affine8` model
+    /// must start on. The INT8 kernels read weights as 32-bit words, and the
+    /// `affine8` installer pads each resident weight to this boundary. The
+    /// `affine4` layout is older than the rule and keeps its own alignment.
+    static let affine8ResidentWeightAlignment: UInt64 = 16
+
     static func validateRuntimeSchema(residentIndex: ResidentIndex,
                                       layout: PackedExpertsLayout,
                                       manifest: Manifest,
@@ -523,6 +529,7 @@ extension Model {
             throw ModelError.indexCorrupt(
                 detail: "manifest.quant is required by the executable runtime schema")
         }
+        let profile = try QuantProfile(manifestQuant: quant)
 
         func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
             let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
@@ -614,6 +621,21 @@ extension Model {
                   entry.biasOffset % UInt64(MemoryLayout<UInt16>.alignment) == 0 else {
                 throw ModelError.indexCorrupt(
                     detail: "\(name) affine metadata mismatch: dtype=\(entry.dtype), shape=[\(entry.shape.0),\(entry.shape.1),\(entry.shape.2),\(entry.shape.3)], bytes=\(entry.sizeBytes), scales=\(entry.scaleSize), biases=\(entry.biasSize), expected shape=[\(expected.shape.0),\(expected.shape.1),0,0], bytes=\(expected.weight), aux=\(expected.aux)")
+            }
+            if profile == .affine8 {
+                // The resident buffer maps the file from `indexSize`, so the
+                // GPU sees `fileOffset - indexSize`: both must sit on the
+                // boundary for the kernels' word loads to be aligned.
+                let alignment = affine8ResidentWeightAlignment
+                guard entry.fileOffset % alignment == 0,
+                      residentIndex.header.indexSize % alignment == 0 else {
+                    throw ModelError.indexCorrupt(
+                        detail: "\(name) starts at byte \(entry.fileOffset) of model_weights.bin "
+                            + "(resident payload at \(residentIndex.header.indexSize)); the 8-bit "
+                            + "kernels need every quantized resident weight on a "
+                            + "\(alignment)-byte boundary. This 8-bit install predates that "
+                            + "rule: reinstall it with a current TurboFieldfareRepack")
+                }
             }
         }
 
