@@ -1,7 +1,8 @@
 # Benchmarks
 
-This page records TurboFieldfare measurements on an 8 GB M2 MacBook Air and a
-24 GB M5 Pro. Each number belongs to the workload shown. Prompt length,
+This page records TurboFieldfare measurements on an 8 GB M2 MacBook Air, a
+24 GB M5 Pro and, for the 8-bit variant, a 32 GB M5 MacBook Air. Each number
+belongs to the workload shown. Prompt length,
 generated length, cache state, and hardware all change throughput, so ranges
 across workloads are not run-to-run variation.
 
@@ -16,6 +17,11 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 8 GB M2, TurboFieldfare | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
 | 24 GB M5 Pro, TurboFieldfare | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
+| 32 GB M5, TurboFieldfare 8-bit | 7.65-9.69 tok/s | ~3.4-3.5 GiB footprint |
+| 32 GB M5, TurboFieldfare 4-bit | 15.86-17.95 tok/s | ~2.1 GiB footprint |
+
+Rows for different hosts, runtimes, or model variants come from different
+workloads and are not one series.
 
 ## M2 measured decode
 
@@ -71,6 +77,56 @@ loop.
 | 61 / 256 | 5,096 / 5,668 ms | 35.17 tok/s | 1,834 / 2,126 MiB |
 | 430 / 256 | 6,762 / 7,325 ms | 34.72 tok/s | 1,851 / 2,142 MiB |
 | 3,015 / 256 | 23,038 / 23,610 ms | 31.01 tok/s | 1,835 / 2,126 MiB |
+
+## M5 8-bit and 4-bit measured decode
+
+These rows ran on 2026-11-08 on a 32 GB M5 MacBook Air (`Mac17,3`, 10 cores)
+with macOS 27.2 (26B123) and Swift 6.4.2, connected to power with Low Power
+Mode off, at commit `a250079`. No experimental control, profiler, or trace
+mode was active.
+
+Both variants ran the [community benchmark protocol](COMMUNITY_BENCHMARKS.md)
+unchanged: one discarded warmup, then one measured fresh-process run per case,
+with temperature `0.2`, Top-K `64`, Top-P `0.95`, the fixed seeds, a 4,096-token
+context and the default 16 expert-cache slots. Every measured run ended with
+`stop=endOfTurn`, and every answer was complete, without loops or repeated
+blocks. The variants generate different text, so compare a row only with the
+same variant's rows.
+
+| Variant | Prompt / generated tokens | Decode |
+| --- | ---: | ---: |
+| 8-bit | 61 / 525 | 9.694 tok/s |
+| 8-bit | 430 / 620 | 8.624 tok/s |
+| 8-bit | 3,015 / 555 | 7.645 tok/s |
+| 4-bit | 61 / 497 | 17.952 tok/s |
+| 4-bit | 430 / 721 | 16.757 tok/s |
+| 4-bit | 3,015 / 610 | 15.859 tok/s |
+
+On this Mac the 8-bit model decodes at 0.48-0.54 times the 4-bit rate. That is
+consistent with its byte counts: each routed-expert miss reads about 1.9 times
+the bytes, and every resident projection, the output head included, reads
+twice the weight bytes.
+
+Peak physical footprint was measured separately with `/usr/bin/time -l`, using
+the long-synthesis prompt, 256 generated tokens and the same sampling
+settings:
+
+| Variant | Context | Expert-cache slots | Peak footprint |
+| --- | ---: | ---: | ---: |
+| 8-bit | 4K | 16 | 3,485 MiB |
+| 8-bit | 8K | 16 | 3,559 MiB |
+| 8-bit | 4K | 32 | 6,385 MiB |
+| 8-bit | 8K | 32 | 6,470 MiB |
+| 4-bit | 4K | 16 | 2,111 MiB |
+| 4-bit | 8K | 16 | 2,191 MiB |
+| 4-bit | 4K | 32 | 3,662 MiB |
+| 4-bit | 8K | 32 | 3,742 MiB |
+
+Without the KV cache and the slots above 16, the 8-bit runtime measured
+3.07-3.09 GiB and the 4-bit runtime 1.73-1.75 GiB. The 8-bit memory check uses
+3.5 GiB for that part; see [Runtime controls](RUNTIME_CONTROLS.md#context-length-and-memory).
+A 32 GB host never comes under memory pressure, so these rows do not show how
+the 8-bit model behaves on a 16 GB Mac.
 
 ## Same-host MLX comparison
 

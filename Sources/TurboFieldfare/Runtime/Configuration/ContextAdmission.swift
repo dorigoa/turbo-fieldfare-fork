@@ -40,19 +40,27 @@ public enum ContextAdmission {
             expertStrideBytes: 3_358_720,
             hostReserveBytes: 3 << 30)
 
-        /// The 8-bit pack, not yet measured. Scaled conservatively from the
-        /// 4-bit figures (about 2.55 GB resident against 1.35 GB, 6,324,224
-        /// bytes per expert) so an 8 GB Mac is refused and a 16 GB Mac is
-        /// admitted; to be replaced by a measurement.
-        public static let affine8Provisional = ModelFootprint(
-            nonKVRuntimeBytes: 4 << 30,
+        /// The 8-bit pack. The non-KV figure was measured on a 32 GB M5 at
+        /// 3.07-3.09 GiB of peak physical footprint, net of the FP16 KV cache
+        /// and of the slots above 16, at 4K and 8K with 16 and 32 slots; the
+        /// 4-bit pack measured 1.73-1.75 GiB on the same runs. 3.5 GiB keeps
+        /// about the margin the 4-bit figure keeps over its measurements. The
+        /// host reserve is not measured: it stays scaled from the 4-bit one
+        /// for the larger expert reads, so an 8 GB Mac is refused and a
+        /// 16 GB Mac is admitted. The pinned 8-bit pack uses 6,324,224 bytes
+        /// per routed expert.
+        public static let affine8Measured = ModelFootprint(
+            nonKVRuntimeBytes: 7 << 29,
             expertStrideBytes: 6_324_224,
             hostReserveBytes: 5 << 30)
+
+        /// The name the 8-bit figures had before they were measured.
+        public static let affine8Provisional = affine8Measured
 
         public static func forProfile(_ profile: QuantProfile) -> ModelFootprint {
             switch profile {
             case .affine4: affine4Measured
-            case .affine8: affine8Provisional
+            case .affine8: affine8Measured
             }
         }
 

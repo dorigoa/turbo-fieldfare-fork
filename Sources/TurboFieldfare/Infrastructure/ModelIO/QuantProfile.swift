@@ -62,8 +62,8 @@ public enum QuantProfileError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .runtimeKernelsUnavailable(let profile):
-            "this build recognizes \(profile.rawValue) models but has no runtime kernels for them yet; "
-                + "the 8-bit model can be installed and inspected, not run"
+            "this build recognizes \(profile.rawValue) models but has no runtime kernels for them; "
+                + "update TurboFieldfare to run this model"
         }
     }
 }

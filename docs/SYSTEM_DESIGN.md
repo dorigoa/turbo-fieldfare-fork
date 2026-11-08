@@ -225,13 +225,17 @@ the variant's page-rounded stride. The variant comes from the model's manifest.
 
 | Figure | 4-bit | 8-bit |
 | --- | ---: | ---: |
-| Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 4 GiB (provisional) |
-| Host reserve | 3 GiB | 5 GiB (provisional) |
+| Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 3.5 GiB (measured) |
+| Host reserve | 3 GiB | 5 GiB (estimate) |
 | Each slot above 16, all 30 layers | 3,358,720 bytes × 30 | 6,324,224 bytes × 30 |
 
-The 8-bit figures are a conservative estimate scaled from the 4-bit ones, to
-be replaced by a measurement. With them, even a 4K context needs about
-9.3 GiB, so an 8 GB Mac is refused the 8-bit model while a 16 GB Mac is
+The 8-bit non-KV figure comes from peak physical footprints measured on a
+32 GB M5 at 4K and 8K contexts with 16 and 32 slots: 3.07-3.09 GiB once the KV
+cache and the slots above 16 are subtracted, against 1.73-1.75 GiB for the
+4-bit model on the same runs. The 8-bit host reserve is still an estimate,
+scaled from the 4-bit one because each expert miss reads about twice the
+bytes; a 32 GB host cannot measure it. With these figures a 4K context needs
+about 8.8 GiB, so an 8 GB Mac is refused the 8-bit model while a 16 GB Mac is
 admitted.
 
 ## Load and ownership
@@ -500,8 +504,8 @@ references lead to the supporting code and tests.
 ## Scope and limitations
 
 The current runtime supports text and image input with the pinned Gemma 4
-26B-A4B instruction checkpoint. The 8-bit variant is experimental and pending
-validation. Image support is optional. The vision tower
+26B-A4B instruction checkpoint. The 8-bit variant is experimental: it has
+been validated and measured on a single 32 GB M5 so far. Image support is optional. The vision tower
 and projector live in a separate companion pack, so an installation without
 that pack has the footprint it had before. The image tower requires M2 or
 newer; text-only inference remains available on M1. See [Images](#images).
