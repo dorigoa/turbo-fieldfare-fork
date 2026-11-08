@@ -51,17 +51,25 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
     public var approximateDownloadBytes: UInt64 {
         switch self {
         case .int4: 14_620_479_420
-        // provisional: pinned by S1 from a metadata-only dry run.
-        case .int8: 27_300_000_000
+        // From `TurboFieldfareRepack --dry-run --variant int8` at the pinned
+        // revision with the default 64 MiB ranges: 26,939,947,964 payload
+        // bytes in 418 ranges, plus 413,177 bytes of index, config and
+        // safetensors headers, plus 32,189,832 bytes of tokenizer files.
+        // (The int4 figure above is the payload ranges alone.)
+        case .int8: 26_972_550_973
         }
     }
 
     public var installedBytes: UInt64 {
         switch self {
         case .int4: 14_291_921_884
-        // provisional: pinned by S1. The routed-expert files alone are
-        // 24,285,020,160 bytes and the resident payload about 2.55 GB.
-        case .int8: 26_900_000_000
+        // From the same dry run: model_weights.bin 2,545,592,786 bytes (with
+        // the 16-byte resident weight alignment), 30 expert files of
+        // 809,500,672 bytes, layout.json 8,465,996 bytes and 32,202,012 bytes
+        // of tokenizer files make 26,871,280,954 bytes. manifest.json and
+        // verified-install.json add about 14 KB; the total is rounded up to
+        // the next 100,000 bytes.
+        case .int8: 26_871_300_000
         }
     }
 

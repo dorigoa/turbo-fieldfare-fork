@@ -91,6 +91,10 @@ struct RepackPlan: Sendable {
     let layers: [LayerFilePlan]
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
+    /// Byte alignment of every quantized resident weight's `fileOffset`.
+    /// 1 keeps the historical tightly packed layout (every affine4 install);
+    /// an all-8-bit source gets `RepackPlanner.affine8ResidentWeightAlignment`.
+    var residentQuantizedWeightAlignment: UInt64 = 1
 }
 
 // MARK: - Planner
@@ -277,10 +281,14 @@ enum RepackPlanner {
         lmResidentBases.sort(by: lmResidentOrdering())
         excludedMultimodalNames.sort()
 
+        let weightAlignment = residentQuantizedWeightAlignment(registry: registry,
+                                                               meta: meta,
+                                                               numLayers: arch.numLayers)
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
-                                            registry: registry, meta: meta)
+                                            registry: registry, meta: meta,
+                                            quantizedWeightAlignment: weightAlignment)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
         var layerPlans: [LayerFilePlan] = []
@@ -317,7 +325,37 @@ enum RepackPlanner {
                           resident: resident,
                           layers: layerPlans,
                           matchedModelID: matched,
-                          excludedMultimodalTensorNames: excludedMultimodalNames)
+                          excludedMultimodalTensorNames: excludedMultimodalNames,
+                          residentQuantizedWeightAlignment: weightAlignment)
+    }
+
+    /// Resident alignment for quantized weights in an all-8-bit (`affine8`)
+    /// source. INT8 kernels read whole 4-byte words from these rows, while a
+    /// packed layout can leave a weight on a 2-byte boundary (`layer_scalar`
+    /// is one BF16 value). Sixteen bytes leaves room for vector loads.
+    static let affine8ResidentWeightAlignment: UInt64 = 16
+
+    /// 16 when every quantized language-model weight, resident and routed,
+    /// resolves to 8 bits; 1 otherwise. Mixed sources such as the 4-bit
+    /// checkpoint (with its 8-bit router) keep the tightly packed layout their
+    /// existing installs already use, byte for byte.
+    static func residentQuantizedWeightAlignment(registry: [String: SourceTensor],
+                                                 meta: IndexLoader.SourceMetadata,
+                                                 numLayers: Int) -> UInt64 {
+        var sawQuantizedWeight = false
+        for (name, tensor) in registry
+        where tensor.dtype == .u32 && name.hasSuffix(".weight") {
+            switch classify(name, numLayers: numLayers) {
+            case .lmResident, .routedExpert:
+                sawQuantizedWeight = true
+                if IndexLoader.quantSpec(forTensor: name, meta: meta).bits != 8 {
+                    return 1
+                }
+            case .excludedMultimodal, .unknown:
+                continue
+            }
+        }
+        return sawQuantizedWeight ? affine8ResidentWeightAlignment : 1
     }
 
     private static func isMultimodalTensorName(_ name: String) -> Bool {
@@ -331,8 +369,14 @@ enum RepackPlanner {
     private static func planResidentFile(path: String,
                                          baseNames: [String],
                                          registry: [String: SourceTensor],
-                                         meta: IndexLoader.SourceMetadata) throws
+                                         meta: IndexLoader.SourceMetadata,
+                                         quantizedWeightAlignment: UInt64) throws
                                         -> ResidentFilePlan {
+        guard quantizedWeightAlignment > 0,
+              quantizedWeightAlignment & (quantizedWeightAlignment - 1) == 0 else {
+            throw RepackError.configurationInvalid(
+                detail: "resident weight alignment \(quantizedWeightAlignment) is not a power of two")
+        }
         let entryCount = baseNames.count
 
         var stringTable: [UInt8] = []
@@ -376,7 +420,9 @@ enum RepackPlanner {
                 let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
                 let logical = logicalShape(forPackedSource: weight.shape, bits: spec.bits)
 
-                let wOff = fileCursor
+                // The gap before an aligned weight is never a copy
+                // destination, so it keeps the zeros of the truncated file.
+                let wOff = alignUp(fileCursor, to: quantizedWeightAlignment)
                 let wSize = weight.sizeBytes
                 let sOff = wOff + wSize
                 let sSize = scales.sizeBytes
@@ -505,6 +551,10 @@ enum RepackPlanner {
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
         let p = Layout.pageBytes
         return ((v + p - 1) / p) * p
+    }
+
+    private static func alignUp(_ v: UInt64, to alignment: UInt64) -> UInt64 {
+        alignment <= 1 ? v : ((v + alignment - 1) / alignment) * alignment
     }
 
     private static func padTo4(_ s: [UInt64]) -> [UInt32] {

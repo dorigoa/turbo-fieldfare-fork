@@ -30,7 +30,15 @@ enum SyntheticSnapshot {
 
     /// Build the snapshot. `seed` controls the pseudo-random payload bytes so
     /// tests can pre-compute byte-fidelity expectations.
-    static func build(at dir: String, seed: UInt64 = 0xA17B_EEF1_5FAC_E202) throws -> Snapshot {
+    ///
+    /// `bits` picks the source profile. 4 mirrors the historical fixture:
+    /// 4-bit embedding, attention and routed experts with 8-bit router and
+    /// shared expert overrides. 8 mirrors the pinned 8-bit checkpoint: every
+    /// quantized tensor at 8 bits, with only the router overrides declared.
+    static func build(at dir: String,
+                      seed: UInt64 = 0xA17B_EEF1_5FAC_E202,
+                      bits: Int = 4) throws -> Snapshot {
+        precondition(bits == 4 || bits == 8, "synthetic snapshots are 4- or 8-bit")
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
                                                 withIntermediateDirectories: true)
@@ -42,15 +50,15 @@ enum SyntheticSnapshot {
         var tensors: [(String, String, [Int], [UInt8])] = []
         tensors.reserveCapacity(64)
 
-        // -- LM resident: embedding (4-bit, group=64)
+        // -- LM resident: embedding (`bits`-bit, group=64)
         appendQuantizedWeight(name: "language_model.model.embed_tokens",
                               outerShape: [arch.vocab],
-                              innerLogical: arch.hidden, bits: 4,
+                              innerLogical: arch.hidden, bits: bits,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
         for li in 0..<arch.numLayers {
             let prefix = "language_model.model.layers.\(li)"
-            // q/k/v/o projections — 4-bit attention
+            // q/k/v/o projections — `bits`-bit attention
             // SWA layer: heads*head_dim out; full: globalHeadDim heads (here equal kv configs).
             let isFull = arch.layerTypes[li] == "full_attention"
             let qOut = arch.numHeads * (isFull ? arch.globalHeadDim : arch.headDim)
@@ -59,18 +67,18 @@ enum SyntheticSnapshot {
             let oIn  = qOut
             appendQuantizedWeight(name: prefix + ".self_attn.q_proj",
                                   outerShape: [qOut], innerLogical: arch.hidden,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: bits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".self_attn.k_proj",
                                   outerShape: [kOut], innerLogical: arch.hidden,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: bits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             if !isFull {
                 appendQuantizedWeight(name: prefix + ".self_attn.v_proj",
                                       outerShape: [vOut], innerLogical: arch.hidden,
-                                      bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                      bits: bits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             }
             appendQuantizedWeight(name: prefix + ".self_attn.o_proj",
                                   outerShape: [arch.hidden], innerLogical: oIn,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: bits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Per-head norms (BF16, no scale/bias)
             appendUnquantizedBF16(name: prefix + ".self_attn.q_norm.weight",
@@ -102,18 +110,18 @@ enum SyntheticSnapshot {
                                   outerShape: [arch.hidden], innerLogical: arch.intermediate,
                                   bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
-            // Routed experts — 4-bit affine, leading dim = numExperts
+            // Routed experts — `bits`-bit affine, leading dim = numExperts
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.gate_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
-                                  innerLogical: arch.hidden, bits: 4,
+                                  innerLogical: arch.hidden, bits: bits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.up_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
-                                  innerLogical: arch.hidden, bits: 4,
+                                  innerLogical: arch.hidden, bits: bits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.down_proj",
                                   outerShape: [arch.numExperts, arch.hidden],
-                                  innerLogical: arch.moeIntermediate, bits: 4,
+                                  innerLogical: arch.moeIntermediate, bits: bits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Per-layer norms
@@ -133,10 +141,10 @@ enum SyntheticSnapshot {
         appendUnquantizedBF16(name: "vision_tower.encoder.layers.0.input_layernorm.weight",
                               shape: [arch.hidden], into: &tensors, rng: &rng)
         appendQuantizedWeight(name: "vision_tower.encoder.layers.0.self_attn.q_proj.linear",
-                              outerShape: [arch.hidden], innerLogical: arch.hidden, bits: 4,
+                              outerShape: [arch.hidden], innerLogical: arch.hidden, bits: bits,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
         appendQuantizedWeight(name: "embed_vision.embedding_projection",
-                              outerShape: [arch.hidden], innerLogical: arch.hidden, bits: 4,
+                              outerShape: [arch.hidden], innerLogical: arch.hidden, bits: bits,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
         // -- Encode safetensors.
@@ -144,16 +152,20 @@ enum SyntheticSnapshot {
         let shardPath = (dir as NSString).appendingPathComponent(shardName)
         try writeShard(path: shardPath, tensors: tensors)
 
-        // -- Write config.json with bit-width overrides for mlp + router.
+        // -- Write config.json with bit-width overrides for mlp + router
+        // (4-bit) or for the router alone (8-bit, like the pinned upload).
         var overrides: [String: [String: Any]] = [:]
+        let overridden = bits == 4
+            ? ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"]
+            : ["router.proj"]
         for li in 0..<arch.numLayers {
             let prefix = "language_model.model.layers.\(li)"
-            for k in ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"] {
+            for k in overridden {
                 overrides[prefix + "." + k] = ["bits": 8, "group_size": arch.groupSize]
             }
         }
         var quant: [String: Any] = [
-            "bits": 4, "group_size": arch.groupSize, "mode": "affine"
+            "bits": bits, "group_size": arch.groupSize, "mode": "affine"
         ]
         for (k, v) in overrides { quant[k] = v }
 
