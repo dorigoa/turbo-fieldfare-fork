@@ -202,7 +202,8 @@ destination.
 To reuse a model, choose **Use Existing Model…** and select its `.gturbo`
 folder or parent folder. If several models are found, pick one.
 Keep the optional image pack beside its text model: `gemma4.gturbo` and
-`gemma4.vision.gturbo`.
+`gemma4.vision.gturbo`, or `gemma4-8bit.gturbo` and
+`gemma4-8bit.vision.gturbo` for the 8-bit variant.
 
 The installer never materializes the full source checkpoint. It streams the
 required byte ranges from the pinned Hugging Face revision and repacks them
@@ -326,6 +327,19 @@ installed one with `--remove-vision-install`, and drop a cancelled download with
 `--discard-partial --vision-output <dir>`. A cancelled transfer can also be
 continued with `--resume`. The Mac app installs the same pack from its
 **Image Support** section.
+
+The 8-bit model takes its own pack, installed the same way beside it:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --vision-output scratch/gemma4-8bit.vision.gturbo \
+  --text-model scratch/gemma4-8bit.gturbo
+```
+
+Both packs come from the pinned 4-bit checkpoint. The vision tower is BF16 in
+both checkpoints, so with the 8-bit model the image projector stays 4-bit. A
+pack is bound to the manifest of the text model it was installed for, so the
+4-bit model's pack does not serve the 8-bit model.
 
 #### Send an image
 

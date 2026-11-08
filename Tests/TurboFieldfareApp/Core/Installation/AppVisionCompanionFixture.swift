@@ -15,8 +15,14 @@ func makeVisionReadyModelInstall(_ tag: String) throws -> URL {
     return text
 }
 
+/// `sourceRepoID` and `sourceIndexSha256` name the checkpoint the pack's tower
+/// came from. With the 8-bit text model that is still the 4-bit checkpoint
+/// (option A): the binding that matters is to `text`'s manifest.
 @discardableResult
-func installVisionCompanion(forTextModel text: URL) throws -> URL {
+func installVisionCompanion(forTextModel text: URL,
+                            sourceRepoID: String = "fixture/model",
+                            sourceIndexSha256: String = String(repeating: "b", count: 64),
+                            at location: URL? = nil) throws -> URL {
     func digest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -30,7 +36,7 @@ func installVisionCompanion(forTextModel text: URL) throws -> URL {
         throw CocoaError(.fileReadCorruptFile)
     }
 
-    let companion = try VisionPackLocation.companionURL(forTextModel: text)
+    let companion = try location ?? VisionPackLocation.companionURL(forTextModel: text)
     try FileManager.default.createDirectory(
         at: companion, withIntermediateDirectories: true)
 
@@ -44,8 +50,8 @@ func installVisionCompanion(forTextModel text: URL) throws -> URL {
     ]
     let revision = String(repeating: "a", count: 40)
     let manifest = GTurboVisionManifestV1(
-        modelID: "fixture/model", sourceRevision: revision,
-        sourceIndexSha256: String(repeating: "b", count: 64),
+        modelID: sourceRepoID, sourceRevision: revision,
+        sourceIndexSha256: sourceIndexSha256,
         processorConfigSha256: digest(processor),
         compatibleTextSourceSnapshotHash: sourceSnapshotHash,
         compatibleTextManifestSha256: textManifestSHA,
@@ -58,7 +64,7 @@ func installVisionCompanion(forTextModel text: URL) throws -> URL {
         manifestSha256: manifestSHA,
         companionDirectoryPath: companion.standardizedFileURL.path,
         compatibleTextManifestSha256: textManifestSHA,
-        sourceRepoID: "fixture/model", sourceRevision: revision,
+        sourceRepoID: sourceRepoID, sourceRevision: revision,
         verificationTimestamp: "fixture", toolVersion: "fixture",
         files: files.merging([
             GTurboVisionFormatV1.manifestFile: GTurboManifestFileV1(

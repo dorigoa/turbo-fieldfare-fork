@@ -549,6 +549,15 @@ manifest it was built against, so a pack cannot be used with a model it does
 not match. When the pack is absent or fails verification, the text runtime
 runs unchanged and image input is unavailable.
 
+The pack is always extracted from the pinned 4-bit checkpoint, including for
+the 8-bit text model. The tower is BF16 in both checkpoints and only the
+projector is quantized, so with the 8-bit model the image projector stays
+4-bit. The binding is to the text manifest, not to the source repository: the
+8-bit model's pack (`gemma4-8bit.vision.gturbo`) records the 8-bit manifest's
+hash, and each variant needs its own pack. Projected features take the place
+of the embedding gather for an image span and then pass through the same
+layers as text, so the 8-bit runtime needs no image-specific kernel.
+
 Preprocessing reads the image header before anything else. Orientation, colour
 space, and pixel dimensions come from metadata, and the number of tokens an
 image will occupy follows from its dimensions. A request whose images cannot
