@@ -209,6 +209,30 @@ struct InspectorView: View {
 
     private var modelSection: some View {
         Section("Model") {
+            LabeledContent("Variant") {
+                Picker("Variant", selection: modelVariantBinding) {
+                    ForEach(AppModelVariant.allCases, id: \.self) { variant in
+                        Text(variant.shortLabel).tag(variant)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(!model.canChangeModelVariant)
+                .accessibilityIdentifier(.inspectorVariant)
+            }
+            if let reason = model.modelVariantLockReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            // Downloading stays possible; loading does not, and the reason
+            // belongs where the variant is chosen, not only on a failed Load.
+            if let refusal = model.modelVariantMemoryRefusal {
+                Text(refusal)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             LabeledContent("Path") {
                 HStack(spacing: 6) {
                     Text(model.modelPathText)
@@ -281,6 +305,16 @@ struct InspectorView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Applied by the model, which unloads, moves to the variant's location
+    /// and rebinds history; a plain binding would only change the label.
+    private var modelVariantBinding: Binding<AppModelVariant> {
+        Binding {
+            model.modelVariant
+        } set: { variant in
+            Task { await model.setModelVariant(variant) }
         }
     }
 

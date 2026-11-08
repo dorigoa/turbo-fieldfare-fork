@@ -524,6 +524,35 @@ extension AppModel {
             meta: meta, currentContext: maxContextTokens, identity: identity)
     }
 
+    /// The other catalog variant a stored conversation was recorded with, so
+    /// a row and its notice can name it instead of "a different model".
+    ///
+    /// Copy only: the rule is unchanged, and a chat still continues only on
+    /// the model that recorded it. Nil when the recording model is not a
+    /// catalog variant, or is the variant in use — then the generic wording
+    /// is the accurate one.
+    public func recordedOtherVariant(of meta: ConversationMeta) -> AppModelVariant? {
+        guard let recorded = AppModelVariant.variant(forRepoID: meta.identity.modelID) else { return nil }
+        // The installed model's identity when there is one; before anything
+        // is installed, the variant the app is set to.
+        let current: AppModelVariant?
+        if let identity = conversationIdentity {
+            current = AppModelVariant.variant(forRepoID: identity.modelID)
+        } else {
+            current = modelVariant
+        }
+        return recorded == current ? nil : recorded
+    }
+
+    /// `recordedOtherVariant` for the conversation on screen, when that is why
+    /// it cannot be continued.
+    public var openedConversationRecordedVariant: AppModelVariant? {
+        guard case .cannotReplay(reason: .differentModel) = openedConversationState,
+              let id = screen.conversationID,
+              let meta = history.entry(id) else { return nil }
+        return recordedOtherVariant(of: meta)
+    }
+
     /// Opens a stored conversation and shows it.
     ///
     /// Reading a conversation and being able to continue it are two different

@@ -52,6 +52,21 @@ struct ModelInstallView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if let note = model.modelVariant.installNote {
+                Text(note)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            // The download stays available, so the person deciding to spend
+            // tens of gigabytes on it is told first that this Mac cannot run it.
+            if let refusal = model.modelVariantMemoryRefusal {
+                Label(refusal + " You can still download it.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 

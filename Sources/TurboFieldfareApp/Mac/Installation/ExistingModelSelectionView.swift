@@ -27,7 +27,14 @@ struct ExistingModelSelectionView: View {
                 Picker("Text model", selection: $selectedID) {
                     ForEach(Array(review.candidates.enumerated()), id: \.element.id) { index, candidate in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(candidate.textURL.lastPathComponent).font(.headline)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(candidate.textURL.lastPathComponent).font(.headline)
+                                if let variant = candidate.variant {
+                                    Text(variant.shortLabel)
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             Text(candidate.textURL.deletingLastPathComponent().path)
                                 .font(.caption).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.middle).help(candidate.textURL.path)
@@ -51,6 +58,11 @@ struct ExistingModelSelectionView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Text model").font(.headline)
                             Text(selected.textURL.path).textSelection(.enabled)
+                            Text(selected.variantSummary)
+                                .foregroundStyle(.secondary)
+                            if let note = selected.variantSwitchNote(from: model.modelVariant) {
+                                Text(note).foregroundStyle(.orange)
+                            }
                             Text("Vision pack").font(.headline)
                             Text(selected.visionURL.path).textSelection(.enabled)
                             Text(selected.visionSummary)

@@ -104,7 +104,7 @@ enum ModelLocationPanels {
         panel.treatsFilePackagesAsDirectories = true
         panel.title = title ?? (intent == .download ? "Choose Download Location" : "Use Existing Model")
         panel.message = intent == .download
-            ? "Choose a parent folder. The model will be installed in gemma4.gturbo inside it."
+            ? "Choose a parent folder. The \(model.modelVariant.shortLabel) model will be installed in \(model.modelVariant.defaultDirectoryName) inside it."
             : "Choose a folder containing your text and vision model packs, or a text .gturbo folder directly. If multiple usable text models are found, you can choose which to use."
         panel.prompt = intent == .download ? "Choose Destination" : "Select Folder"
         present(panel) { response in

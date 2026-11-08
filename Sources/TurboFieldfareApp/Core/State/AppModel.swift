@@ -42,7 +42,22 @@ public final class AppModel {
         }
     }
     private var settingsWritesAllowed: Bool
-    private var savedModelPath: String?
+    /// Each variant's location as the settings file records it. The 4-bit
+    /// entry is the legacy `selectedModelPath`; a variant without one lives
+    /// beside the 4-bit model under its own directory name.
+    private var savedModelPaths: [AppModelVariant: String]
+    /// Where a fresh 4-bit install goes when none was chosen. The other
+    /// variants' defaults are derived from the 4-bit location, so they are
+    /// computed against this rather than stored.
+    private let defaultFourBitModelURL: URL
+    /// Which checkpoint the app installs and loads. Settable only through
+    /// `setModelVariant`, because changing it moves the model location, the
+    /// download, the installed-model probe and memory admission together.
+    public private(set) var modelVariant: AppModelVariant
+    /// The variant the settings file records. Differs from `modelVariant`
+    /// only under a launch override, whose model's variant is read from its
+    /// manifest and must not overwrite the user's own choice on disk.
+    private var savedModelVariant: AppModelVariant
     private var migratedHistorySources: [String]
     public var modelPathText: String
     public var promptText: String = ""
@@ -156,7 +171,11 @@ public final class AppModel {
     public private(set) var runIdentity: Int = 0
 
     let client: any AppInferenceClient
-    private let installer: any AppModelInstallerClient
+    /// The current variant's installer. Replaced only when the variant
+    /// changes, which `canChangeModelLocation` refuses while an install runs,
+    /// so a task never outlives the installer it captured.
+    private var installer: any AppModelInstallerClient
+    private let installerFactory: @Sendable (AppModelVariant) -> any AppModelInstallerClient
     private let visionInstaller: any AppVisionPackInstallerClient
     /// The message currently on its way through the send pipeline, from the
     /// click to the commit or the hand-back. `isTurnInFlight` reads it, so a
@@ -244,7 +263,8 @@ public final class AppModel {
                 appDataDirectory: URL? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 client: any AppInferenceClient = RealInferenceClient(),
-                installer: any AppModelInstallerClient = RepackModelInstallerClient(),
+                installer: (any AppModelInstallerClient)? = nil,
+                installerFactory: (@Sendable (AppModelVariant) -> any AppModelInstallerClient)? = nil,
                 visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
@@ -265,20 +285,41 @@ public final class AppModel {
         let bootstrap = AppDataBootstrap(root: dataRoot, legacyModel: legacy,
                                          environment: environment, modelOverride: modelDirectory != nil, enabled: settingsPersistenceEnabled)
         let settings = bootstrap.settings
+        var savedModelPaths: [AppModelVariant: String] = [:]
+        for variant in AppModelVariant.allCases {
+            savedModelPaths[variant] = settings.selectedModelPath(for: variant)
+        }
         let directory: URL
-        if let modelDirectory { directory = modelDirectory.standardizedFileURL }
-        else if let override = environment["TURBO_FIELDFARE_MODEL_PATH"], !override.isEmpty {
+        let variant: AppModelVariant
+        if let modelDirectory {
+            directory = modelDirectory.standardizedFileURL
+            // An explicit location says which model to use; its manifest says
+            // which variant that is, whatever the settings last chose.
+            variant = AppModelInstallationProbe.detectVariant(at: directory) ?? settings.modelVariant
+        } else if let override = environment["TURBO_FIELDFARE_MODEL_PATH"], !override.isEmpty {
             directory = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
-        } else if let saved = settings.selectedModelPath {
-            directory = URL(fileURLWithPath: saved, isDirectory: true).standardizedFileURL
-        } else { directory = defaultModel.standardizedFileURL }
+            variant = AppModelInstallationProbe.detectVariant(at: directory) ?? settings.modelVariant
+        } else {
+            variant = settings.modelVariant
+            directory = Self.modelURL(for: variant, savedPaths: savedModelPaths,
+                                      defaultFourBit: defaultModel.standardizedFileURL)
+        }
+        let installerFactory: @Sendable (AppModelVariant) -> any AppModelInstallerClient =
+            installerFactory ?? { variant in
+                // One injected installer serves every variant: that is what a
+                // caller that predates variants asked for.
+                installer ?? RepackModelInstallerClient(descriptor: .descriptor(for: variant))
+            }
         self.appDataDirectory = dataRoot
         self.isModelLocationOverridden = modelDirectory != nil || !(environment["TURBO_FIELDFARE_MODEL_PATH"] ?? "").isEmpty
         self.isModelChoiceRequired = bootstrap.modelChoiceRequired
         self.settingsDiagnostic = bootstrap.failure
         self.canResetSettings = settingsPersistenceEnabled && bootstrap.canResetSettings
         self.settingsWritesAllowed = bootstrap.failure == nil
-        self.savedModelPath = settings.selectedModelPath
+        self.savedModelPaths = savedModelPaths
+        self.defaultFourBitModelURL = defaultModel.standardizedFileURL
+        self.modelVariant = variant
+        self.savedModelVariant = settings.modelVariant
         self.migratedHistorySources = settings.migratedHistorySources
         let installETAClock = SuspendingClock()
         self.modelPathText = directory.path
@@ -295,7 +336,8 @@ public final class AppModel {
             visionResidencyPolicy: .onDemand)
         let admitted = Self.admittedContext(settings.contextTokens,
                                             hostMemoryBytes: hostMemoryBytes,
-                                            expertCacheSlots: settings.expertCacheSlots)
+                                            expertCacheSlots: settings.expertCacheSlots,
+                                            variant: variant)
         self.maxContextTokens = admitted.tokens
         self.contextClampNotice = admitted.notice
         self.temperature = settings.temperature
@@ -309,10 +351,12 @@ public final class AppModel {
         self.isSidebarVisible = settings.sidebarVisible
         self.isInspectorVisible = settings.inspectorVisible
         self.loadModelOnLaunch = settings.loadModelOnLaunch
-        self.installationStatus = AppModelInstallationProbe.status(at: directory)
+        self.installationStatus = AppModelInstallationProbe.status(
+            at: directory, descriptor: .descriptor(for: variant))
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
         self.client = client
-        self.installer = installer
+        self.installer = installerFactory(variant)
+        self.installerFactory = installerFactory
         self.visionInstaller = visionInstaller
         self.memorySampler = memorySampler
         self.attachmentStore = attachmentStore
@@ -355,9 +399,20 @@ public final class AppModel {
         activateConversationStore()
     }
 
+    /// What admission charges the current variant beyond its KV cache.
+    public var modelFootprint: ModelFootprint { modelVariant.modelFootprint }
+
     /// What the Context picker may offer on this Mac.
+    ///
+    /// Never empty: a variant this Mac cannot run at any context keeps showing
+    /// the size already chosen, and `modelVariantMemoryRefusal` says why Load
+    /// is off. A menu with no rows would explain nothing.
     public var contextOptions: [AppContextLengthOption] {
-        AppContextLengthOption.available(on: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)
+        let available = AppContextLengthOption.available(on: hostMemoryBytes,
+                                                         expertCacheSlots: runtimeOptions.expertCacheSlots,
+                                                         footprint: modelFootprint)
+        guard available.isEmpty else { return available }
+        return [AppContextLengthOption(rawValue: maxContextTokens) ?? .fourK]
     }
 
     /// The caption under the Context picker when admission is hiding rows.
@@ -365,18 +420,53 @@ public final class AppModel {
     /// Static and free of SwiftUI so the sentence a user reads is covered by a
     /// test rather than by looking at the window. Nil when every size is
     /// offered — there is then nothing to explain.
-    public nonisolated static func contextOptionsNote(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> String? {
+    public nonisolated static func contextOptionsNote(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
+                                                      footprint: ModelFootprint = .affine4Measured) -> String? {
         let hidden = AppContextLengthOption.allCases.filter {
-            $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) != .available
+            $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                            footprint: footprint) != .available
         }
         guard !hidden.isEmpty else { return nil }
         return hidden
-            .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) }
+            .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                      footprint: footprint) }
             .joined(separator: " ")
     }
 
     public var contextOptionsNote: String? {
-        Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)
+        // When no size fits, the refusal already says what the smallest needs;
+        // listing all seven would bury it.
+        guard modelVariantMemoryRefusal == nil else { return nil }
+        return Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes,
+                                       expertCacheSlots: runtimeOptions.expertCacheSlots,
+                                       footprint: modelFootprint)
+    }
+
+    /// Why this Mac cannot load the current variant at any context, or nil
+    /// when it can load it at some.
+    ///
+    /// Static so the sentence is testable without a host of that size. The
+    /// need comes from `ContextAdmission.needDescription` at the smallest
+    /// context, the same arithmetic the loader and the decode service refuse
+    /// with. The 4-bit model fits every Mac the app runs on, so in practice
+    /// this speaks only for the 8-bit one on an 8 GB Mac.
+    public nonisolated static func modelVariantMemoryRefusal(
+        variant: AppModelVariant,
+        hostMemoryBytes: UInt64,
+        expertCacheSlots: Int = 16
+    ) -> String? {
+        let footprint = variant.modelFootprint
+        guard AppContextLengthOption.available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                               footprint: footprint).isEmpty else { return nil }
+        let smallest = AppContextLengthOption.allCases[0]
+        return "The \(variant.shortLabel) model can't be loaded on this Mac. "
+            + smallest.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                       footprint: footprint)
+    }
+
+    public var modelVariantMemoryRefusal: String? {
+        Self.modelVariantMemoryRefusal(variant: modelVariant, hostMemoryBytes: hostMemoryBytes,
+                                       expertCacheSlots: runtimeOptions.expertCacheSlots)
     }
 
     /// A stored context this host cannot back, replaced with the largest it
@@ -388,19 +478,41 @@ public final class AppModel {
     nonisolated static func admittedContext(
         _ tokens: Int,
         hostMemoryBytes: UInt64,
-        expertCacheSlots: Int = 16
+        expertCacheSlots: Int = 16,
+        footprint: ModelFootprint = .affine4Measured
     ) -> (tokens: Int, notice: String?) {
         let config = ArchConfig.gemma4_26B_A4B
         guard case .needsMemory = ContextAdmission.availability(
-            config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) else {
+            config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+            footprint: footprint) else {
             return (tokens, nil)
         }
-        let fallback = AppContextLengthOption.largestAvailable(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+        let fallback = AppContextLengthOption.largestAvailable(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                                               footprint: footprint)
         let need = ContextAdmission.needDescription(config: config,
                                                     maxContext: tokens,
-                                                    hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                                    hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                                    footprint: footprint)
         return (fallback.tokens,
                 "\(need) Context is set to \(fallback.shortLabel) instead.")
+    }
+
+    /// The same clamp for a variant, except where the variant fits no context
+    /// on this Mac: clamping then would trade the chosen size for one that
+    /// fails as well, and lose it for when the user switches back. Load is
+    /// refused instead, by `modelVariantMemoryRefusal`.
+    nonisolated static func admittedContext(
+        _ tokens: Int,
+        hostMemoryBytes: UInt64,
+        expertCacheSlots: Int = 16,
+        variant: AppModelVariant
+    ) -> (tokens: Int, notice: String?) {
+        guard modelVariantMemoryRefusal(variant: variant, hostMemoryBytes: hostMemoryBytes,
+                                        expertCacheSlots: expertCacheSlots) == nil else {
+            return (tokens, nil)
+        }
+        return admittedContext(tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                               footprint: variant.modelFootprint)
     }
 
     public var isRunning: Bool { runState == .running }
@@ -419,6 +531,9 @@ public final class AppModel {
     // until the load timeout killed the connection.
     public var canLoadModel: Bool {
         if isChangingModelLocation || isModelChoiceRequired { return false }
+        // Refused, not merely discouraged: a variant this Mac cannot back at
+        // any context is a load the system kills part-way through.
+        if modelVariantMemoryRefusal != nil { return false }
         return isModelInstalled && !isTurnInFlight && !isVisionFilesystemMutationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
     }
@@ -825,7 +940,8 @@ public final class AppModel {
             livePrefillDone: livePrefillDone,
             livePrefillTotal: livePrefillTotal,
             lastStopReason: diagnostics?.stopReason,
-            isVisionFilesystemMutationInProgress: isVisionFilesystemMutationInProgress))
+            isVisionFilesystemMutationInProgress: isVisionFilesystemMutationInProgress,
+            memoryRefusal: modelVariantMemoryRefusal))
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -924,29 +1040,108 @@ public final class AppModel {
     public func selectModelLocation(_ url: URL, intent: ModelLocationIntent) async {
         guard canChangeModelLocation else { return }
         let candidate = intent == .download
-            ? url.appendingPathComponent("gemma4.gturbo", isDirectory: true) : url
+            ? url.appendingPathComponent(modelVariant.defaultDirectoryName, isDirectory: true) : url
         do {
-            try AppModelLocation.validate(candidate, intent: intent)
+            try AppModelLocation.validate(candidate, intent: intent, variant: modelVariant)
             modelLocationDiagnostic = nil
-            await changeModelURL(candidate, persistSelection: true)
+            // An existing model may be either variant, and choosing it is how
+            // the app switches: the manifest says which, never the folder name.
+            let variant = intent == .existing
+                ? AppModelInstallationProbe.detectVariant(at: AppModelLocation.canonicalURL(candidate)) ?? modelVariant
+                : modelVariant
+            await changeModelURL(candidate, persistSelection: true, variant: variant)
         } catch {
             modelLocationDiagnostic = "Could not select model location: \(error)"
         }
     }
 
     /// Internal callers already validated their candidate; UI uses selectModelLocation.
+    ///
+    /// A completed install of another variant switches to that variant, as
+    /// choosing it in the panel would; anything else keeps the current one.
     public func setModelURL(_ url: URL) async {
         guard !isTurnInFlight && !isInstallingModel && !isVisionCompanionOperationInProgress
                 && loadTask == nil && unloadTask == nil && !loadState.isLoading
                 && conversationDeletionTask == nil && !isChangingModelLocation else { return }
-        await changeModelURL(url, persistSelection: !isModelLocationOverridden)
+        let variant = AppModelInstallationProbe.detectVariant(at: AppModelLocation.canonicalURL(url)) ?? modelVariant
+        await changeModelURL(url, persistSelection: !isModelLocationOverridden, variant: variant)
     }
 
-    private func changeModelURL(_ url: URL, persistSelection: Bool) async {
+    // MARK: - Model variant
+
+    /// Whether the Model Variant picker can be used now. The same conditions
+    /// as a location change, because a variant change is one: it moves to the
+    /// other variant's directory.
+    public var canChangeModelVariant: Bool { canChangeModelLocation }
+
+    /// Why the variant cannot be chosen at all, for the caption beside a
+    /// disabled picker. Nil while the picker is merely waiting for something
+    /// to finish, which the rest of the window already shows.
+    public var modelVariantLockReason: String? {
+        // Short enough for a menu item, where the Settings menu shows it.
+        if isModelLocationOverridden {
+            return "Set by the model at TURBO_FIELDFARE_MODEL_PATH"
+        }
+        if !settingsWritesAllowed {
+            return "Unavailable while settings can't be saved"
+        }
+        return nil
+    }
+
+    /// Where `variant` lives: its saved location, or beside the 4-bit model
+    /// under its own directory name.
+    public func modelURL(for variant: AppModelVariant) -> URL {
+        Self.modelURL(for: variant, savedPaths: savedModelPaths, defaultFourBit: defaultFourBitModelURL)
+    }
+
+    private nonisolated static func modelURL(for variant: AppModelVariant,
+                                             savedPaths: [AppModelVariant: String],
+                                             defaultFourBit: URL) -> URL {
+        if let saved = savedPaths[variant] {
+            return URL(fileURLWithPath: saved, isDirectory: true).standardizedFileURL
+        }
+        let fourBit = savedPaths[.int4].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? defaultFourBit
+        return AppModelLocation.defaultURL(for: variant, besideFourBit: fourBit)
+    }
+
+    /// Switches the app to `variant`.
+    ///
+    /// Saves the choice, then moves to that variant's location the way a
+    /// location change does — the model is unloaded, the KV released and the
+    /// history rebound to the model found there — and swaps in that variant's
+    /// installer, download size and memory admission. Nothing is downloaded:
+    /// a variant that is not installed opens on its install screen.
+    public func setModelVariant(_ variant: AppModelVariant) async {
+        guard canChangeModelVariant, variant != modelVariant else { return }
+        await changeModelURL(modelURL(for: variant), persistSelection: true, variant: variant)
+    }
+
+    private func applyModelVariant(_ variant: AppModelVariant) {
+        guard variant != modelVariant else { return }
+        modelVariant = variant
+        installer = installerFactory(variant)
+        // Admission moves with the variant: a context the old one could back
+        // may be one the new one cannot, and that has to be said, not found
+        // out at Load. A notice written for the old variant's arithmetic
+        // would now be quoting a need that no longer applies.
+        contextClampNotice = nil
+        let admitted = Self.admittedContext(maxContextTokens,
+                                            hostMemoryBytes: hostMemoryBytes,
+                                            expertCacheSlots: runtimeOptions.expertCacheSlots,
+                                            variant: variant)
+        if admitted.tokens != maxContextTokens {
+            setMaxContextTokens(admitted.tokens)
+            contextClampNotice = admitted.notice
+        }
+    }
+
+    private func changeModelURL(_ url: URL, persistSelection: Bool,
+                                variant requestedVariant: AppModelVariant? = nil) async {
         let directory = AppModelLocation.canonicalURL(url)
+        let variant = requestedVariant ?? modelVariant
         let sameDirectory = directory.path == AppModelLocation.canonicalURL(URL(fileURLWithPath: modelPathText)).path
-        let needsSelectionCommit = persistSelection && settingsPersistenceEnabled && savedModelPath == nil
-        guard !sameDirectory || needsSelectionCommit || isModelChoiceRequired else {
+        let needsSelectionCommit = persistSelection && settingsPersistenceEnabled && savedModelPaths[variant] == nil
+        guard !sameDirectory || variant != modelVariant || needsSelectionCommit || isModelChoiceRequired else {
             recheckModelAtCurrentLocation()
             return
         }
@@ -959,20 +1154,27 @@ public final class AppModel {
         if persistSelection, settingsPersistenceEnabled {
             do {
                 var settings = currentSettings()
-                settings.selectedModelPath = directory.path
+                settings.modelVariant = variant
+                settings.setSelectedModelPath(directory.path, for: variant)
                 try MacAppSettingsFileStore.save(settings, at: AppDataLocation.settingsURL(in: appDataDirectory))
-                savedModelPath = directory.path
+                savedModelPaths[variant] = directory.path
+                savedModelVariant = variant
                 settingsDiagnostic = nil
             } catch {
                 modelLocationDiagnostic = "Could not save model location; previous selection retained: \(error)"
                 return
             }
+        } else if persistSelection {
+            // Nothing is written, but a switch back has to find this place.
+            savedModelPaths[variant] = directory.path
+            savedModelVariant = variant
         }
         // A rejected settings write must leave the active runtime and chat intact.
         if let lifecycle = client as? AppModelLifecycleClient { await lifecycle.unload() }
         loadedRuntimeKey = nil
         loadState = .notLoaded
         endConversationForReleasedKV()
+        applyModelVariant(variant)
         modelPathText = directory.path
         runIdentity &+= 1
         isModelChoiceRequired = false
@@ -987,7 +1189,7 @@ public final class AppModel {
         error = nil
         phase = .idle
         modelLocationDiagnostic = nil
-        installationStatus = AppModelInstallationProbe.status(at: directory)
+        installationStatus = AppModelInstallationProbe.status(at: directory, descriptor: installer.descriptor)
         visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
         refreshInstallReadiness()
         refreshVisionInstallReadiness()
@@ -1063,7 +1265,8 @@ public final class AppModel {
         runtimeOptions.expertCacheSlots = slots
         let admitted = Self.admittedContext(maxContextTokens,
                                             hostMemoryBytes: hostMemoryBytes,
-                                            expertCacheSlots: slots)
+                                            expertCacheSlots: slots,
+                                            variant: modelVariant)
         if admitted.tokens != maxContextTokens {
             setMaxContextTokens(admitted.tokens)
             contextClampNotice = admitted.notice
@@ -1435,11 +1638,13 @@ public final class AppModel {
         if case .needsMemory = ContextAdmission.availability(
             config: ArchConfig.gemma4_26B_A4B,
             maxContext: maxContext,
-            hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots) {
+            hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
+            footprint: modelFootprint) {
             loadState = .failed(.modelLoadFailed(
                 ContextAdmission.needDescription(config: ArchConfig.gemma4_26B_A4B,
                                                  maxContext: maxContext,
-                                                 hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)))
+                                                 hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
+                                                 footprint: modelFootprint)))
             return
         }
         let forceLogitsHead = currentForceLogitsHead
@@ -2206,7 +2411,7 @@ public final class AppModel {
 
     private func currentSettings() -> MacAppSettings {
         MacAppSettings(
-            selectedModelPath: savedModelPath,
+            selectedModelPath: savedModelPaths[.int4],
             migratedHistorySources: migratedHistorySources,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
@@ -2223,7 +2428,9 @@ public final class AppModel {
             inspectorVisible: isInspectorVisible,
             visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
             rdadvisePolicy: runtimeOptions.rdadvisePolicy,
-            loadModelOnLaunch: loadModelOnLaunch)
+            loadModelOnLaunch: loadModelOnLaunch,
+            modelVariant: savedModelVariant,
+            selectedModelPathInt8: savedModelPaths[.int8])
     }
 
     func persistSettings() {

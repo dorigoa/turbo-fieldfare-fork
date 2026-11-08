@@ -218,6 +218,21 @@ struct TurboFieldfareMacApp: App {
                     .disabled(!model.canChangeModelLocation)
                     .accessibilityIdentifier(.historyImportLegacy)
                 Divider()
+                // Each variant keeps its own location, download and memory
+                // admission; switching unloads the model and opens the other
+                // variant's install, or its install screen if there is none.
+                Picker("Model Variant", selection: modelVariantBinding) {
+                    ForEach(AppModelVariant.allCases, id: \.self) { variant in
+                        Text(variant.shortLabel).tag(variant)
+                            .accessibilityIdentifier(AccessibilityID.modelVariantOption(variant))
+                    }
+                }
+                .disabled(!model.canChangeModelVariant)
+                .accessibilityIdentifier(.settingsModelVariant)
+                if let reason = model.modelVariantLockReason {
+                    Text(reason)
+                }
+                Divider()
                 Picker("Text Size", selection: textSizeBinding) {
                     ForEach(AppTextSize.allCases) { size in
                         Text(size.label).tag(size)
@@ -257,6 +272,16 @@ struct TurboFieldfareMacApp: App {
             NSWorkspace.shared.open(url)
         case .unavailable:
             break
+        }
+    }
+
+    /// The model applies the change; a binding that set the value directly
+    /// would show the new variant while the old one's model stayed loaded.
+    private var modelVariantBinding: Binding<AppModelVariant> {
+        Binding {
+            model.modelVariant
+        } set: { variant in
+            Task { await model.setModelVariant(variant) }
         }
     }
 

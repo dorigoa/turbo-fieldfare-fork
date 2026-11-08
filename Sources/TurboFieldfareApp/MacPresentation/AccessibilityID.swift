@@ -27,6 +27,9 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case settingsTextSizeLarger = "settings.textSize.larger"
     case settingsTextSizeExtraLarge = "settings.textSize.extraLarge"
     case settingsTextSizeLargest = "settings.textSize.largest"
+    case settingsModelVariant = "settings.modelVariant"
+    case settingsModelVariantFourBit = "settings.modelVariant.fourBit"
+    case settingsModelVariantEightBit = "settings.modelVariant.eightBit"
 
     public static func textSizeOption(_ size: AppTextSize) -> AccessibilityID {
         switch size {
@@ -35,6 +38,15 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
         case .larger: .settingsTextSizeLarger
         case .extraLarge: .settingsTextSizeExtraLarge
         case .largest: .settingsTextSizeLargest
+        }
+    }
+
+    /// Words, not the variant's raw value: identifiers are letters only, and
+    /// `int4` would fail the `surface.control` shape the driver matches.
+    public static func modelVariantOption(_ variant: AppModelVariant) -> AccessibilityID {
+        switch variant {
+        case .int4: .settingsModelVariantFourBit
+        case .int8: .settingsModelVariantEightBit
         }
     }
 
@@ -95,6 +107,7 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case inspectorPrefill = "inspector.prefill"
     case inspectorRDAdvise = "inspector.rdadvise"
     case inspectorCopyPath = "inspector.copyPath"
+    case inspectorVariant = "inspector.variant"
     case inspectorUnload = "inspector.unload"
 
     /// Identifiers minted per item carry one of these prefixes, so a case can
