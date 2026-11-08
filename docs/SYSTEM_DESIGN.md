@@ -59,10 +59,11 @@ The installer reads one of two pinned sources, chosen with `--variant`:
 | `int4` (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | `bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13` |
 | `int8` | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | `33c6d23798a0af159529890f79329206dbfbd73c` | `4b96ec862d7ae3f8d150b22b295cefcc9b5ef5e83f172f530dc1f2d2c11339cc` |
 
-Each variant is pinned by revision and source index hash. The two checkpoints have the same 1,697 tensor names; the 8-bit packed weights
-are twice as wide, and their scales and biases have the same shapes. The
-installer does not download a complete Hugging Face snapshot or write a
-complete safetensors shard to disk.
+Each variant is pinned by revision and source index hash. The two checkpoints
+have the same 1,697 tensor names; the 8-bit packed weights are twice as wide,
+and their scales and biases have the same shapes. The installer does not
+download a complete Hugging Face snapshot or write a complete safetensors
+shard to disk.
 
 Instead, the repacker:
 
@@ -225,7 +226,7 @@ the variant's page-rounded stride. The variant comes from the model's manifest.
 | Figure | 4-bit | 8-bit |
 | --- | ---: | ---: |
 | Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 4 GiB (provisional) |
-| Host reserve | 3 GiB (measured) | 5 GiB (provisional) |
+| Host reserve | 3 GiB | 5 GiB (provisional) |
 | Each slot above 16, all 30 layers | 3,358,720 bytes × 30 | 6,324,224 bytes × 30 |
 
 The 8-bit figures are a conservative estimate scaled from the 4-bit ones, to

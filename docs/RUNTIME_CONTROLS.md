@@ -127,10 +127,10 @@ slots, and headroom for macOS and the file cache. The last two depend on the
 model variant, which the app takes from **Settings > Model Variant** and the
 CLI and server read from the model's manifest:
 
-| Figure | 4-bit model | 8-bit model (provisional estimate) |
+| Figure | 4-bit model | 8-bit model |
 | --- | ---: | ---: |
-| Runtime with 16 slots | 2 GiB | 4 GiB |
-| macOS and file cache | 3 GiB | 5 GiB |
+| Runtime with 16 slots | 2 GiB | 4 GiB (provisional) |
+| macOS and file cache | 3 GiB | 5 GiB (provisional) |
 | One routed-expert slot | 3,358,720 bytes | 6,324,224 bytes |
 | 24 slots instead of 16 | About 0.75 GiB more | About 1.41 GiB more |
 | 32 slots instead of 16 | About 1.50 GiB more | About 2.83 GiB more |
@@ -139,8 +139,8 @@ A slot holds one routed expert in each of the 30 layers, so each slot above 16
 costs 30 expert strides. With the 4-bit model on an 8 GB Mac, neither 24 nor
 32 slots leaves enough room for 128K under this estimate. The 8-bit model needs
 about 9.3 GiB even at 4K, so it is refused on an 8 GB Mac at every context.
-Its figures are scaled conservatively from the 4-bit ones until they are
-measured.
+Its two provisional figures are scaled conservatively from the 4-bit ones
+until they are measured; its slot size is exact.
 
 When a setting exceeds the estimate:
 

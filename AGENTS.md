@@ -63,6 +63,8 @@ Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memo
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 
+Run the Ruby checks, such as `ruby Scripts/check_markdown_links.rb`, under a UTF-8 locale (for example `LC_ALL=en_US.UTF-8`). With no locale set, the system Ruby reads files as US-ASCII and fails on non-ASCII text.
+
 For isolated app checks, set `TURBO_FIELDFARE_APP_DATA_PATH` to a temporary
 directory so settings and history stay separate. `TURBO_FIELDFARE_MODEL_PATH`
 overrides the saved model location and disables location changes in the UI.
