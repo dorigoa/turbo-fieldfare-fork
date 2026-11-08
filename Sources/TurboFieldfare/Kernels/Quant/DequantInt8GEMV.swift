@@ -8,11 +8,14 @@ import Metal
 /// where W (M rows, N cols) is MLX-affine 8-bit (group=64) with BF16 scale +
 /// BF16 bias per group, x is FP16 [N], y is FP16 [M].
 ///
-/// Same kernel, two call sites:
-///   * router  — M=128,    N=2816 (one per layer)
-///   * lm_head — M=262144, N=2816 (final classifier, tied with embed table)
+/// Same kernel for every 8-bit dense projection:
+///   * router            — M=128,    N=2816 (one per layer, both profiles)
+///   * shared expert     — M=2112/2816, N=2816/2112 (8-bit shared expert)
+///   * o_proj (`affine8`) — M=2816,  N=4096 (sliding) / 8192 (full attention)
+///   * lm_head (`affine8`) — M=262144, N=2816 (logits path, tied with embed table)
 ///
-/// One SIMD group (32 threads) runs per output row.
+/// One SIMD group (32 threads) runs per output row. The kernel reads weights
+/// one byte at a time, so it accepts any weight offset.
 final class DequantInt8GEMV {
     private struct Shape: Hashable {
         var m: UInt32
@@ -25,6 +28,10 @@ final class DequantInt8GEMV {
         Shape(m: 128, n: 2816),     // router.proj
         Shape(m: 2112, n: 2816),    // shared expert gate/up
         Shape(m: 2816, n: 2112),    // shared expert down
+        // `affine8` dense decode shapes, specialized the same way.
+        Shape(m: 2816, n: 4096),    // o_proj, sliding-window layers
+        Shape(m: 2816, n: 8192),    // o_proj, full-attention layers
+        Shape(m: 262144, n: 2816),  // lm_head logits
     ]
 
     init(context: MetalContext) throws {
