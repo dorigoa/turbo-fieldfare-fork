@@ -70,7 +70,7 @@ your prompt, and press **Generate**. The 4-bit model is the default; see
 | Memory          | ~2 GB of weights and 4K KV cache                                                                                         |
 | Storage         | About 14.3 GB for the text model, plus about 1.1 GB for the optional image pack                                          |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
-| 8-bit variant   | Experimental, pending validation: MLX affine 8-bit in every slot; about 26.9 GB installed; needs 16 GB of RAM (estimate). See [Model variants](#model-variants) |
+| 8-bit variant   | Experimental: MLX affine 8-bit in every slot; about 26.9 GB installed; needs 16 GB of RAM; [7.6-9.7 tok/s](docs/BENCHMARKS.md#m5-8-bit-and-4-bit-measured-decode) on a 32 GB M5 MacBook Air, where the 4-bit model measured 15.9-18.0 tok/s. See [Model variants](#model-variants) |
 | Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
 | M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
 | M5 measured decode | [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
@@ -122,13 +122,16 @@ tensor names; only the weight bit widths differ.
 | Variant | Source | Download | Installed | Memory |
 | --- | --- | ---: | ---: | --- |
 | 4-bit (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | About 14.6 GB | About 14.3 GB | 8 GB Mac or larger |
-| 8-bit (experimental, pending validation) | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | About 27.0 GB | About 26.9 GB | 16 GB Mac or larger (estimate) |
+| 8-bit (experimental) | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | About 27.0 GB | About 26.9 GB | 16 GB Mac or larger |
 
-No speed or quality result has been published for the 8-bit variant yet. Its
-sizes are planned from the pinned checkpoint's metadata with `--dry-run`, not
-read from a completed install. Its memory check uses a conservative estimate
-that refuses an 8 GB Mac at every context length; a measurement will replace
-it.
+The 8-bit variant has been validated on one 32 GB M5 MacBook Air. Its greedy
+output is deterministic across processes, chunked prefill agrees with
+token-by-token prefill, and its first generated token matches the 4-bit
+model's on 20 of 24 test prompts. It decodes at about half the 4-bit rate on
+that Mac; see [Benchmarks](docs/BENCHMARKS.md#m5-8-bit-and-4-bit-measured-decode).
+Its memory check uses the measured runtime footprint plus an estimated
+headroom for macOS and the file cache, and refuses an 8 GB Mac at every context
+length. It has not yet run on a 16 GB Mac.
 
 Install each variant in its own directory: `gemma4.gturbo` for the 4-bit model
 and `gemma4-8bit.gturbo` for the 8-bit one. Both can stay installed. The Mac app
