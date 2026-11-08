@@ -33,15 +33,24 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes + rangeStagingBytes + reserveBytes
     }
 
-    public static let `default` = AppModelInstallDescriptor(
-        displayName: "Gemma 4 26B-A4B IT 4-bit",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256: "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        approximateDownloadBytes: 14_620_479_420,
-        installedBytes: 14_291_921_884,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+    /// The download of one catalog variant. Every figure comes from
+    /// `SupportedModelVariant`, so the installer, the disk check and the
+    /// Inspector quote the same numbers the repack command does.
+    public static func descriptor(for variant: SupportedModelVariant) -> AppModelInstallDescriptor {
+        AppModelInstallDescriptor(
+            displayName: variant.displayName,
+            repoID: variant.repoID,
+            revision: variant.revision,
+            sourceIndexSHA256: variant.sourceIndexSHA256,
+            approximateDownloadBytes: variant.approximateDownloadBytes,
+            installedBytes: variant.installedBytes,
+            rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+            reserveBytes: variant.reserveBytes)
+    }
+
+    /// The 4-bit download, which is what the app installs unless the user
+    /// chooses another variant.
+    public static let `default` = descriptor(for: .int4)
 
     public static let visionCompanion = AppModelInstallDescriptor(
         displayName: "Gemma 4 Image Support",

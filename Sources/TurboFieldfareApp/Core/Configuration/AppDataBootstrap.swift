@@ -22,7 +22,11 @@ struct AppDataBootstrap {
                 return
             }
             if let central {
-                if central.selectedModelPath != nil || modelOverride
+                // Either variant's saved location means the user has chosen;
+                // the legacy 4-bit search below would otherwise run again for
+                // someone who only ever installed the 8-bit model.
+                if central.selectedModelPath != nil || central.selectedModelPathInt8 != nil
+                    || modelOverride
                     || environment["TURBO_FIELDFARE_MODEL_PATH"] != nil { return }
             }
             let isolated = environment["TURBO_FIELDFARE_APP_DATA_PATH"] != nil
