@@ -1,7 +1,7 @@
 # Piano: inferenza di Qwen3.6-35B-A3B in TurboFieldfare (agente locale)
 
-- Versione piano: 1 (bozza; le decisioni dell'utente in §10 vanno confermate
-  prima di S00)
+- Versione piano: 2 (decisioni dell'utente U1–U6 confermate il 2026-11-08,
+  §10)
 - Data analisi: 2026-11-08
 - Commit base analizzato: `badac9f` su `main` (contiene tutto il lavoro 8-bit,
   S0–S10)
@@ -495,8 +495,7 @@ Da confermare in S00 con `grep`; i numeri di riga possono cambiare.
   L'ID del modello nel server è il repo sorgente:
   `mlx-community/Qwen3.6-35B-A3B-4bit`.
 - **D10 Sampling.** Default per famiglia. Gemma resta 0.2 / 64 / 0.95. Qwen:
-  i valori di `generation_config.json` (1.0 / 20 / 0.95), salvo diversa
-  decisione dell'utente (U4).
+  i valori di `generation_config.json` (1.0 / 20 / 0.95), confermati in U4.
 
 ---
 
@@ -1008,7 +1007,7 @@ in `RealForwardRunner.swift` **solo** le funzioni di decode per un token
 1. Il CLI e il server leggono la famiglia dal manifest e la stampano con la
    variante.
 2. Chat con formato Qwen; opzione per il ragionamento (attivo per default,
-   salvo U3); stop di §2.2.
+   U3); stop di §2.2.
 3. Server: `/v1/models` con l'ID Qwen; `model_not_found` per gli altri ID;
    tool call XML convertite in `tool_calls` OpenAI e risultati dei tool resi
    nel formato Qwen; ragionamento nel campo che il server usa già per Gemma.
@@ -1083,11 +1082,14 @@ equivalenza di S11. Da pianificare a parte, con nuovi fatti.
 
 ---
 
-## 10. Decisioni dell'utente da confermare
+## 10. Decisioni dell'utente (confermate il 2026-11-08)
 
-| # | Domanda | Proposta |
+L'utente ha confermato tutte le proposte così come sono. Una sessione che
+avrebbe bisogno di una scelta diversa si ferma e lo chiede (§0.5).
+
+| # | Domanda | Decisione |
 | --- | --- | --- |
-| U1 | Download | Approvare: header e tokenizer (S00, pochi MB); `transformers` e `jinja2` nel venv (S00); install di `qwen36.gturbo` (≈ 19,5 GB) e checkpoint MLX per `mlx-lm` (≈ 20,4 GB) più `mlx-lm` nel venv (S03) |
+| U1 | Download | Approvati: header e tokenizer (S00, pochi MB); `transformers` e `jinja2` nel venv (S00); install di `qwen36.gturbo` (≈ 19,5 GB) e checkpoint MLX per `mlx-lm` (≈ 20,4 GB) più `mlx-lm` nel venv (S03). Nessun altro download |
 | U2 | Perimetro | Solo testo e solo 4-bit; immagini, video, MTP e 8-bit esclusi |
 | U3 | Ragionamento | Attivo per default come nel template, disattivabile nel CLI, nel server (`enable_thinking`) e nell'app |
 | U4 | Sampling Qwen | `generation_config.json`: temperature 1.0, top-k 20, top-p 0.95; Gemma invariato |
