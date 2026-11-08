@@ -44,12 +44,12 @@ import Testing
         #expect(QuantProfile.allCases.allSatisfy { $0.routerWeightBits == 8 })
     }
 
-    /// Until the 8-bit kernels are wired in, an 8-bit model must stop at the
-    /// runner's door instead of reaching the 4-bit unpack.
-    @Test func runnerAdmitsOnlyAffine4() throws {
-        try RealForwardRunner.requireSupportedProfile(.affine4)
-        #expect(throws: QuantProfileError.runtimeKernelsUnavailable(.affine8)) {
-            try RealForwardRunner.requireSupportedProfile(.affine8)
+    /// The runner has a kernel set for every pinned profile; a profile added
+    /// later stays refused until its kernels are wired in.
+    @Test func runnerAdmitsEveryPinnedProfile() throws {
+        #expect(RealForwardRunner.supportedProfiles == Set(QuantProfile.allCases))
+        for profile in QuantProfile.allCases {
+            try RealForwardRunner.requireSupportedProfile(profile)
         }
     }
 }
