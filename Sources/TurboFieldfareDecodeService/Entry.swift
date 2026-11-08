@@ -107,6 +107,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 do {
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     if let refusal = DecodeLoadAdmission.refusal(
+                        modelDirectory: directory,
                         maxContextTokens: request.maxContextTokens,
                         hostMemoryBytes: ContextAdmission.hostMemoryBytes,
                         environment: ProcessInfo.processInfo.environment,

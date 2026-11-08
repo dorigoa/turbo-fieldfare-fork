@@ -16,9 +16,44 @@ enum DecodeLoadAdmission {
     static let overrideEnvironmentKey = "TURBO_FIELDFARE_ALLOW_UNBACKED_CONTEXT"
 
     /// The message to answer the load with, or nil to proceed.
+    ///
+    /// `footprint` is the model's own; the default is the 4-bit pack's, which
+    /// is what every caller meant before the 8-bit variant existed.
     static func refusal(maxContextTokens: Int,
                         hostMemoryBytes: UInt64,
+                        environment: [String: String], expertCacheSlots: Int = 16,
+                        footprint: ModelFootprint = .affine4Measured) -> String? {
+        decide(maxContextTokens: maxContextTokens,
+               hostMemoryBytes: hostMemoryBytes,
+               environment: environment,
+               expertCacheSlots: expertCacheSlots,
+               footprint: { footprint })
+    }
+
+    /// The same rule for the model about to be loaded, sized from its
+    /// manifest: an 8-bit pack maps about twice the resident weights and fills
+    /// slots twice the size, so the 4-bit figures would admit a context the
+    /// host cannot back.
+    ///
+    /// Reads only `manifest.json`, and only once the ceiling and the override
+    /// have been decided. A manifest that cannot be read is a refusal, not a
+    /// fallback to the 4-bit footprint: guessing low is exactly the kill this
+    /// rule exists to prevent.
+    static func refusal(modelDirectory: URL,
+                        maxContextTokens: Int,
+                        hostMemoryBytes: UInt64,
                         environment: [String: String], expertCacheSlots: Int = 16) -> String? {
+        decide(maxContextTokens: maxContextTokens,
+               hostMemoryBytes: hostMemoryBytes,
+               environment: environment,
+               expertCacheSlots: expertCacheSlots,
+               footprint: { try ModelFootprint.forModelDirectory(modelDirectory) })
+    }
+
+    private static func decide(maxContextTokens: Int,
+                               hostMemoryBytes: UInt64,
+                               environment: [String: String], expertCacheSlots: Int,
+                               footprint readFootprint: () throws -> ModelFootprint) -> String? {
         let config = ArchConfig.gemma4_26B_A4B
         // The ceiling is the checkpoint's, not the host's, so no override
         // reaches it: memory cannot make a position the model was never
@@ -29,12 +64,20 @@ enum DecodeLoadAdmission {
                 maximum: config.maxPositionEmbeddings).description
         }
         guard environment[overrideEnvironmentKey] != "1" else { return nil }
+        let footprint: ModelFootprint
+        do {
+            footprint = try readFootprint()
+        } catch {
+            return "The model's memory needs could not be read from its manifest: \(error)"
+        }
         guard case .needsMemory = ContextAdmission.availability(
             config: config,
             maxContext: maxContextTokens,
-            hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) else { return nil }
+            hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+            footprint: footprint) else { return nil }
         return ContextAdmission.needDescription(config: config,
                                                 maxContext: maxContextTokens,
-                                                hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                                hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                                footprint: footprint)
     }
 }

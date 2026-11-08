@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareRepackCore
 
 public struct ExistingModelCandidate: Identifiable, Equatable, Sendable {
     public var id: String { textURL.path }
@@ -7,7 +8,22 @@ public struct ExistingModelCandidate: Identifiable, Equatable, Sendable {
     public let textStatus: AppModelInstallationStatus
     public let visionURL: URL
     public let visionStatus: AppVisionPackInstallationStatus
+    /// The catalog variant the text model was installed from, read from its
+    /// manifest. Choosing a candidate of another variant switches the app to
+    /// that variant.
+    public let variant: SupportedModelVariant?
     public var canSelect: Bool { textStatus == .complete }
+
+    public var variantSummary: String {
+        variant.map { "\($0.shortLabel) model" } ?? "Unknown variant"
+    }
+
+    /// What choosing this candidate does to the Model Variant setting, said
+    /// before the user confirms it. Nil when it keeps the current variant.
+    public func variantSwitchNote(from current: SupportedModelVariant) -> String? {
+        guard let variant, variant != current else { return nil }
+        return "Using this model switches Model Variant to \(variant.shortLabel)."
+    }
 
     public var textSummary: String {
         switch textStatus {
@@ -70,8 +86,9 @@ public enum ExistingModelSelection {
     public static func candidate(at textURL: URL) throws -> ExistingModelCandidate {
         let textURL = AppModelLocation.canonicalURL(textURL)
         return ExistingModelCandidate(textURL: textURL,
-                                      textStatus: AppModelInstallationProbe.status(at: textURL),
+                                      textStatus: AppModelInstallationProbe.status(anyVariantAt: textURL),
                                       visionURL: try VisionPackLocation.companionURL(forTextModel: textURL),
-                                      visionStatus: AppVisionPackInstallationProbe.status(at: textURL))
+                                      visionStatus: AppVisionPackInstallationProbe.status(at: textURL),
+                                      variant: AppModelInstallationProbe.detectVariant(at: textURL))
     }
 }

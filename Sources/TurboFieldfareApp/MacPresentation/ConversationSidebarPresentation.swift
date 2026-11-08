@@ -57,8 +57,13 @@ public enum ConversationRowPresentation {
     /// A row that cannot be continued says so here rather than being greyed
     /// out: a disabled row tells the user nothing, and the two reasons it can
     /// happen have completely different remedies.
+    ///
+    /// `recordedVariant` is the other catalog variant the chat was recorded
+    /// with (`AppModel.recordedOtherVariant(of:)`); naming it tells the user
+    /// which Model Variant setting would continue it.
     public static func subtitle(_ meta: ConversationMeta,
-                                state: ConversationContinuability) -> String {
+                                state: ConversationContinuability,
+                                recordedVariant: AppModelVariant? = nil) -> String {
         switch state {
         case .continuable:
             return meta.kvTokens.map { "\(decimal($0)) tokens" } ?? "\(meta.turnCount) turns"
@@ -68,7 +73,11 @@ public enum ConversationRowPresentation {
         case .cannotReplay(let reason):
             switch reason {
             case .newerFormat: return "recorded with a newer app version"
-            case .differentModel: return "recorded with a different model"
+            case .differentModel:
+                if let recordedVariant {
+                    return "recorded with the \(recordedVariant.shortLabel) model"
+                }
+                return "recorded with a different model"
             case .differentCheckpoint: return "recorded with a different checkpoint"
             case .differentTemplate: return "recorded with a different chat format"
             case .differentImageProcessing:
@@ -110,8 +119,12 @@ public enum ConversationStateNotice {
         public let offersReread: Bool
     }
 
+    /// `recordedVariant` is the other catalog variant the chat was recorded
+    /// with, if that is why it cannot continue; the message then names it and
+    /// the setting that would continue it.
     public static func content(for state: ConversationContinuability,
-                               currentContext: Int) -> Content? {
+                               currentContext: Int,
+                               recordedVariant: AppModelVariant? = nil) -> Content? {
         switch state {
         case .continuable:
             return nil
@@ -129,13 +142,22 @@ public enum ConversationStateNotice {
         case .cannotReplay(let reason):
             return Content(
                 title: "This chat can't be continued.",
-                message: message(for: reason),
+                message: message(for: reason, recordedVariant: recordedVariant),
                 requiredContext: nil,
                 offersReread: reason != .newerFormat)
         }
     }
 
-    private static func message(for reason: ConversationContinuability.Reason) -> String {
+    private static func message(for reason: ConversationContinuability.Reason,
+                                recordedVariant: AppModelVariant?) -> String {
+        if reason == .differentModel, let recordedVariant {
+            let label = recordedVariant.shortLabel
+            return "It was recorded with the \(label) model, and a chat continues "
+                + "only on the model that recorded it. To continue it, set "
+                + "Settings > Model Variant to \(label). You can also read it here, "
+                + "or re-read it into a new chat, which starts a different "
+                + "conversation from the same text."
+        }
         switch reason {
         case .newerFormat:
             return "This chat uses a newer history format. Open it with a newer "

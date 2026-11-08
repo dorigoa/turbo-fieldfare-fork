@@ -14,7 +14,8 @@ struct ConversationStateNoticeView: View {
     var body: some View {
         if let content = ConversationStateNotice.content(
             for: model.openedConversationState,
-            currentContext: model.maxContextTokens) {
+            currentContext: model.maxContextTokens,
+            recordedVariant: model.openedConversationRecordedVariant) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(content.title).font(.headline)
                 Text(content.message)

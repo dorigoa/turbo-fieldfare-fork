@@ -28,25 +28,41 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     }
 
     public var projectedFootprintBytes: UInt64 {
-        ContextAdmission.projectedFootprintBytes(config: Self.architecture,
-                                                 maxContext: tokens)
+        projectedFootprintBytes(footprint: .affine4Measured)
     }
 
     public var minimumHostMemoryBytes: UInt64 {
-        ContextAdmission.minimumHostMemoryBytes(config: Self.architecture,
-                                                maxContext: tokens)
+        minimumHostMemoryBytes(footprint: .affine4Measured)
     }
 
-    public func availability(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> ContextAdmission.Availability {
+    /// The same figures for another variant. The KV cache is the same FP16
+    /// geometry for every variant; what changes is the footprint around it.
+    public func projectedFootprintBytes(footprint: ModelFootprint) -> UInt64 {
+        ContextAdmission.projectedFootprintBytes(config: Self.architecture,
+                                                 maxContext: tokens,
+                                                 footprint: footprint)
+    }
+
+    public func minimumHostMemoryBytes(footprint: ModelFootprint) -> UInt64 {
+        ContextAdmission.minimumHostMemoryBytes(config: Self.architecture,
+                                                maxContext: tokens,
+                                                footprint: footprint)
+    }
+
+    public func availability(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
+                             footprint: ModelFootprint = .affine4Measured) -> ContextAdmission.Availability {
         ContextAdmission.availability(config: Self.architecture,
                                       maxContext: tokens,
-                                      hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                      hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                      footprint: footprint)
     }
 
-    public func needDescription(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> String {
+    public func needDescription(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
+                                footprint: ModelFootprint = .affine4Measured) -> String {
         ContextAdmission.needDescription(config: Self.architecture,
                                          maxContext: tokens,
-                                         hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                         hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                         footprint: footprint)
     }
 
     /// The options this host can actually back, in ascending order.
@@ -55,16 +71,24 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// it — one full-attention layer over sixteen rows already costs the whole
     /// 1,085 MiB — so admission is decided by the cap, never by how much of it
     /// a conversation happens to use.
-    public static func available(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> [AppContextLengthOption] {
-        allCases.filter { $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) == .available }
+    ///
+    /// Empty when the variant whose `footprint` this is cannot run on this host
+    /// at any context; the app then refuses the load outright.
+    public static func available(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
+                                 footprint: ModelFootprint = .affine4Measured) -> [AppContextLengthOption] {
+        allCases.filter {
+            $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                            footprint: footprint) == .available
+        }
     }
 
     /// The largest context this host can back, for clamping a stored choice it
     /// cannot. A host too small even for the smallest option still gets one:
     /// the loader refuses an unbacked context before it allocates, so the
     /// refusal is where that machine is told, not a menu with no rows in it.
-    public static func largestAvailable(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> AppContextLengthOption {
-        available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots).last ?? .fourK
+    public static func largestAvailable(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
+                                        footprint: ModelFootprint = .affine4Measured) -> AppContextLengthOption {
+        available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, footprint: footprint).last ?? .fourK
     }
 
     public static let defaultOption: AppContextLengthOption = .eightK

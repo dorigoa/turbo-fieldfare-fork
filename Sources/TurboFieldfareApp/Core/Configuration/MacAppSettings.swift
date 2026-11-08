@@ -30,6 +30,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var visionResidencyPolicy: VisionResidencyPolicy = .onDemand
     var rdadvisePolicy: AppRDAdvicePolicy = .off
     var loadModelOnLaunch: Bool = false
+    /// Which checkpoint the app installs and loads. Additive, like the fields
+    /// above: a file without it was written by a build that only knew the
+    /// 4-bit model, so absent means `int4` and costs no version bump.
+    var modelVariant: SupportedModelVariant = .int4
+    /// Where the 8-bit model lives. `selectedModelPath` stays the 4-bit
+    /// location, so an older build reading this file still finds its model
+    /// where it left it and never loads a checkpoint it cannot run.
+    var selectedModelPathInt8: String?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -51,6 +59,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case visionResidencyPolicy
         case rdadvisePolicy
         case loadModelOnLaunch
+        case modelVariant
+        case selectedModelPathInt8
     }
 
     init(version: Int = currentVersion,
@@ -71,7 +81,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          inspectorVisible: Bool = true,
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
          rdadvisePolicy: AppRDAdvicePolicy = .off,
-         loadModelOnLaunch: Bool = false) {
+         loadModelOnLaunch: Bool = false,
+         modelVariant: SupportedModelVariant = .int4,
+         selectedModelPathInt8: String? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -91,6 +103,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.visionResidencyPolicy = visionResidencyPolicy
         self.rdadvisePolicy = rdadvisePolicy
         self.loadModelOnLaunch = loadModelOnLaunch
+        self.modelVariant = modelVariant
+        self.selectedModelPathInt8 = selectedModelPathInt8
     }
 
     init(from decoder: Decoder) throws {
@@ -142,16 +156,52 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         loadModelOnLaunch = try container.decodeIfPresent(
             Bool.self,
             forKey: .loadModelOnLaunch) ?? false
+        // A variant this build does not know — written by a newer one — falls
+        // back to the 4-bit model rather than to settings-wide recovery, the
+        // same terms as `textSize`. `selectedModelPath` is the 4-bit location
+        // whatever the file says, so the fallback still names a real install.
+        if container.contains(.modelVariant) {
+            do {
+                modelVariant = try container.decode(SupportedModelVariant.self, forKey: .modelVariant)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "Invalid Mac app setting modelVariant: unsupported value or type; using 4-bit.\n".utf8))
+                modelVariant = .int4
+            }
+        }
+        selectedModelPathInt8 = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedModelPathInt8)
+    }
+
+    /// The saved location of `variant`'s install, if one was ever chosen.
+    func selectedModelPath(for variant: SupportedModelVariant) -> String? {
+        switch variant {
+        case .int4: selectedModelPath
+        case .int8: selectedModelPathInt8
+        }
+    }
+
+    mutating func setSelectedModelPath(_ path: String?, for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4: selectedModelPath = path
+        case .int8: selectedModelPathInt8 = path
+        }
     }
 
     /// Schema routing happens before decoding; value validation never replaces a damaged file.
     func isValid() -> Bool {
-        (selectedModelPath.map { $0.hasPrefix("/") && !$0.contains("\0") } ?? true)
+        Self.isValidModelPath(selectedModelPath)
+            && Self.isValidModelPath(selectedModelPathInt8)
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
+    }
+
+    private static func isValidModelPath(_ path: String?) -> Bool {
+        path.map { $0.hasPrefix("/") && !$0.contains("\0") } ?? true
     }
 }
 
@@ -178,8 +228,11 @@ enum MacAppSettingsFileStore {
         var settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
         guard settings.isValid() else { throw SettingsError.invalidValues }
         settings.version = MacAppSettings.currentVersion
-        if let path = settings.selectedModelPath {
-            settings.selectedModelPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        for variant in SupportedModelVariant.allCases {
+            if let path = settings.selectedModelPath(for: variant) {
+                settings.setSelectedModelPath(URL(fileURLWithPath: path).standardizedFileURL.path,
+                                              for: variant)
+            }
         }
         return settings
     }

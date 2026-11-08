@@ -247,7 +247,9 @@ struct ConversationSidebarView: View {
                     Text(ConversationRowPresentation.title(entry))
                         .lineLimit(1)
                         .foregroundStyle(.primary)
-                    Text(ConversationRowPresentation.subtitle(entry, state: state))
+                    Text(ConversationRowPresentation.subtitle(
+                        entry, state: state,
+                        recordedVariant: model.recordedOtherVariant(of: entry)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

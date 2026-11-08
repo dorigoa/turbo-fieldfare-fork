@@ -3,8 +3,17 @@ import Foundation
 import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
-func makeCompleteModelInstall(_ tag: String) throws -> URL {
-    let directory = FileManager.default.temporaryDirectory
+/// A metadata-only install that passes `AppModelInstallationProbe`.
+///
+/// `variant` picks the pinned source hash and the quantization profile the
+/// manifest records (`affine4` or `affine8`); `modelID` is what conversation
+/// identity reads; `location` puts it at a chosen path, which the receipt
+/// binds, instead of a fresh temporary one.
+func makeCompleteModelInstall(_ tag: String,
+                              variant: AppModelVariant = .int4,
+                              modelID: String = "test/gemma-4-26b-a4b",
+                              at location: URL? = nil) throws -> URL {
+    let directory = location?.standardizedFileURL ?? FileManager.default.temporaryDirectory
         .appendingPathComponent("turbofieldfare-complete-\(tag)-\(UUID().uuidString).gturbo")
     let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)
     try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
@@ -26,14 +35,14 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "versionMajor": 1,
         "versionMinor": 0,
         "flags": ["streamingPresent": true],
-        "modelID": "test/gemma-4-26b-a4b",
-        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.default.sourceIndexSHA256,
+        "modelID": modelID,
+        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.descriptor(for: variant).sourceIndexSHA256,
         "quant": [
-            "embedding": quantSlot(4),
-            "attention": quantSlot(4),
+            "embedding": quantSlot(variant == .int8 ? 8 : 4),
+            "attention": quantSlot(variant == .int8 ? 8 : 4),
             "router": quantSlot(8),
-            "sharedExpert": quantSlot(4),
-            "routedExpert": quantSlot(4),
+            "sharedExpert": quantSlot(variant == .int8 ? 8 : 4),
+            "routedExpert": quantSlot(variant == .int8 ? 8 : 4),
         ],
         "arch": [
             "hiddenSize": arch.hiddenSize,

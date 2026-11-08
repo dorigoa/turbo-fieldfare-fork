@@ -35,6 +35,10 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
     /// "Installed · Not loaded" with a `.load` action, and the banner rendered a
     /// fully enabled button that did nothing for the whole transfer.
     public var isVisionFilesystemMutationInProgress: Bool
+    /// Why this Mac cannot load the installed variant at any context. Without
+    /// it an installed 8-bit model on an 8 GB Mac resolved to "Installed · Not
+    /// loaded" with a Load button that the model then refused.
+    public var memoryRefusal: String?
 
     public init(requiresInstallation: Bool,
                 installState: AppModelInstallState,
@@ -47,7 +51,8 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
                 livePrefillDone: Int = 0,
                 livePrefillTotal: Int = 0,
                 lastStopReason: AppStopReason? = nil,
-                isVisionFilesystemMutationInProgress: Bool = false) {
+                isVisionFilesystemMutationInProgress: Bool = false,
+                memoryRefusal: String? = nil) {
         self.requiresInstallation = requiresInstallation
         self.installState = installState
         self.installReadiness = installReadiness
@@ -60,6 +65,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
         self.livePrefillTotal = livePrefillTotal
         self.lastStopReason = lastStopReason
         self.isVisionFilesystemMutationInProgress = isVisionFilesystemMutationInProgress
+        self.memoryRefusal = memoryRefusal
     }
 }
 
@@ -194,6 +200,9 @@ public struct AppPresentationState: Equatable, Sendable {
             return Self(label: "Ready", severity: .success, secondaryAction: .unload)
         }
 
+        if let refusal = snapshot.memoryRefusal {
+            return Self(label: "Needs more memory", detail: refusal, severity: .warning)
+        }
         return Self(label: "Installed · Not loaded", primaryAction: .load)
     }
 
