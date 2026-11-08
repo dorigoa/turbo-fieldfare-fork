@@ -1,15 +1,18 @@
 # Piano: inferenza di Qwen3.6-35B-A3B in TurboFieldfare (agente locale)
 
-- Versione piano: 2 (decisioni dell'utente U1–U6 confermate il 2026-11-08,
-  §10)
+- Versione piano: 3 (prompt completi per ogni sessione e passi dell'utente
+  tra le sessioni, §0.6–§0.7; decisioni U1–U6 confermate il 2026-11-08, §10)
 - Data analisi: 2026-11-08
 - Commit base analizzato: `badac9f` su `main` (contiene tutto il lavoro 8-bit,
   S0–S10)
 - Host dell'analisi: MacBook Air M5 (`Mac17,3`), 32 GB, macOS 27.2, Swift
   6.4.2, 202 GiB liberi sul volume dati
-- Modelli installati: `/Users/dorigo_a/LLM/TurboFieldfare/gemma4.gturbo`
+- Mac dove gira l'agente: il Mac Studio dell'utente. Il repository è la
+  cartella in cui l'agente parte; i modelli stanno in `~/LLM/TurboFieldfare/`
+  (vedi §0.1)
+- Modelli installati sul MacBook Air dell'analisi: `/Users/dorigo_a/LLM/TurboFieldfare/gemma4.gturbo`
   (13 GB) e `gemma4-8bit.gturbo` (25 GB); nessun pack immagini
-- Destinazione di Qwen: `/Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo`
+- Destinazione di Qwen: `~/LLM/TurboFieldfare/qwen36.gturbo`
 - Esecutore previsto: un agente di coding **sul Mac** che usa
   Qwen3.8-Flash-Next servito da Strata sul PC (contesto massimo 256K token)
 - Il lavoro resta nel fork: nessun push e nessuna PR senza richiesta
@@ -49,6 +52,16 @@ Strata non può compilare né eseguire i test. Quindi:
   `git reset --hard`, `git clean`, `kill`, `pkill` e download.
 - Il modello locale non usa memoria del Mac. Sul Mac può girare un solo
   processo TurboFieldfare (o `mlx_lm`) alla volta, come chiede AGENTS.md.
+- Il Mac dell'agente è il **Mac Studio** dell'utente, non il MacBook Air su
+  cui è stata fatta l'analisi. I prompt non dipendono dal percorso del
+  repository: l'agente parte dalla sua radice. I modelli stanno in
+  `~/LLM/TurboFieldfare/`; se su quel Mac sono altrove, l'utente lo dice
+  all'agente all'inizio di S03, che lo annota nel report. Il modello Gemma
+  4-bit lì serve solo in S14, per il controllo di regressione; se manca, S14
+  lo segnala nel report.
+- Il repository del Mac Studio deve contenere il piano aggiornato: dopo ogni
+  modifica al piano su `main`, `git pull` su `main` e poi
+  `git checkout feat/qwen36 && git merge main` (§0.7).
 
 ### 0.2 Ordine, branch e merge
 
@@ -121,31 +134,51 @@ Una sessione si ferma e scrive il report con stato "Bloccata" quando:
   cambierebbe altre sessioni;
 - serve un download, un permesso o una decisione non previsti dalla scheda.
 
-### 0.6 Prompt di avvio
+### 0.6 Prompt di avvio e di ripresa
 
-Prompt generico (ogni scheda in §8 ha il suo già compilato):
+Ogni scheda in §8 finisce con il suo **prompt completo**. Copialo così com'è
+in una sessione nuova dell'agente (in Pi: `/new`, poi incolla), senza
+modificarlo. Ogni prompt controlla da solo di girare sul Mac e che la
+sessione precedente sia già in `feat/qwen36`.
 
-```text
-Lavori nel repository TurboFieldfare in /Users/dorigo_a/turbo-fieldfare-fork,
-sul Mac. Leggi AGENTS.md, poi docs/plans/qwen36-model-family-plan.md: le
-sezioni 0-7 e la scheda della sessione <SNN> in §8. L'utente ti autorizza a
-modificare e creare solo i file che la scheda indica. Crea il branch
-feat/qwen36-<snn>-<slug> da feat/qwen36. Segui le regole comuni (§7). Dopo
-ogni task aggiorna docs/plans/qwen36-reports/<SNN>.progress.md e fai un commit.
-Alla fine scrivi docs/plans/qwen36-reports/<SNN>.md con il formato di §7.5 e
-fermati: il merge lo decide l'utente.
-```
-
-Prompt di ripresa:
+Se una sessione si interrompe (crash, contesto esaurito, harness chiuso), apri
+una sessione nuova e incolla il prompt di ripresa, con il numero della
+sessione al posto di `<SNN>` (per esempio `S01`):
 
 ```text
-Riprendi la sessione <SNN> del piano docs/plans/qwen36-model-family-plan.md
-nel repository /Users/dorigo_a/turbo-fieldfare-fork. Leggi AGENTS.md, le
-sezioni 0-7 del piano, la scheda <SNN> e
+Riprendi la sessione <SNN> del piano docs/plans/qwen36-model-family-plan.md.
+Verifica di essere su un Mac, nella radice del repository: `uname -s` deve
+stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+Package.swift di TurboFieldfare; se no, fermati e dillo all'utente.
+Leggi AGENTS.md, le sezioni 0-7 del piano, la scheda <SNN> in §8 (compreso
+il suo prompt, che dice cosa puoi toccare) e
 docs/plans/qwen36-reports/<SNN>.progress.md. Segui la procedura di §0.5:
 controlla branch, commit e processi, poi continua dal primo task non
-completato.
+completato, con le stesse autorizzazioni del prompt della scheda.
 ```
+
+### 0.7 Tra una sessione e l'altra: cosa fai tu
+
+1. Quando l'agente si ferma, apri il report
+   `docs/plans/qwen36-reports/SNN.md`. La cartella del repository è ancora
+   sul branch della sessione, quindi il file è lì. Guarda lo stato
+   ("Completata" o "Bloccata"), i test e le deviazioni dal piano.
+2. Se lo stato è "Bloccata", non fare il merge: porta il report a Claude o
+   decidi tu come proseguire.
+3. Se lo stato è "Completata", fai il merge nel branch di integrazione. Il
+   nome esatto del branch della sessione lo trovi con
+   `git branch --list 'feat/qwen36-*'`:
+
+   ```bash
+   git checkout feat/qwen36
+   git merge --no-ff feat/qwen36-sNN-<slug>
+   ```
+
+   Dopo S00, S03, S10 e S14 c'è anche il gate di §0.3: prima del merge
+   controlla quello che indica la tabella.
+4. Apri una sessione nuova dell'agente (`/new` in Pi) e incolla il prompt
+   della scheda successiva. Se hai dimenticato il merge, l'agente se ne
+   accorge, si ferma e te lo dice.
 
 ---
 
@@ -568,8 +601,9 @@ campo per campo, come per Gemma.
 ### C6 — Golden
 
 - Piccoli (in git), da S00: `Tests/TurboFieldfare/Core/Tokenization/Qwen/Fixtures/`
-  con `tokenizer_golden.json` e `chat_golden.json`. Dichiara la cartella come
-  risorsa del target di test in `Package.swift`, come le altre `Fixtures`.
+  con `tokenizer_golden.json` e `chat_golden.json`. S04 la dichiara come
+  risorsa del target `TurboFieldfareTestsCore` in `Package.swift` (oggi
+  `resources: [.copy("Runtime/Vision/Fixtures/images")]`).
 - Grandi (fuori git), da S03: `scratch/qwen36-golden/` (`scratch/` è già in
   `.gitignore`). Contiene, per 6 prompt: ID dei token, top-20 dei logit per
   posizione (teacher forcing), stati nascosti FP16 dopo i layer 0, 3 e 39 per
@@ -639,7 +673,7 @@ campo per campo, come per Gemma.
 - API pubblica compatibile: `PublicAPISignatureCompatibilityTests` resta
   verde. Si aggiunge, non si rimuove né si rinomina.
 - Nessun peso reale nello heap Swift: fixture piccole sì, pesi no.
-- Modelli reali in `/Users/dorigo_a/LLM/TurboFieldfare/`. Per il controllo
+- Modelli reali in `~/LLM/TurboFieldfare/`. Per il controllo
   di AGENTS.md usa symlink in `scratch/` (`scratch/qwen36.gturbo` dopo S03).
   Registra nel report come deviazione il fatto che AGENTS.md nomina solo i
   modelli Gemma.
@@ -721,16 +755,34 @@ nessun file Swift modificato.
 **Prompt.**
 
 ```text
-Lavori nel repository TurboFieldfare in /Users/dorigo_a/turbo-fieldfare-fork,
-sul Mac. Leggi AGENTS.md, poi docs/plans/qwen36-model-family-plan.md: le
-sezioni 0-7 e la scheda S00 in §8. Sei autorizzato a creare i branch
-feat/qwen36 e feat/qwen36-s00-facts, i file sotto scratch/qwen36-facts/ e
-scratch/qwen36-venv/, i golden in
-Tests/TurboFieldfare/Core/Tokenization/Qwen/Fixtures/ e i file in
-docs/plans/qwen36-reports/. Puoi scaricare solo gli header degli shard e i
-file del tokenizer indicati nella scheda. Non modificare file Swift. Dopo ogni
-task aggiorna docs/plans/qwen36-reports/S00.progress.md e fai un commit. Alla
-fine scrivi docs/plans/qwen36-reports/S00.md (§7.5) e fermati per il gate G0.
+Sessione S00 ("Verifica dei fatti e golden di tokenizer e chat") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git status`: il working tree deve essere pulito. Se il branch
+   feat/qwen36-s00-facts esiste già, è una ripresa: passa a quel branch e
+   segui §0.5 del piano. Altrimenti crea feat/qwen36 da main, poi
+   feat/qwen36-s00-facts da feat/qwen36.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano e la scheda S00 in §8.
+
+Puoi creare e modificare solo:
+- i file sotto scratch/qwen36-facts/ e scratch/qwen36-venv/;
+- i golden in Tests/TurboFieldfare/Core/Tokenization/Qwen/Fixtures/;
+- docs/plans/qwen36-reports/S00.md e S00.progress.md.
+Non modificare file Swift, Package.swift compreso.
+Download consentiti: solo gli header degli shard, i quattro file del
+tokenizer indicati nella scheda e i pacchetti Python transformers e jinja2
+nel venv. Niente modello reale.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S00.progress.md e fai un commit (messaggio in
+inglese). Alla fine scrivi docs/plans/qwen36-reports/S00.md con il formato di
+§7.5, fai il commit e fermati per il gate G0. Non fare merge e non iniziare
+S01.
 ```
 
 ### S01 — Contratti: famiglia, manifest, configurazione, segnaposto Metal
@@ -764,7 +816,47 @@ fine scrivi docs/plans/qwen36-reports/S00.md (§7.5) e fermati per il gate G0.
 
 **DoD.** Test di formato, configurazione e ammissione verdi; Gemma invariato.
 
-**Prompt.** Prompt generico di §0.6 con `<SNN>` = S01, slug `contracts`.
+**Prompt.**
+
+```text
+Sessione S01 ("Contratti: famiglia, manifest, configurazione, segnaposto
+Metal") del piano docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S00.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S00 in feat/qwen36.
+3. Crea il branch feat/qwen36-s01-contracts da feat/qwen36. Se esiste già, è
+   una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S01 in §8 e il
+report docs/plans/qwen36-reports/S00.md. Dove il report corregge il piano,
+vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfareFormat/ (GTurboManifestV1.swift, GTurboFormatV1.swift
+  e file nuovi);
+- in Sources/TurboFieldfare/Infrastructure/ModelIO/: ModelTypes.swift,
+  ManifestReader.swift e il file nuovo della configurazione Qwen;
+- Sources/TurboFieldfare/Runtime/Configuration/ContextAdmission.swift;
+- in Sources/TurboFieldfare/Infrastructure/Metal/MetalContext.swift solo le
+  liste shaderModules e shaderSubdirectories;
+- i file nuovi in Sources/TurboFieldfare/Metal/Qwen/;
+- test in Tests/TurboFieldfareFormat/, Tests/TurboFieldfareFormatCompatibility/
+  e Tests/TurboFieldfare/Core/ (Infrastructure/ModelIO, Runtime/Configuration
+  e cartelle Qwen nuove);
+- docs/plans/qwen36-reports/S01.md e S01.progress.md.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S01.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S01.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S02.
+```
 
 ### S02 — Planner del repack per Qwen
 
@@ -793,7 +885,40 @@ header e metadati e stampa il piano; l'installazione vera è in S03.
 
 **DoD.** Dry-run reale coerente con §2.4; test verdi; piani Gemma invariati.
 
-**Prompt.** Generico, S02, slug `repack-planner`.
+**Prompt.**
+
+```text
+Sessione S02 ("Planner del repack per Qwen") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S01.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S01 in feat/qwen36.
+3. Crea il branch feat/qwen36-s02-repack-planner da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S02 in §8 e i
+report S00.md e S01.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfareRepack/ (Core/Planning/, Core/Remote/,
+  Core/Format/, Command/main.swift e file nuovi);
+- test in Tests/TurboFieldfareRepack/;
+- docs/plans/qwen36-reports/S02.md e S02.progress.md.
+Download consentiti: solo metadati e header degli shard, per il --dry-run.
+Nessuna installazione: si fa in S03. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S02.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S02.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S03.
+```
 
 ### S03 — Installazione reale e golden del modello
 
@@ -804,7 +929,7 @@ header e metadati e stampa il piano; l'installazione vera è in S03.
 
 1. Preflight di §7.1 e spazio disco (servono circa 45 GB: 19,5 GB di
    `.gturbo` più 20,4 GB di checkpoint MLX nella cache di Hugging Face).
-2. `swift run -c release TurboFieldfareRepack --family qwen36 --output /Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo`
+2. `swift run -c release TurboFieldfareRepack --family qwen36 --output ~/LLM/TurboFieldfare/qwen36.gturbo`
    (con `--resume` se si interrompe), poi `--verify-install`. Symlink
    `scratch/qwen36.gturbo`.
 3. Nel venv installa `mlx-lm` (o `mlx-vlm`, D8), scarica il checkpoint MLX
@@ -819,8 +944,45 @@ header e metadati e stampa il piano; l'installazione vera è in S03.
 **DoD.** Install verificata; golden in `scratch/qwen36-golden/`; §3 confermato
 o corretto nel report.
 
-**Prompt.** Generico, S03, slug `install-golden`, più: "Sei autorizzato ai due
-download di U1 e all'installazione di mlx-lm nel venv".
+**Prompt.**
+
+```text
+Sessione S03 ("Installazione reale e golden del modello") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S02.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S02 in feat/qwen36.
+3. Crea il branch feat/qwen36-s03-install-golden da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S03 in §8 e i
+report S00.md e S02.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- scratch/qwen36-venv/ (crealo con python3 -m venv se manca);
+- scratch/qwen36-golden/ e il symlink scratch/qwen36.gturbo;
+- docs/plans/qwen36-reports/S03.md e S03.progress.md.
+Non modificare altri file del repository. Se il repack o la verifica
+falliscono per un errore nel codice, fermati e descrivilo nel report.
+Download consentiti (decisione U1): l'installazione di
+~/LLM/TurboFieldfare/qwen36.gturbo con TurboFieldfareRepack
+--family qwen36, il checkpoint MLX alla revisione pinnata per mlx-lm, i
+pacchetti mlx-lm (o mlx-vlm) nel venv. Nient'altro.
+Modello reale: sì, un processo alla volta, con il preflight di §7.1 prima di
+ogni esecuzione. Non terminare mai processi che non hai avviato tu.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S03.progress.md e fai un commit (messaggio in
+inglese). Alla fine scrivi docs/plans/qwen36-reports/S03.md con il formato di
+§7.5, fai il commit e fermati per il gate G1. Non fare merge e non iniziare
+S04.
+```
 
 ### S04 — Tokenizer Qwen
 
@@ -832,19 +994,58 @@ Gemma.
 
 **Task.**
 
-1. `QwenTokenizer` che carica il sidecar con `AutoTokenizer` (D6), verifica
+1. In `Package.swift` aggiungi `.copy("Tokenization/Qwen/Fixtures")` alle
+   `resources` del target `TurboFieldfareTestsCore` (C6).
+2. `QwenTokenizer` che carica il sidecar con `AutoTokenizer` (D6), verifica
    la pipeline (BPE, pre-tokenizer byte-level, decoder ByteLevel) e fallisce
-   in modo chiuso se cambia.
-2. Token speciali e ID da `added_tokens`; stop di §2.2.
-3. Detokenizzazione in streaming: un carattere UTF-8 diviso tra più token non
+   in modo chiuso se cambia. I file del tokenizer per i test sono in
+   `scratch/qwen36.gturbo/tokenizer/` (S03); i test che li richiedono si
+   saltano da soli se mancano.
+3. Token speciali e ID da `added_tokens`; stop di §2.2.
+4. Detokenizzazione in streaming: un carattere UTF-8 diviso tra più token non
    deve uscire spezzato.
-4. Test: tutti i golden di S00 (ID e testo decodificato); tempo di
+5. Test: tutti i golden di S00 (ID e testo decodificato); tempo di
    caricamento nel report.
-5. Report.
+6. Report.
 
 **DoD.** 100% dei golden uguali; nessuna modifica al tokenizer Gemma.
 
-**Prompt.** Generico, S04, slug `tokenizer`.
+**Prompt.**
+
+```text
+Sessione S04 ("Tokenizer Qwen") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S03.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S03 in feat/qwen36.
+3. Crea il branch feat/qwen36-s04-tokenizer da feat/qwen36. Se esiste già, è
+   una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S04 in §8 e i
+report S00.md e S03.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- file nuovi in Sources/TurboFieldfare/Tokenization/ (QwenTokenizer e
+  collegati);
+- in Package.swift solo le resources del target TurboFieldfareTestsCore;
+- test in Tests/TurboFieldfare/Core/Tokenization/Qwen/;
+- docs/plans/qwen36-reports/S04.md e S04.progress.md.
+Non modificare GFTokenizer né altri file Gemma.
+Download: nessuno. Modello reale: no (leggi solo i file del tokenizer in
+scratch/qwen36.gturbo/tokenizer/).
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S04.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S04.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S05.
+```
 
 ### S05 — Formato chat, ragionamento e tool call
 
@@ -870,7 +1071,41 @@ ragionamento e delle tool call.
 
 **DoD.** Golden uguali; test Gemma del formato chat invariati e verdi.
 
-**Prompt.** Generico, S05, slug `chat-format`.
+**Prompt.**
+
+```text
+Sessione S05 ("Formato chat, ragionamento e tool call") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S04.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S04 in feat/qwen36.
+3. Crea il branch feat/qwen36-s05-chat-format da feat/qwen36. Se esiste già,
+   è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S05 in §8 e i
+report S00.md e S04.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- file nuovi in Sources/TurboFieldfare/Tokenization/;
+- in Tokenizer.swift e StructuredAssistantDecoder.swift solo le modifiche
+  minime perché la parte Gemma implementi il protocollo del formato chat,
+  senza cambiarne l'output;
+- test in Tests/TurboFieldfare/Core/Tokenization/;
+- docs/plans/qwen36-reports/S05.md e S05.progress.md.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S05.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S05.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S06.
+```
 
 ### S06 — Kernel I: norme, router, embedding e testa
 
@@ -889,7 +1124,41 @@ esistenti.
 4. Riferimenti CPU e test (piccoli e reali).
 5. Report.
 
-**Prompt.** Generico, S06, slug `kernels-basic`.
+**Prompt.**
+
+```text
+Sessione S06 ("Kernel I: norme, router, embedding e testa") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S05.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S05 in feat/qwen36.
+3. Crea il branch feat/qwen36-s06-kernels-basic da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S06 in §8 e i
+report S00.md, S01.md e S03.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfare/Metal/Qwen/qwen_norms.metal e qwen_head.metal;
+- file nuovi in Sources/TurboFieldfare/Kernels/Qwen/;
+- file nuovi in Sources/TurboFieldfareValidation/Support/Reference/Qwen/;
+- test in Tests/TurboFieldfare/Core/Kernels/Qwen/;
+- docs/plans/qwen36-reports/S06.md e S06.progress.md.
+Non modificare kernel o wrapper esistenti.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S06.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S06.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S07.
+```
 
 ### S07 — Kernel II: Gated DeltaNet
 
@@ -907,11 +1176,45 @@ come esempio (cerca con `grep -rn simd_sum Sources/TurboFieldfare/Metal`).
 5. Riferimenti CPU e test: `T = 1`, `T = 7`, `T = 300`; continuità
    (prefill di `T1` poi `T2` passi di decode = prefill di `T1 + T2`); errore
    dello stato dopo 256 passi (C8).
-6. Con il modello installato: confronto di un layer 0 completo con i golden
-   di S03 (stato nascosto dopo il layer 0, teacher forcing).
-7. Report.
+6. Report. Il confronto con i pesi reali si fa in S10, quando esiste il
+   caricamento del modello.
 
-**Prompt.** Generico, S07, slug `kernels-deltanet`.
+**Prompt.**
+
+```text
+Sessione S07 ("Kernel II: Gated DeltaNet") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S06.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S06 in feat/qwen36.
+3. Crea il branch feat/qwen36-s07-kernels-deltanet da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S07 in §8 e i
+report S00.md, S03.md e S06.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano (per esempio l'ordine dei tap della conv o la mappa delle
+teste), vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfare/Metal/Qwen/qwen_deltanet.metal;
+- file nuovi in Sources/TurboFieldfare/Kernels/Qwen/;
+- file nuovi in Sources/TurboFieldfareValidation/Support/Reference/Qwen/;
+- test in Tests/TurboFieldfare/Core/Kernels/Qwen/;
+- docs/plans/qwen36-reports/S07.md e S07.progress.md.
+Non modificare kernel o wrapper esistenti.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S07.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S07.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S08.
+```
 
 ### S08 — Kernel III: full attention con gate
 
@@ -928,10 +1231,45 @@ finestra.
    FP16 di D4. Riusa un kernel esistente solo se lo supporta già senza
    modifiche.
 4. Gate d'uscita `sigmoid(gate)`.
-5. Riferimenti CPU e test; con il modello, confronto del layer 3 con i golden.
+5. Riferimenti CPU e test. Il confronto con i pesi reali si fa in S10.
 6. Report.
 
-**Prompt.** Generico, S08, slug `kernels-attention`.
+**Prompt.**
+
+```text
+Sessione S08 ("Kernel III: full attention con gate") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S07.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S07 in feat/qwen36.
+3. Crea il branch feat/qwen36-s08-kernels-attention da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S08 in §8 e i
+report S00.md, S03.md e S06.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfare/Metal/Qwen/qwen_attention.metal;
+- file nuovi in Sources/TurboFieldfare/Kernels/Qwen/;
+- file nuovi in Sources/TurboFieldfareValidation/Support/Reference/Qwen/;
+- test in Tests/TurboFieldfare/Core/Kernels/Qwen/;
+- docs/plans/qwen36-reports/S08.md e S08.progress.md.
+Non modificare kernel o wrapper esistenti: puoi solo chiamarli, se
+supportano già head_dim 256, GQA 8 e attention senza finestra.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S08.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S08.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S09.
+```
 
 ### S09 — Kernel IV: MoE SiLU e shared expert con gate
 
@@ -950,7 +1288,43 @@ expert (`Runtime/Inference/ModelExpertIO.swift`, `Infrastructure/Streaming/`).
 5. Riferimenti CPU e test.
 6. Report.
 
-**Prompt.** Generico, S09, slug `kernels-moe`.
+**Prompt.**
+
+```text
+Sessione S09 ("Kernel IV: MoE SiLU e shared expert con gate") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S08.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S08 in feat/qwen36.
+3. Crea il branch feat/qwen36-s09-kernels-moe da feat/qwen36. Se esiste già,
+   è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S09 in §8 e i
+report S00.md e S06.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfare/Metal/Qwen/qwen_moe.metal;
+- file nuovi in Sources/TurboFieldfare/Kernels/Qwen/;
+- file nuovi in Sources/TurboFieldfareValidation/Support/Reference/Qwen/;
+- test in Tests/TurboFieldfare/Core/Kernels/Qwen/;
+- docs/plans/qwen36-reports/S09.md e S09.progress.md.
+Non modificare kernel, wrapper o codice di streaming esistenti: puoi solo
+usarli. Se non si possono usare senza modifiche, fermati e descrivilo nel
+report.
+Download: nessuno. Modello reale: no.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S09.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S09.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S10.
+```
 
 ### S10 — Runtime: decode
 
@@ -975,7 +1349,48 @@ in `RealForwardRunner.swift` **solo** le funzioni di decode per un token
    (teacher forcing); continuazioni greedy (C8).
 7. Report. **Gate G2.**
 
-**Prompt.** Generico, S10, slug `runtime-decode`.
+**Prompt.**
+
+```text
+Sessione S10 ("Runtime: decode") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S09.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S09 in feat/qwen36.
+3. Crea il branch feat/qwen36-s10-runtime-decode da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S10 in §8 e i
+report S00.md, S03.md, S06.md, S07.md, S08.md e S09.md in
+docs/plans/qwen36-reports/. Dove un report corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- file nuovi in Sources/TurboFieldfare/Runtime/Inference/ e
+  Sources/TurboFieldfare/Runtime/KVCache/ (runner e cache Qwen);
+- in Sources/TurboFieldfare/Runtime/Inference/Model.swift e
+  Sources/TurboFieldfare/Infrastructure/ModelIO/ManifestReader.swift solo il
+  dispatch per famiglia e la rimozione, per Qwen, del messaggio "cannot run
+  them yet";
+- in Sources/TurboFieldfareCLI/ solo ciò che serve alla modalità raw
+  (--prompt) con Qwen;
+- test in Tests/TurboFieldfare/Core/Runtime/Qwen/;
+- docs/plans/qwen36-reports/S10.md e S10.progress.md.
+Non modificare RealForwardRunner.swift né i kernel esistenti.
+Download: nessuno. Modello reale: sì, con scratch/qwen36.gturbo e i golden
+in scratch/qwen36-golden/; un processo alla volta, con il preflight di §7.1
+prima di ogni esecuzione. Non terminare mai processi che non hai avviato tu.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S10.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S10.md con il formato di §7.5, fai il commit e
+fermati per il gate G2. Non fare merge e non iniziare S11.
+```
 
 ### S11 — Runtime: prefill a blocchi, continuazione e riuso del prefisso
 
@@ -994,7 +1409,44 @@ in `RealForwardRunner.swift` **solo** le funzioni di decode per un token
 5. Tempi di prefill nel report (per decidere S15).
 6. Report.
 
-**Prompt.** Generico, S11, slug `runtime-prefill`.
+**Prompt.**
+
+```text
+Sessione S11 ("Runtime: prefill a blocchi, continuazione e riuso del
+prefisso") del piano docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S10.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S10 in feat/qwen36.
+3. Crea il branch feat/qwen36-s11-runtime-prefill da feat/qwen36. Se esiste
+   già, è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S11 in §8 e i
+report S09.md e S10.md in docs/plans/qwen36-reports/. Dove un report
+corregge il piano, vale il report.
+
+Puoi creare e modificare solo:
+- i file Qwen creati in S06-S10 (runner, cache, kernel in Metal/Qwen/ e
+  Kernels/Qwen/, riferimenti CPU Qwen);
+- file nuovi in Sources/TurboFieldfare/Runtime/Prefill/;
+- test in Tests/TurboFieldfare/Core/Runtime/Qwen/ e
+  Tests/TurboFieldfare/Core/Kernels/Qwen/;
+- docs/plans/qwen36-reports/S11.md e S11.progress.md.
+Non modificare file Gemma.
+Download: nessuno. Modello reale: sì, un processo alla volta, con il
+preflight di §7.1 prima di ogni esecuzione. Non terminare mai processi che
+non hai avviato tu.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S11.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S11.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S12.
+```
 
 ### S12 — CLI e server
 
@@ -1017,7 +1469,44 @@ in `RealForwardRunner.swift` **solo** le funzioni di decode per un token
 6. Aggiorna `docs/OPENAI_SERVER.md`.
 7. Report.
 
-**Prompt.** Generico, S12, slug `cli-server`.
+**Prompt.**
+
+```text
+Sessione S12 ("CLI e server") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S11.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S11 in feat/qwen36.
+3. Crea il branch feat/qwen36-s12-cli-server da feat/qwen36. Se esiste già,
+   è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S12 in §8,
+docs/OPENAI_SERVER.md e i report S05.md, S10.md e S11.md in
+docs/plans/qwen36-reports/. Dove un report corregge il piano, vale il
+report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfareCLI/ e Sources/TurboFieldfareServer/;
+- Sources/TurboFieldfareDecodeProtocol/, solo se il server ne ha bisogno;
+- docs/OPENAI_SERVER.md;
+- test in Tests/TurboFieldfareServer/ e Tests/TurboFieldfare/Core/CLI/;
+- docs/plans/qwen36-reports/S12.md e S12.progress.md.
+Il comportamento con i modelli Gemma non deve cambiare.
+Download: nessuno. Modello reale: sì, solo prove brevi, un processo alla
+volta, con il preflight di §7.1. Il server solo su 127.0.0.1; alla fine
+chiudi il server che hai avviato tu, e solo quello.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S12.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S12.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S13.
+```
 
 ### S13 — Mac app
 
@@ -1039,7 +1528,42 @@ cita.
 7. Controlli SwiftUI di §7.1 e test; app costruita con `Scripts/build_app.sh`.
 8. Report.
 
-**Prompt.** Generico, S13, slug `mac-app`.
+**Prompt.**
+
+```text
+Sessione S13 ("Mac app") del piano docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S12.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S12 in feat/qwen36.
+3. Crea il branch feat/qwen36-s13-mac-app da feat/qwen36. Se esiste già, è
+   una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S13 in §8,
+docs/plans/8bit-reports/S6.md e i report S01.md e S12.md in
+docs/plans/qwen36-reports/. Dove un report corregge il piano, vale il
+report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfareApp/, Sources/TurboFieldfareDecodeService/ e
+  Sources/TurboFieldfareDecodeProtocol/;
+- test in Tests/TurboFieldfareApp/ e Tests/TurboFieldfareDecodeService/;
+- docs/plans/qwen36-reports/S13.md e S13.progress.md.
+SwiftUI: solo @StoredState e PreviewProvider; esegui i due controlli Ruby di
+§7.1. Il comportamento con i modelli Gemma non deve cambiare.
+Download: nessuno. Modello reale: no; le prove nell'app le fa l'utente.
+Costruisci l'app con Scripts/build_app.sh.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S13.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S13.md con il formato di §7.5, fai il commit e
+fermati. Non fare merge e non iniziare S14.
+```
 
 ### S14 — Validazione, misure, benchmark e documentazione
 
@@ -1056,7 +1580,44 @@ cita.
 5. Report finale con l'elenco di ciò che l'utente deve provare nell'app.
    **Gate G3.**
 
-**Prompt.** Generico, S14, slug `validation`.
+**Prompt.**
+
+```text
+Sessione S14 ("Validazione, misure, benchmark e documentazione") del piano
+docs/plans/qwen36-model-family-plan.md.
+
+Prima di tutto:
+1. Verifica di essere su un Mac, nella radice del repository: `uname -s`
+   deve stampare Darwin e la cartella corrente deve contenere AGENTS.md e
+   Package.swift di TurboFieldfare. Se no, fermati e dillo all'utente.
+2. `git checkout feat/qwen36`, poi `git status`: il working tree deve essere
+   pulito. Controlla che esista docs/plans/qwen36-reports/S13.md. Se manca,
+   fermati: l'utente deve prima fare il merge di S13 in feat/qwen36.
+3. Crea il branch feat/qwen36-s14-validation da feat/qwen36. Se esiste già,
+   è una ripresa: passa a quel branch e segui §0.5 del piano.
+
+Poi leggi AGENTS.md, le sezioni 0-7 del piano, la scheda S14 in §8,
+docs/COMMUNITY_BENCHMARKS.md e i report S10.md, S11.md, S12.md e S13.md in
+docs/plans/qwen36-reports/. Dove un report corregge il piano, vale il
+report.
+
+Puoi creare e modificare solo:
+- Sources/TurboFieldfare/Runtime/Configuration/ContextAdmission.swift e i
+  suoi test (valori misurati per Qwen);
+- README.md, docs/BENCHMARKS.md, docs/SYSTEM_DESIGN.md e
+  docs/RUNTIME_CONTROLS.md;
+- file di log e script in scratch/;
+- docs/plans/qwen36-reports/S14.md e S14.progress.md.
+Download: nessuno. Modello reale: sì, secondo docs/COMMUNITY_BENCHMARKS.md,
+un processo alla volta, con il preflight di §7.1 prima di ogni esecuzione.
+Non terminare mai processi che non hai avviato tu.
+
+Esegui i task della scheda in ordine. Dopo ogni task aggiorna
+docs/plans/qwen36-reports/S14.progress.md e fai un commit (messaggio in
+inglese). Alla fine esegui Scripts/test.sh, scrivi
+docs/plans/qwen36-reports/S14.md con il formato di §7.5, fai il commit e
+fermati per il gate G3. Non fare merge in main: lo decide l'utente.
+```
 
 ### S15 (facoltativa) — Prefill DeltaNet "chunked"
 
@@ -1106,12 +1667,12 @@ Scripts/test.sh
 LC_ALL=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
 LC_ALL=en_US.UTF-8 ruby Scripts/check_swiftui_macros.rb --self-test
 memory_pressure -Q
-df -h /Users/dorigo_a/LLM
+df -h ~/LLM
 swift build -c release 2>&1 | tail -n 80
-swift run -c release TurboFieldfareRepack --family qwen36 --dry-run --output /Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo
-swift run -c release TurboFieldfareRepack --family qwen36 --output /Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo
-swift run -c release TurboFieldfareRepack --verify-install --input-gturbo /Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo
-ln -s /Users/dorigo_a/LLM/TurboFieldfare/qwen36.gturbo scratch/qwen36.gturbo
+swift run -c release TurboFieldfareRepack --family qwen36 --dry-run --output ~/LLM/TurboFieldfare/qwen36.gturbo
+swift run -c release TurboFieldfareRepack --family qwen36 --output ~/LLM/TurboFieldfare/qwen36.gturbo
+swift run -c release TurboFieldfareRepack --verify-install --input-gturbo ~/LLM/TurboFieldfare/qwen36.gturbo
+ln -s ~/LLM/TurboFieldfare/qwen36.gturbo scratch/qwen36.gturbo
 swift run -c release TurboFieldfareCLI --model scratch/qwen36.gturbo --prompt "The capital of France is" --max-new 32
 ```
 
