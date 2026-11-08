@@ -80,4 +80,155 @@ import TurboFieldfare
                                             hostMemoryBytes: twentyFourGigabyteHost,
                                             environment: [:]) == nil)
     }
+
+    // MARK: - Footprint from the model being loaded
+
+    private let sixteenGigabyteHost: UInt64 = 17_179_869_184
+
+    /// The service sizes the load from the manifest of the model it is about
+    /// to open, not from the 4-bit constants: an 8-bit pack on an 8 GB Mac is
+    /// refused at every context, and admitted on a 16 GB one.
+    @Test(arguments: [4_096, 8_192])
+    func aneightBitManifestIsRefusedOnEightGBAndAdmittedOnSixteen(context: Int) throws {
+        let directory = try writeManifest(bits: 8)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let refusal = try #require(DecodeLoadAdmission.refusal(
+            modelDirectory: directory, maxContextTokens: context,
+            hostMemoryBytes: eightGigabyteHost, environment: [:]))
+        #expect(refusal.contains("16 GB"))
+        #expect(refusal.contains("8 GB"))
+        #expect(DecodeLoadAdmission.refusal(
+            modelDirectory: directory, maxContextTokens: context,
+            hostMemoryBytes: sixteenGigabyteHost, environment: [:]) == nil)
+        // The same request sized with the 4-bit figures would have gone ahead.
+        #expect(DecodeLoadAdmission.refusal(maxContextTokens: context,
+                                            hostMemoryBytes: eightGigabyteHost,
+                                            environment: [:]) == nil)
+    }
+
+    /// A 4-bit manifest gets exactly the answers the service gave before.
+    @Test(arguments: [8_192, 131_072, 262_144])
+    func afourBitManifestDecidesAsBefore(context: Int) throws {
+        let directory = try writeManifest(bits: 4)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for host in [eightGigabyteHost, sixteenGigabyteHost, twentyFourGigabyteHost] {
+            for slots in [16, 32] {
+                #expect(DecodeLoadAdmission.refusal(
+                    modelDirectory: directory, maxContextTokens: context,
+                    hostMemoryBytes: host, environment: [:], expertCacheSlots: slots)
+                    == DecodeLoadAdmission.refusal(maxContextTokens: context,
+                                                   hostMemoryBytes: host, environment: [:],
+                                                   expertCacheSlots: slots))
+            }
+        }
+    }
+
+    /// Guessing the 4-bit footprint for a model whose manifest cannot be read
+    /// is guessing low, which is the kill this rule exists to prevent.
+    @Test func amanifestThatCannotBeReadIsARefusal() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admission-missing-\(UUID()).gturbo")
+        let refusal = try #require(DecodeLoadAdmission.refusal(
+            modelDirectory: missing, maxContextTokens: 8_192,
+            hostMemoryBytes: twentyFourGigabyteHost, environment: [:]))
+        #expect(refusal.contains("manifest"))
+    }
+
+    /// The override and the ceiling are decided before the manifest is read:
+    /// the first skips it, the second is not a memory question.
+    @Test func theoverrideAndTheCeilingDoNotNeedTheManifest() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admission-missing-\(UUID()).gturbo")
+        #expect(DecodeLoadAdmission.refusal(
+            modelDirectory: missing, maxContextTokens: 8_192,
+            hostMemoryBytes: eightGigabyteHost,
+            environment: [DecodeLoadAdmission.overrideEnvironmentKey: "1"]) == nil)
+        let ceiling = ArchConfig.gemma4_26B_A4B.maxPositionEmbeddings
+        let refusal = try #require(DecodeLoadAdmission.refusal(
+            modelDirectory: missing, maxContextTokens: ceiling + 1,
+            hostMemoryBytes: twentyFourGigabyteHost, environment: [:]))
+        #expect(refusal.contains("262145"))
+    }
+
+    /// The default footprint parameter is the 4-bit pack's, so callers that
+    /// predate variants keep their answers.
+    @Test func theexplicitFootprintDefaultsToTheFourBitPack() {
+        for context in [8_192, 262_144] {
+            #expect(DecodeLoadAdmission.refusal(maxContextTokens: context,
+                                                hostMemoryBytes: eightGigabyteHost, environment: [:],
+                                                footprint: .affine4Measured)
+                == DecodeLoadAdmission.refusal(maxContextTokens: context,
+                                               hostMemoryBytes: eightGigabyteHost, environment: [:]))
+        }
+        #expect(DecodeLoadAdmission.refusal(maxContextTokens: 4_096,
+                                            hostMemoryBytes: eightGigabyteHost, environment: [:],
+                                            footprint: .affine8Provisional) != nil)
+    }
+
+    /// Just the manifest: the footprint is read from it alone, so no weights,
+    /// layout or receipt are needed to exercise the rule.
+    private func writeManifest(bits: Int) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admission-\(bits)bit-\(UUID().uuidString).gturbo")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let arch = ArchConfig.gemma4_26B_A4B
+        func slot(_ weightBits: Int) -> [String: Any] {
+            ["weightBits": weightBits, "scheme": "affine", "scaleType": "bf16",
+             "biasType": "bf16", "groupSize": Quantization.groupSize]
+        }
+        var files: [String: Any] = [
+            "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
+            "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
+        ]
+        for layer in 0..<arch.numLayers {
+            files[String(format: "packed_experts/layer_%02d.bin", layer)] = [
+                "size": 0, "sha256": String(repeating: "0", count: 64),
+            ]
+        }
+        let manifest: [String: Any] = [
+            "magic": "GTURBO",
+            "versionMajor": 1,
+            "versionMinor": 0,
+            "flags": ["streamingPresent": true],
+            "modelID": "test/gemma-4-26b-a4b",
+            "sourceSnapshotHash": "sha256:" + String(repeating: "0", count: 64),
+            "quant": [
+                "embedding": slot(bits),
+                "attention": slot(bits),
+                "router": slot(8),
+                "sharedExpert": slot(bits),
+                "routedExpert": slot(bits),
+            ],
+            "arch": [
+                "hiddenSize": arch.hiddenSize,
+                "ffnIntermediate": arch.intermediateSize,
+                "moeIntermediateSize": arch.moeIntermediateSize,
+                "numHeads": arch.numHeads,
+                "numKVHeads": arch.numKVHeads,
+                "numFullKVHeads": arch.numFullKVHeads,
+                "headDim": arch.headDim,
+                "fullHeadDim": arch.fullHeadDim,
+                "vocabSize": arch.vocabSize,
+                "slidingWindow": arch.slidingWindow,
+                "finalLogitSoftcap": arch.finalLogitSoftcap,
+                "ropeTheta": arch.ropeTheta,
+                "fullRopeTheta": arch.fullRopeTheta,
+                "partialRotaryFactor": arch.partialRotaryFactor,
+                "numLayers": arch.numLayers,
+                "numExperts": arch.numExperts,
+                "topKExperts": arch.topKExperts,
+                "tieWordEmbeddings": arch.tieWordEmbeddings,
+                "attentionKEqV": arch.attentionKEqV,
+                "hiddenActivation": arch.hiddenActivation,
+                "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+            ],
+            "files": files,
+            "expertsPerLayer": arch.numExperts,
+            "numLayers": arch.numLayers,
+            "expertStride": UInt64(getpagesize()),
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+            .write(to: directory.appendingPathComponent("manifest.json"))
+        return directory
+    }
 }
