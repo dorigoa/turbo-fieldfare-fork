@@ -32,7 +32,7 @@ model, so an unsupported combination fails immediately with the usage text.
 
 | Control | Mac values | CLI and server flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32 | `--expert-cache-slots` | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. Chunked prefill requires at least 16 slots. |
+| Expert-cache slots | 8, 16, 24, 32 | `--expert-cache-slots` | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM: each slot holds one routed expert in each of the 30 layers, twice as large with the 8-bit model. See [Context length and memory](#context-length-and-memory). Chunked prefill requires at least 16 slots. |
 | Expert-cache policy | LFU | `--expert-cache-policy lfu\|lru` | LFU | Chooses which expert is evicted when the cache is full. |
 | Prompt prefill | On, off | `--prefill on\|off` | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | Prefill chunk size | 128 | `--prefill-chunk-tokens 32\|64\|128\|256\|auto` | 128 | Sets the number of prompt tokens processed by each chunked-prefill step, and has no effect while prefill is off. Chunks loop outside layers, so each one re-reads that layer's routed experts: fewer, larger chunks read less. `auto` picks the smallest size that covers the prompt. On the server `auto` is the cap, 256: a per-request size is the smallest allowed size covering the span, so the cap prefills every prompt in exactly those spans, and the KV ring is sized from the cap either way. Only the prefill scratch is sized from the chunk, at about 125.5 KB per token over a fixed 328 KB, so the cap holds about 32.5 MB of it against 16.4 MB at 128, and a per-request size would reallocate it whenever the chosen size moved. On a 7,019-token prompt, 256 measured 16% faster than 128 with byte-identical output. |
@@ -122,10 +122,25 @@ The model supports up to 256K tokens, but larger contexts need more RAM. The
 KV cache is allocated when the model loads, even if the conversation is empty.
 The server also offers 96K and 192K.
 
-The memory check includes the KV cache, 2 GiB for the runtime with 16
-expert-cache slots, and 3 GiB for macOS and the file cache. Choosing 24 or 32
-slots adds about 0.75 or 1.50 GiB. On an 8 GB Mac, neither leaves enough room
-for 128K under this estimate.
+The memory check includes the KV cache, the runtime with 16 expert-cache
+slots, and headroom for macOS and the file cache. The last two depend on the
+model variant, which the app takes from **Settings > Model Variant** and the
+CLI and server read from the model's manifest:
+
+| Figure | 4-bit model | 8-bit model |
+| --- | ---: | ---: |
+| Runtime with 16 slots | 2 GiB | 4 GiB (provisional) |
+| macOS and file cache | 3 GiB | 5 GiB (provisional) |
+| One routed-expert slot | 3,358,720 bytes | 6,324,224 bytes |
+| 24 slots instead of 16 | About 0.75 GiB more | About 1.41 GiB more |
+| 32 slots instead of 16 | About 1.50 GiB more | About 2.83 GiB more |
+
+A slot holds one routed expert in each of the 30 layers, so each slot above 16
+costs 30 expert strides. With the 4-bit model on an 8 GB Mac, neither 24 nor
+32 slots leaves enough room for 128K under this estimate. The 8-bit model needs
+about 9.3 GiB even at 4K, so it is refused on an 8 GB Mac at every context.
+Its two provisional figures are scaled conservatively from the 4-bit ones
+until they are measured; its slot size is exact.
 
 When a setting exceeds the estimate:
 

@@ -15,6 +15,9 @@ public struct ServerArguments: Equatable, Sendable {
     public let rdadvisePolicy: RDAdvicePolicyMode
     public let visionPack: String?
     public let visionResidency: VisionResidencyPolicy
+    /// The variant the model's manifest recorded at parse time; nil when the
+    /// directory had no manifest, which the load then reports.
+    public let modelVariant: ServerModelVariant?
 
     public static let allowedMaxContext = [
         4_096, 8_192, 16_384, 32_768, 65_536, 98_304, 131_072, 196_608, 262_144,
@@ -29,10 +32,13 @@ public struct ServerArguments: Equatable, Sendable {
       --vision-residency <on-demand|keep-ready>
                                  Routed-expert residency during vision (default on-demand).
       --port <1...65535>         Loopback port (default 8080).
-      --model-id <id>            API model identifier (default gemma-4-26b-a4b-it).
+      --model-id <id>            API model identifier (default gemma-4-26b-a4b-it
+                                 for a 4-bit model; an 8-bit model uses its
+                                 manifest's model ID).
       --max-context <tokens>     4096, 8192, 16384, 32768, 65536, 98304,
                                  131072, 196608, or 262144 (default 16384).
-                                 Contexts exceeding the host memory budget are refused.
+                                 Contexts exceeding the host memory budget are refused;
+                                 the budget follows the model's variant.
                                  TURBO_FIELDFARE_ALLOW_UNBACKED_CONTEXT=1 overrides this.
       --queue-limit <count>      Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
@@ -91,11 +97,14 @@ public struct ServerArguments: Equatable, Sendable {
     public static func parse(
         _ input: [String],
         hostMemoryBytes: UInt64 = ContextAdmission.hostMemoryBytes,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        readModelVariant: (URL) throws -> ServerModelVariant? = {
+            try ServerModelVariant.read(modelDirectory: $0)
+        }
     ) throws -> ServerArguments {
         var model: String?
         var port = 8080
-        var modelID = "gemma-4-26b-a4b-it"
+        var modelID: String?
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
@@ -205,24 +214,41 @@ public struct ServerArguments: Equatable, Sendable {
             }
         }
         guard let model else { throw ServerArgumentError.invalid("--model is required") }
+        // Same resolution as the load, so both read the same manifest.
+        let modelVariant: ServerModelVariant?
+        do {
+            modelVariant = try readModelVariant(URL(fileURLWithPath: model).standardizedFileURL)
+        } catch {
+            throw ServerArgumentError.invalid("--model manifest is not usable: \(error)")
+        }
         // Refused here rather than at load: the KV allocation for a context the
         // host cannot back fails deep inside the runtime, after the model has
         // already started loading, with an allocator error that says nothing
-        // about how much memory the choice actually needs.
+        // about how much memory the choice actually needs. An 8-bit model
+        // needs more than the 4-bit figures. Without a manifest the load fails
+        // anyway, so the 4-bit figure every model was admitted with before
+        // variants existed decides nothing that matters.
         let config = ArchConfig.gemma4_26B_A4B
+        let footprint = modelVariant?.footprint ?? .affine4Measured
         if case .needsMemory = ContextAdmission.availability(config: config,
                                                              maxContext: maxContext,
-                                                             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots),
+                                                             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                                             footprint: footprint),
            environment[unbackedContextOverrideVariable] != "1" {
+            let need = ContextAdmission.needDescription(config: config,
+                                                        maxContext: maxContext,
+                                                        hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
+                                                        footprint: footprint)
             throw ServerArgumentError.invalid(
-                ContextAdmission.needDescription(config: config,
-                                                 maxContext: maxContext,
-                                                 hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                (modelVariant.map { "\($0.label) model: " } ?? "")
+                    + need
                     + " Set \(unbackedContextOverrideVariable)=1 to start anyway.")
         }
         return ServerArguments(model: model,
                                port: port,
-                               modelID: modelID,
+                               modelID: modelID
+                                   ?? modelVariant?.defaultAPIModelID
+                                   ?? ServerModelVariant.legacyAPIModelID,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
@@ -232,7 +258,19 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunkTokens: prefillChunkTokens,
                                rdadvisePolicy: rdadvisePolicy,
                                visionPack: visionPack,
-                               visionResidency: visionResidency)
+                               visionResidency: visionResidency,
+                               modelVariant: modelVariant)
+    }
+
+    /// The line printed once the port is open. Fields are only ever appended,
+    /// so a script that reads the earlier ones keeps working. `model` is the
+    /// API model ID requests must name; `manifest_model_id` is the source the
+    /// loaded pack was built from.
+    public func readyLine(servedVariant: ServerModelVariant, visionCapability: String) -> String {
+        "TurboFieldfareServer ready at http://127.0.0.1:\(port) model=\(modelID) "
+            + "context=\(maxContext) prompt_cache=\(promptCacheMode.rawValue) "
+            + "vision=\(visionCapability) vision_residency=\(visionResidency.rawValue) "
+            + "variant=\(servedVariant.label) manifest_model_id=\(servedVariant.manifestModelID)"
     }
 }
 

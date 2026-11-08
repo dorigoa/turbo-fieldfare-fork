@@ -6,9 +6,11 @@ has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
 
-This document covers the current `production` path. The [optimization
-journey](OPTIMIZATION_JOURNEY.md) covers the experiments, including the
-failures and changes we later reversed.
+This document covers the current `production` path, which runs the default
+4-bit model. An experimental 8-bit variant of the same checkpoint shares the
+design; [Model variants](#model-variants) lists what differs. The
+[optimization journey](OPTIMIZATION_JOURNEY.md) covers the experiments,
+including the failures and changes we later reversed.
 
 Prefill and decode are the two execution modes used below. Prefill processes
 known prompt tokens in bounded chunks; decode generates one new token at a
@@ -25,9 +27,11 @@ Only a few properties of Gemma 4 determine most of the system design:
 - A dense shared expert forms a separate branch alongside the routed experts.
   Its output is added without a routing weight.
 - The embedding and language-model head share the same quantized weights.
-- The pinned instruction checkpoint uses MLX affine quantization: packed 4-bit
-  values with a BF16 scale and BF16 bias for each group of 64 weights. Router
-  projections use 8-bit weights; shared and routed experts use 4-bit weights.
+- The default pinned instruction checkpoint uses MLX affine quantization:
+  packed 4-bit values with a BF16 scale and BF16 bias for each group of 64
+  weights. Router projections use 8-bit weights; shared and routed experts use
+  4-bit weights. The experimental 8-bit checkpoint packs every slot at 8 bits
+  with the same groups, scales, and biases.
 
 For a visual introduction to Gemma 4's hybrid attention and MoE structure, see
 [A Visual Guide to Gemma 4](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-gemma-4).
@@ -48,12 +52,18 @@ layer scalar, and a final logit softcap of `30.0`.
 
 ## Source weights and bounded repack
 
-The installer reads
-[`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit)
-at revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d`. The accepted source index has
-SHA-256 `bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13`.
-The installer does not download a complete Hugging Face snapshot or
-write a complete safetensors shard to disk.
+The installer reads one of two pinned sources, chosen with `--variant`:
+
+| Variant | Repository | Revision | Source index SHA-256 |
+| --- | --- | --- | --- |
+| `int4` (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | `bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13` |
+| `int8` | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | `33c6d23798a0af159529890f79329206dbfbd73c` | `4b96ec862d7ae3f8d150b22b295cefcc9b5ef5e83f172f530dc1f2d2c11339cc` |
+
+Each variant is pinned by revision and source index hash. The two checkpoints
+have the same 1,697 tensor names; the 8-bit packed weights are twice as wide,
+and their scales and biases have the same shapes. The installer does not
+download a complete Hugging Face snapshot or write a complete safetensors
+shard to disk.
 
 Instead, the repacker:
 
@@ -115,10 +125,20 @@ The expert stride is page aligned, and each sub-tensor has its own offset.
 Metal kernels bind subregions of an existing buffer instead of creating one
 buffer per tensor.
 
-The current production manifest describes the model's group-64 affine
-quantization: 4-bit embedding and attention weights, an 8-bit router, and
-4-bit shared and routed experts. Missing or incompatible quantization metadata
-is rejected.
+The manifest records the group-64 affine bit width of each quantization slot,
+and the runtime accepts exactly two combinations, called profiles:
+
+| Profile | Embedding and head | Attention | Router | Shared expert | Routed experts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `affine4` (4-bit model) | 4 | 4 | 8 | 4 (8 in the historical pack) | 4 |
+| `affine8` (8-bit model) | 8 | 8 | 8 | 8 | 8 |
+
+Any other combination, and missing or incompatible quantization metadata, is
+rejected at load, so a manifest cannot pair bit widths no kernel set was
+written for. The format stays `.gturbo` v1.0: a build from before the 8-bit
+variant rejects an `affine8` manifest on its own. For `affine8`, the installer
+also aligns every resident quantized weight to 16 bytes, padding with zeros
+between entries; the 4-bit resident layout is unchanged.
 
 `manifest.json` marks the installation as complete and defines what the runtime
 may load. It records the architecture, file sizes, and SHA-256 hashes. Without
@@ -171,6 +191,48 @@ Each opened layer has 16 expert slots, but untouched slot pages are not
 necessarily resident. RSS and physical footprint depend on the layers and
 experts used, file-cache state, and memory pressure. Static capacity therefore
 does not predict process RSS.
+
+### Model variants
+
+The 8-bit variant changes sizes, not structure. Its figures below are computed
+from the pinned checkpoint's metadata (the installer's `--dry-run`), not
+measured on a running model:
+
+| Resource | 4-bit (measured) | 8-bit (computed) |
+| --- | ---: | ---: |
+| Common model file | 1,353,771,068 bytes | 2,545,592,786 bytes |
+| Routed-expert payload per expert | 3,345,408 bytes | 6,319,104 bytes |
+| Expert stride (16 KiB pages) | 3,358,720 bytes | 6,324,224 bytes |
+| One `layer_XX.bin` (128 experts) | 429,916,160 bytes | 809,500,672 bytes |
+| All 30 layer files | 12,897,484,800 bytes (12.01 GiB) | 24,285,020,160 bytes (22.62 GiB) |
+| Slot capacity, 16 slots × 30 layers | About 1.50 GiB | About 2.83 GiB |
+| Installation | About 14.3 GB | About 26.9 GB |
+
+The 8-bit expert blob keeps the planner's order, gate, up, and down, each as
+weights, scales, and biases. Every sub-tensor offset is a multiple of 16 bytes
+and each slot base is 2 MiB aligned, so routed 8-bit weight rows are 16-byte
+aligned. Every expert miss reads about 1.9 times as many bytes as in the 4-bit
+model.
+
+### Memory admission
+
+Before a load, every surface asks one rule whether the host can back the
+requested context: the app hides a context it cannot back, the server refuses
+to start, and the CLI warns. The rule adds the FP16 KV cache to two
+per-variant figures, the runtime's non-KV footprint with 16 expert-cache slots
+and the headroom left to macOS and the file cache, plus each slot above 16 at
+the variant's page-rounded stride. The variant comes from the model's manifest.
+
+| Figure | 4-bit | 8-bit |
+| --- | ---: | ---: |
+| Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 4 GiB (provisional) |
+| Host reserve | 3 GiB | 5 GiB (provisional) |
+| Each slot above 16, all 30 layers | 3,358,720 bytes × 30 | 6,324,224 bytes × 30 |
+
+The 8-bit figures are a conservative estimate scaled from the 4-bit ones, to
+be replaced by a measurement. With them, even a 4K context needs about
+9.3 GiB, so an 8 GB Mac is refused the 8-bit model while a 16 GB Mac is
+admitted.
 
 ## Load and ownership
 
@@ -438,7 +500,8 @@ references lead to the supporting code and tests.
 ## Scope and limitations
 
 The current runtime supports text and image input with the pinned Gemma 4
-26B-A4B instruction checkpoint. Image support is optional. The vision tower
+26B-A4B instruction checkpoint. The 8-bit variant is experimental and pending
+validation. Image support is optional. The vision tower
 and projector live in a separate companion pack, so an installation without
 that pack has the footprint it had before. The image tower requires M2 or
 newer; text-only inference remains available on M1. See [Images](#images).

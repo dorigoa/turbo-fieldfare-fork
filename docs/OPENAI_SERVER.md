@@ -25,7 +25,20 @@ swift build -c release --product TurboFieldfareServer
 
 The server loads the model before opening the port. Wait for
 `TurboFieldfareServer ready`, then keep the process running while clients use
-it.
+it. The ready line names the API model ID (`model=`), and at its end the
+model's variant (`variant=4-bit` or `variant=8-bit`) and the model ID its
+manifest records (`manifest_model_id=`). Before that, stderr logs
+`model opened` with the same two fields once the weights are open.
+
+To serve the experimental 8-bit variant, pass its directory. The server reads
+the variant from the model's manifest; there is no variant flag:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/gemma4-8bit.gturbo \
+  --port 8080 \
+  --max-context 16384
+```
 
 Check the server from another terminal:
 
@@ -41,6 +54,9 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
     "max_completion_tokens": 16
   }'
 ```
+
+Requests must name the server's API model ID, which `GET /v1/models` lists.
+See [Model ID](#model-id) for the 8-bit value.
 
 By default, the server runs one generation and admits up to four additional
 requests for preparation or queueing. The limit is enforced before prompt
@@ -76,10 +92,30 @@ requires `--prefill off`.
 The settings are fixed for the life of the process. Restart the server to
 change them.
 
+## Model ID
+
+Every request's `model` field must match the server's API model ID; any other
+value returns HTTP 404 with `model_not_found`. Without `--model-id`, the ID
+follows the model's variant:
+
+| Variant | API model ID |
+| --- | --- |
+| 4-bit | `gemma-4-26b-a4b-it` |
+| 8-bit | `mlx-community/gemma-4-26b-a4b-it-8bit` |
+
+The 4-bit model keeps the ID it always had, so existing client settings keep
+working. The 8-bit model answers to the model ID in its manifest, its source
+repository, so a client still set up for the 4-bit name is refused instead of
+being served a different variant without notice. `--model-id <id>` replaces
+the ID for either variant. `GET /v1/models` lists the ID in use, and responses
+echo it in their `model` field.
+
 ## Connect a client
 
 The base URL is `http://127.0.0.1:8080/v1`. Some client libraries require an
-API key, but the server ignores it.
+API key, but the server ignores it. The examples below use the 4-bit model ID;
+with the 8-bit model, use `mlx-community/gemma-4-26b-a4b-it-8bit` wherever
+they say `gemma-4-26b-a4b-it`.
 
 Python:
 
@@ -254,8 +290,11 @@ batching, log probabilities, or remote model switching.
 
 Context length can be 4K, 8K, 16K, 32K, 64K, 96K, 128K, 192K, or 256K.
 The default is 16K. Before loading the model, the server checks whether the
-selected context and expert cache fit its memory estimate for your Mac.
-Larger contexts need more memory for the FP16 KV cache. See
+selected context and expert cache fit its memory estimate for your Mac and the
+model's variant, which it reads from the model's manifest. The 8-bit model
+needs more memory than the 4-bit one at every context, and an 8 GB Mac is
+refused it even at 4K; the refusal names the variant. Larger contexts need
+more memory for the FP16 KV cache. See
 [context length and memory](RUNTIME_CONTROLS.md#context-length-and-memory)
 for the calculation and diagnostic override, and the
 [long-context report](experiments/summaries/10-long-context.md) for measured

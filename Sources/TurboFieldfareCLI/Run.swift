@@ -128,17 +128,14 @@ public func run(args: Args,
         // The CLI is the diagnostic surface: it says what the context will cost
         // and runs anyway, where the app hides the row and the server refuses.
         // Not gated on --quiet, which suppresses the timing footer, not a
-        // warning that the run may swap or be killed.
-        let hostMemory = ContextAdmission.hostMemoryBytes
-        if case .needsMemory = ContextAdmission.availability(
-            config: ArchConfig.gemma4_26B_A4B,
+        // warning that the run may swap or be killed. The cost depends on the
+        // variant, which only the installed manifest records.
+        let manifestVariant = try CLIModelVariant.read(modelDirectory: modelURL)
+        if let warning = manifestVariant.memoryWarning(
             maxContext: args.maxContext,
-            hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots) {
-            let need = ContextAdmission.needDescription(
-                config: ArchConfig.gemma4_26B_A4B,
-                maxContext: args.maxContext,
-                hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots)
-            stderr.write(Data("[memory: \(need) Continuing.]\n".utf8))
+            hostMemoryBytes: ContextAdmission.hostMemoryBytes,
+            expertCacheSlots: runtime.expertCacheSlots) {
+            stderr.write(Data((warning + "\n").utf8))
         }
 
         if !args.quiet,
@@ -275,10 +272,15 @@ public func run(args: Args,
             }
 
         if !args.quiet {
-            let tokensPerSecond = stats.decodeSeconds > 0
-                ? Double(stats.newTokens) / stats.decodeSeconds
-                : 0
-            let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+            // The loaded model's own record, not the pre-load read: the footer
+            // names what actually ran.
+            let footer = timingFooter(
+                reason: String(describing: stats.reason),
+                prefillTokens: stats.prefillTokens,
+                newTokens: stats.newTokens,
+                decodeSeconds: stats.decodeSeconds,
+                variant: CLIModelVariant(profile: model.quantProfile,
+                                         manifestModelID: model.modelID))
             stderr.write(Data(footer.utf8))
         }
         return RunResult(exitCode: 0)

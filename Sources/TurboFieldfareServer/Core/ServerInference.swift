@@ -520,6 +520,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()
     public nonisolated let visionCapability: String
+    /// The loaded model's own variant, for the ready line.
+    public nonisolated let modelVariant: ServerModelVariant
     private let visionRuntime: VisionRuntime?
     private let visionResidencyPolicy: VisionResidencyPolicy
 
@@ -571,6 +573,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
+        let modelVariant = ServerModelVariant(profile: model.quantProfile,
+                                              manifestModelID: model.modelID)
+        ServerLog.modelOpened(modelVariant)
         let runner = try RealForwardRunner(model: model,
                                            context: context,
                                            maxContext: maxContext,
@@ -643,7 +648,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   promptCacheDomain: promptCacheDomain,
                                   visionRuntime: visionRuntime,
                                   visionCapability: visionCapability,
-                                  visionResidencyPolicy: visionResidencyPolicy)
+                                  visionResidencyPolicy: visionResidencyPolicy,
+                                  modelVariant: modelVariant)
     }
 
     static func hardwareVisionCapability(
@@ -673,7 +679,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                  promptCacheDomain: ServerPromptCacheDomain,
                  visionRuntime: VisionRuntime?,
                  visionCapability: String,
-                 visionResidencyPolicy: VisionResidencyPolicy) {
+                 visionResidencyPolicy: VisionResidencyPolicy,
+                 modelVariant: ServerModelVariant) {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
@@ -686,6 +693,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.visionRuntime = visionRuntime
         self.visionResidencyPolicy = visionResidencyPolicy
         self.visionCapability = visionCapability
+        self.modelVariant = modelVariant
     }
 
     public func generate(
