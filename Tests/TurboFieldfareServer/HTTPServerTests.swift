@@ -496,6 +496,51 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// An 8-bit model answers to its manifest's ID, slash included: the
+    /// listing names it, a request naming it is served, and a client still
+    /// configured for the 4-bit name is refused rather than served another
+    /// variant without notice.
+    @Test func eightBitManifestModelIDIsListedAndServed() async throws {
+        let modelID = ServerModelVariant(
+            profile: .affine8,
+            manifestModelID: "mlx-community/gemma-4-26b-a4b-it-8bit").defaultAPIModelID
+        #expect(modelID == "mlx-community/gemma-4-26b-a4b-it-8bit")
+        let server = TurboFieldfareHTTPServer(
+            modelID: modelID,
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let models = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
+        let listing = try #require(
+            JSONSerialization.jsonObject(with: models) as? [String: Any])
+        let entries = try #require(listing["data"] as? [[String: Any]])
+        #expect(entries.map { $0["id"] as? String } == [modelID])
+
+        func complete(model: String) async throws -> (Int?, String) {
+            var request = URLRequest(
+                url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model,
+                "messages": [["role": "user", "content": "hi"]],
+            ])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return ((response as? HTTPURLResponse)?.statusCode,
+                    String(decoding: data, as: UTF8.self))
+        }
+        let served = try await complete(model: modelID)
+        #expect(served.0 == 200)
+        let refused = try await complete(model: ServerModelVariant.legacyAPIModelID)
+        #expect(refused.0 == 404)
+        #expect(refused.1.contains("model_not_found"))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingHeartbeatKeepsSlowFirstEventAlive() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",

@@ -55,6 +55,18 @@ enum ServerLog {
             + "finish=\(completion.finishReason)"
     }
 
+    /// Written once the weights are open and before the runtime is built,
+    /// which allocates the KV cache and, for a variant this build cannot run,
+    /// fails: either way the operator sees which variant was opened. Carries
+    /// the variant and the manifest's model ID only.
+    static func modelOpened(_ variant: ServerModelVariant) {
+        write(modelOpenedMessage(variant))
+    }
+
+    static func modelOpenedMessage(_ variant: ServerModelVariant) -> String {
+        "model opened variant=\(variant.label) manifest_model_id=\(variant.manifestModelID)"
+    }
+
     static func visionPackInvalid(at url: URL, error: Error) {
         write("vision pack at \(url.path) is invalid: \(String(reflecting: error))")
     }
