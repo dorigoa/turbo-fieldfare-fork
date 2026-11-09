@@ -356,6 +356,86 @@ public struct QwenTokenizer: @unchecked Sendable {
         return encode(rendered, addBOS: false)
     }
 
+    /// Tokens to append after a completed assistant turn to start a new user
+    /// turn — the Qwen counterpart of `GFTokenizer.encodeTextContinuation`.
+    ///
+    /// The cached assistant turn ended on the model's `im_end` stop token
+    /// (which the runtime does not keep in the KV cache), so the continuation
+    /// re-emits it, then opens the user turn the way the template renders one
+    /// (content trimmed, like the template's own trim) and ends with the
+    /// generation prompt for the requested thinking mode. A special-token
+    /// boundary sits on both sides of every piece here, so splitting the
+    /// encode this way yields exactly the IDs one encode of the joined text
+    /// would produce.
+    public func encodeTextContinuation(userContent: String,
+                                       enableThinking: Bool = true) -> [Int32] {
+        let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [imEndID] + encode(
+            "\n\(Self.imStartToken)user\n\(content)\(Self.imEndToken)\n"
+                + "\(Self.imStartToken)assistant\n" + Self.generationPrompt(enableThinking: enableThinking),
+            addBOS: false)
+    }
+
+    /// Tokens to append after a cached assistant turn that ended in tool
+    /// calls, once the tool results arrive — the Qwen counterpart of
+    /// `GFTokenizer.encodeToolResultContinuation`, with the same algorithm.
+    ///
+    /// Render the conversation with and without the incoming tool turns; the
+    /// continuation is the suffix of the second render that follows the last
+    /// `tool_call`-delimited block of the assistant turn. Because the Qwen
+    /// template closes the assistant turn before opening the tool-response
+    /// user turn, that suffix starts at the cached turn's closing `im_end`
+    /// (the stop token the runtime dropped), where Gemma's starts at its
+    /// tool-response marker. Uniqueness fallback as in Gemma: when the two
+    /// renders disagree before the call block, only a unique match of the
+    /// exact block tokens is trusted.
+    public func encodeToolResultContinuation(
+        cachedMessages: [GFTokenizer.Message],
+        assistant: GFTokenizer.Message,
+        incomingMessages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        enableThinking: Bool = true
+    ) throws -> [Int32] {
+        let prefix = try encodeToolChat(
+            messages: cachedMessages + [assistant],
+            tools: tools,
+            enableThinking: enableThinking)
+        let full = try encodeToolChat(
+            messages: incomingMessages,
+            tools: tools,
+            enableThinking: enableThinking)
+        let callCount = assistant.toolCalls.count
+        let starts = prefix.indices.filter { prefix[$0] == toolCallStartID }
+        guard callCount > 0, starts.count >= callCount,
+              let callEnd = prefix.lastIndex(of: toolCallEndID) else {
+            throw QwenTokenizerError.invalidChatTemplate(
+                "cached assistant tool-call boundary is missing")
+        }
+        let callStart = starts[starts.count - callCount]
+        let callSequence = Array(prefix[callStart...callEnd])
+        // Same reasoning as Gemma's: a verbatim-repeated call renders an
+        // identical token sequence, so requiring a unique match dropped the
+        // cache; the boundary is positional when both renders agree through
+        // the call block.
+        let suffixStart: Int
+        if full.count > callEnd, full[...callEnd] == prefix[...callEnd] {
+            suffixStart = callEnd + 1
+        } else {
+            let matches = full.subsequenceStartIndices(matching: callSequence)
+            guard matches.count == 1 else {
+                throw QwenTokenizerError.invalidChatTemplate(
+                    "cached assistant tool-call boundary is ambiguous")
+            }
+            suffixStart = matches[0] + callSequence.count
+        }
+        let suffix = Array(full[suffixStart...])
+        guard suffix.first == imEndID else {
+            throw QwenTokenizerError.invalidChatTemplate(
+                "tool-result continuation does not begin at the KV boundary")
+        }
+        return suffix
+    }
+
     // MARK: - Chat mapping helpers
 
     /// Map a runtime message onto the template's representation. Roles pass
@@ -386,5 +466,23 @@ public struct QwenTokenizer: @unchecked Sendable {
         ])
     }
 
+    /// The generation prompt tail the template emits after the assistant
+    /// turn opening.
+    private static func generationPrompt(enableThinking: Bool) -> String {
+        enableThinking
+            ? thinkToken + "\n"
+            : thinkToken + "\n\n" + thinkEndToken + "\n\n"
+    }
 }
+private extension Array where Element: Equatable {
+    func subsequenceStartIndices(matching needle: [Element]) -> [Int] {
+        guard !needle.isEmpty, needle.count <= count else { return [] }
+        return indices.dropLast(needle.count - 1).filter { start in
+            self[start..<(start + needle.count)].elementsEqual(needle)
+        }
+    }
+}
+
+
+
 
