@@ -153,4 +153,54 @@ import Foundation
         }
     }
 
+    @Test func qwenArchValidatedAgainstGemmaExpectationsFailsOnHiddenSize() throws {
+        // The closed failure D1 describes: the same Qwen `arch` compared with
+        // the Gemma baseline diverges on the first field, before any other
+        // mismatch can matter.
+        let qwenJSON = try JSONSerialization.data(
+            withJSONObject: [
+                "magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
+                "flags": ["streamingPresent": true],
+                "modelID": "qwen/qwen36",
+                "arch": [
+                    "hiddenSize": 2048, "ffnIntermediate": 512, "moeIntermediateSize": 512,
+                    "numHeads": 16, "numKVHeads": 2, "numFullKVHeads": 2,
+                    "headDim": 256, "fullHeadDim": 256, "vocabSize": 248_320,
+                    "slidingWindow": 0, "finalLogitSoftcap": 0,
+                    "ropeTheta": 10_000_000, "fullRopeTheta": 10_000_000,
+                    "partialRotaryFactor": 0.25, "numLayers": 40,
+                    "numExperts": 256, "topKExperts": 8,
+                    "tieWordEmbeddings": false, "attentionKEqV": false,
+                    "hiddenActivation": "silu",
+                    "fullAttentionLayerMask": (0..<40).map { $0 % 4 == 3 ? 1 : 0 },
+                ],
+                "files": [
+                    "model_weights.bin": ["size": 1024, "sha256": Self.zeroSHA],
+                    "packed_experts/layout.json": ["size": 1024, "sha256": Self.zeroSHA],
+                ],
+                "expertsPerLayer": 256, "numLayers": 40, "expertStride": 16_384,
+            ])
+        let manifest = try JSONDecoder().decode(Manifest.self, from: qwenJSON)
+        #expect(throws: ModelError.archMismatch(
+            field: "hiddenSize", expected: "2816", actual: "2048")) {
+            try ManifestReader.validate(manifest, against: .gemma4_26B_A4B)
+        }
+    }
+
+    @Test func strippedQwenManifestNeverLoadsAsGemma() throws {
+        // A Qwen manifest with the new keys removed (what a pre-Qwen reader
+        // sees) still fails closed: the generic v1 gate rejects the Qwen
+        // `arch` values before any Gemma comparison could accept them.
+        let dir = try Self.writeQwenManifest()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("manifest.json")
+        var root = try #require(JSONSerialization.jsonObject(
+            with: try Data(contentsOf: url)) as? [String: Any])
+        root.removeValue(forKey: "modelFamily")
+        root.removeValue(forKey: "qwen35")
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+        #expect(throws: ModelError.self) {
+            try ManifestReader.load(directoryURL: dir, expecting: .gemma4_26B_A4B)
+        }
+    }
 }
