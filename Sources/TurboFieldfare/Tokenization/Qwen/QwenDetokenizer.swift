@@ -52,8 +52,8 @@ struct QwenDetokenizer {
 
     // MARK: - Byte-level alphabet (GPT-2 `bytes_to_unicode`)
 
-    /// Printable bytes map to themselves; the other 128 map, in byte order,
-    /// to the codepoints 256...383 (Latin Extended-A, no surrogates).
+    /// Printable bytes map to themselves; the other 68 map, in byte order,
+    /// to the codepoints 256...323 (Latin Extended-A, no surrogates).
     static let byteToUnicode: [Character] = {
         var table: [Character] = []
         table.reserveCapacity(256)
