@@ -58,7 +58,13 @@ public indirect enum QwenChatValue: Sendable, Equatable {
     }
 
     /// Convert a `JSONValue` (whose objects are unordered Swift dictionaries)
-    /// into the ordered form. Key order follows dictionary iteration.
+    /// into the ordered form, with object keys sorted. Two equal `JSONValue`
+    /// instances held as separate dictionaries can iterate in different
+    /// orders in the same process, and chat continuations compare renders
+    /// built from such separate instances (see
+    /// `QwenTokenizer.encodeToolResultContinuation`), so the conversion must
+    /// canonicalize the order rather than follow it. Golden renders keep the
+    /// fixture's document order because they arrive through `parseJSON`.
     public init(_ value: JSONValue) {
         switch value {
         case .null: self = .null
@@ -70,7 +76,8 @@ public indirect enum QwenChatValue: Sendable, Equatable {
         case .string(let s): self = .string(s)
         case .array(let items): self = .array(items.map(QwenChatValue.init))
         case .object(let entries):
-            self = .object(entries.map { (key: $0.key, value: QwenChatValue($0.value)) })
+            self = .object(entries.sorted { $0.key < $1.key }
+                .map { (key: $0.key, value: QwenChatValue($0.value)) })
         }
     }
 
