@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
 /// the runtime loader at startup.
@@ -25,10 +26,26 @@ struct ArchInfo: Sendable, Equatable {
     /// 1 if `full_attention`, 0 if `sliding_attention`. Indexed by layer.
     let fullAttentionLayerMask: [UInt8]
     let hiddenActivation: String
+    /// `GTurboModelFamily` raw value (D1), or `nil` for the Gemma 4 reader.
+    var modelFamily: String? = nil
+    /// Qwen hybrid block (C4) for the manifest, or `nil` for Gemma 4.
+    var qwen35: GTurboManifestQwen35V1? = nil
 
+    /// Parses a checkpoint `config.json`. Configs whose root `model_type` is
+    /// `qwen3_5_moe` go to the separate Qwen reader (S5); every other config
+    /// keeps the untouched Gemma path.
     static func load(configPath: String) throws -> ArchInfo {
         let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let root = try JSONSerialization.jsonObject(with: data)
+        if let object = root as? [String: Any],
+           (object["model_type"] as? String) == GTurboModelFamily.qwen35Moe.rawValue {
+            return try loadQwen35(root: object, configPath: configPath)
+        }
+        return try loadGemma(object: root, configPath: configPath)
+    }
+
+    static func loadGemma(object: Any, configPath: String) throws -> ArchInfo {
+        guard let root = object as? [String: Any],
               let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
         }
