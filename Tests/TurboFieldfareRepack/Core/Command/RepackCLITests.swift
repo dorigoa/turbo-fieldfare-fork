@@ -24,6 +24,32 @@ struct RepackCLITests {
         #expect(result.stderr.contains("unknown variant int6"))
     }
 
+    /// S4: `--variant qwen36` parses — the catalog pins the checkpoint — but
+    /// install and dry run fail at once until the Qwen repack lands (S6).
+    @Test func qwen36IsAcceptedButRefusedBeforeAnyWork() throws {
+        let output = temporaryOutput("qwen36-not-implemented")
+        defer { clean(output) }
+        for extra in [[String](), ["--dry-run"]] {
+            let result = try run(["--output", output] + extra + ["--variant", "qwen36"])
+            #expect(result.status == 1, "\(extra) did not fail")
+            #expect(result.stderr.contains("Qwen3.6 installation is not implemented yet"))
+        }
+        #expect(!FileManager.default.fileExists(atPath: output))
+    }
+
+    /// The help lists the new pin and still marks only 4-bit as the default.
+    @Test func helpListsQwen36AndKeepsFourBitAsTheDefault() throws {
+        let result = try run(["--help"])
+        #expect(result.status == 0)
+        #expect(result.stdout.contains("--variant int4|int8|qwen36"))
+        let lines = result.stdout.split(separator: "\n")
+        let int4Line = try #require(lines.first { $0.hasPrefix("  int4 ") })
+        #expect(int4Line.contains(", default)"))
+        let qwenLine = try #require(lines.first { $0.hasPrefix("  qwen36 ") })
+        #expect(qwenLine.contains("Qwen3.6 35B-A3B 4-bit"))
+        #expect(!qwenLine.contains("default"))
+    }
+
     @Test func conflictingVariantsAreRejected() throws {
         let output = temporaryOutput("variant-twice")
         defer { clean(output) }

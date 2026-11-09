@@ -45,6 +45,19 @@ import TurboFieldfare
     @Test func onlyTheEightBitDownloadCarriesAnInstallNote() {
         #expect(AppModelVariant.int4.installNote == nil)
         #expect(AppModelVariant.int8.installNote == "~27 GB download; 16 GB memory recommended")
+        // Qwen3.6 is catalog knowledge, not an app choice yet (S24).
+        #expect(AppModelVariant.qwen36.installNote == nil)
+    }
+
+    /// S4: the pickers list the Gemma pair exactly as before, because Qwen3.6
+    /// declares a manifest family; S24 lifts the filter. It shares the 4-bit
+    /// quantization profile for the figures admission can quote today.
+    @Test func theAppOfferedListIsStillTheGemmaPair() {
+        #expect(AppModelVariant.gemma4Variants == [.int4, .int8])
+        #expect(AppModelVariant.int4.family == nil)
+        #expect(AppModelVariant.int8.family == nil)
+        #expect(AppModelVariant.qwen36.family != nil)
+        #expect(AppModelVariant.qwen36.quantProfile == .affine4)
     }
 }
 

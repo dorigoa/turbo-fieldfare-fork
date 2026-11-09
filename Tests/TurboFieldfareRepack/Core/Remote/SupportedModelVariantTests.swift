@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfareFormat
 @testable import TurboFieldfareRepackCore
 
 @Suite struct SupportedModelVariantTests {
@@ -49,6 +50,44 @@ import Testing
         // Room for manifest.json and verified-install.json (about 14 KB).
         #expect(variant.installedBytes >= measured + 16_384)
         #expect(variant.installedBytes - measured < 100_000)
+    }
+
+    /// S4 pinned the checkpoint from 3.1 (S1 confirmed the figures). The
+    /// download figure is the source index `total_size` and the installed
+    /// figure and minimum memory are provisional: S6's dry run replaces them.
+    @Test func qwen36VariantIsPinnedWithProvisionalSizes() {
+        let variant = SupportedModelVariant.qwen36
+        #expect(variant.displayName == "Qwen3.6 35B-A3B 4-bit")
+        #expect(variant.shortLabel == "Qwen3.6")
+        #expect(variant.repoID == "mlx-community/Qwen3.6-35B-A3B-4bit")
+        #expect(variant.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
+        #expect(variant.sourceIndexSHA256
+                == "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
+        #expect(variant.approximateDownloadBytes == 20_401_929_952)
+        #expect(variant.installedBytes == 19_500_000_000)
+        #expect(variant.defaultDirectoryName == "qwen36.gturbo")
+        #expect(variant.recommendedMinimumHostMemoryBytes == 16 << 30)
+    }
+
+    @Test func qwen36IsFoundByEveryIdentityItLeavesBehind() {
+        let variant = SupportedModelVariant.qwen36
+        #expect(SupportedModelVariant.variant(forSourceIndexSHA256: variant.sourceIndexSHA256)
+                == variant)
+        #expect(SupportedModelVariant.variant(
+                    forSourceSnapshotHash: "sha256:" + variant.sourceIndexSHA256) == variant)
+        #expect(SupportedModelVariant.variant(forRepoID: variant.repoID) == variant)
+        #expect(SourceFingerprint.modelID(
+                    forIndexSha256: variant.sourceIndexSHA256) == variant.repoID)
+    }
+
+    /// The manifest family splits the catalog (C1): no key is Gemma, and the
+    /// app's model selectors list the Gemma entries until S24 lifts the filter.
+    @Test func familiesSplitTheCatalogAndOnlyGemmaIsAppSelectable() {
+        #expect(SupportedModelVariant.int4.family == nil)
+        #expect(SupportedModelVariant.int8.family == nil)
+        #expect(SupportedModelVariant.qwen36.family == .qwen35Moe)
+        #expect(SupportedModelVariant.gemma4Variants == [.int4, .int8])
+        #expect(SupportedModelVariant.allCases.count == 3)
     }
 
     @Test func variantsAreFoundByEveryIdentityTheyLeaveBehind() {
