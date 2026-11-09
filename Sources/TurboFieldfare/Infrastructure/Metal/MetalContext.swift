@@ -147,6 +147,13 @@ public final class MetalContext: @unchecked Sendable {
         "moe_int8",
         "prefill_int8",
         "prefill_moe_int8",
+        // Qwen 3.5 MoE modules (plan D4). Appended last: they define only
+        // their own `qwen_`-prefixed kernels and share no helpers.
+        "qwen_norms",
+        "qwen_head",
+        "qwen_deltanet",
+        "qwen_attention",
+        "qwen_moe",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -170,6 +177,11 @@ public final class MetalContext: @unchecked Sendable {
         "vision": "Metal/Vision",
         "vision_register_gemm": "Metal/Vision",
         "vision_resize": "Metal/Vision",
+        "qwen_norms": "Metal/Qwen",
+        "qwen_head": "Metal/Qwen",
+        "qwen_deltanet": "Metal/Qwen",
+        "qwen_attention": "Metal/Qwen",
+        "qwen_moe": "Metal/Qwen",
     ]
 
     private static func shaderURL(module: String) -> URL? {
