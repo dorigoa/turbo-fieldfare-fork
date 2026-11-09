@@ -24,16 +24,16 @@ struct RepackCLITests {
         #expect(result.stderr.contains("unknown variant int6"))
     }
 
-    /// S4: `--variant qwen36` parses — the catalog pins the checkpoint — but
-    /// install and dry run fail at once until the Qwen repack lands (S6).
-    @Test func qwen36IsAcceptedButRefusedBeforeAnyWork() throws {
-        let output = temporaryOutput("qwen36-not-implemented")
+    /// S6 lifted the S4 refusal: `--variant qwen36` now runs the real repack
+    /// path. Pinning the CLI here without touching the network: a resume
+    /// without saved state fails before any request, like the 8-bit probe.
+    @Test func qwen36ResumeWithoutStateFailsBeforeNetwork() throws {
+        let output = temporaryOutput("qwen36-missing-resume")
         defer { clean(output) }
-        for extra in [[String](), ["--dry-run"]] {
-            let result = try run(["--output", output] + extra + ["--variant", "qwen36"])
-            #expect(result.status == 1, "\(extra) did not fail")
-            #expect(result.stderr.contains("Qwen3.6 installation is not implemented yet"))
-        }
+        let result = try run(["--output", output, "--resume", "--variant", "qwen36"])
+
+        #expect(result.status == 1)
+        #expect(result.stderr.contains("no resumable install state exists"))
         #expect(!FileManager.default.fileExists(atPath: output))
     }
 
