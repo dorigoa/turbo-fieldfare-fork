@@ -20,7 +20,9 @@ public struct VerifyInstallResult: Sendable {
 public enum VerifiedInstallTool {
     public static let metadataMaxBytes: UInt64 = 16 * 1024 * 1024
     public static let manifestMaxBytes: UInt64 = 4 * 1024 * 1024
-    public static let layoutMaxBytes: UInt64 = 16 * 1024 * 1024
+    // Sized for the Qwen layout (40 layers x 256 experts, 22,493,846 bytes in
+    // the S6 dry run); the original 16 MiB fit Gemma only. Keep >= 32 MiB.
+    public static let layoutMaxBytes: UInt64 = 32 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
         let root = URL(fileURLWithPath: options.inputGTurbo).standardizedFileURL

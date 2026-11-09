@@ -5,7 +5,9 @@ enum GTurboLayoutValidator {
     static func validate(path: String,
                                 plan: RepackPlan,
                                 audit: RepackAudit? = nil) throws {
-        let data = try Posix.readBoundedData(path, maximumBytes: 16 * 1024 * 1024)
+        // A Qwen layout lists 40 layers x 256 experts (S6 dry run: 22,493,846
+        // bytes), above the 16 MiB cap sized for Gemma. 32 MiB keeps the guard.
+        let data = try Posix.readBoundedData(path, maximumBytes: 32 * 1024 * 1024)
         let layout: GTurboPackedExpertsLayoutV1
         do { layout = try GTurboPackedExpertsLayoutCodec.decode(data) }
         catch {
