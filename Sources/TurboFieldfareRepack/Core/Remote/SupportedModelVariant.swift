@@ -66,9 +66,11 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
         // safetensors headers, plus 32,189,832 bytes of tokenizer files.
         // (The int4 figure above is the payload ranges alone.)
         case .int8: 26_972_550_973
-        // Provisional until the Qwen dry run replaces it (S6): the source
-        // index `total_size`, the sum of the four shard payloads.
-        case .qwen36: 20_401_929_952
+        // From `TurboFieldfareRepack --dry-run --variant qwen36` at the
+        // pinned revision with the default 64 MiB ranges: 20,146,183,200
+        // payload bytes in 308 ranges, plus 513,665 bytes of index, config
+        // and safetensors headers, plus 19,998,246 bytes of tokenizer files.
+        case .qwen36: 20_166_695_111
         }
     }
 
@@ -82,8 +84,13 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
         // verified-install.json add about 14 KB; the total is rounded up to
         // the next 100,000 bytes.
         case .int8: 26_871_300_000
-        // Provisional until the Qwen dry run replaces it (S6).
-        case .qwen36: 19_500_000_000
+        // From the same dry run: model_weights.bin 1,389,476,096 bytes, 40
+        // expert files of 452,984,832 bytes (expert payload and stride
+        // 1,769,472), layout.json 22,493,846 bytes and 20,021,837 bytes of
+        // tokenizer files make 19,551,385,059 bytes. manifest.json and
+        // verified-install.json add a few KB; the total is rounded up to
+        // the next 100,000 bytes.
+        case .qwen36: 19_551_400_000
         }
     }
 
@@ -104,7 +111,8 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
         switch self {
         case .int4: 8 << 30
         case .int8: 16 << 30
-        // Provisional until S6 measures the real figure.
+        // The S6 dry run measures disk sizes, not memory; the figure stays
+        // at the 16 GB Mac class the 8-bit variant already targets.
         case .qwen36: 16 << 30
         }
     }

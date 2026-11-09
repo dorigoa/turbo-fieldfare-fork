@@ -450,13 +450,6 @@ private func run(_ values: [String]) async -> Int32 {
 
     guard let output = arguments.output else { return 2 }
     let variant = arguments.installVariant
-    // The catalog pins Qwen3.6 so the source is known and identity lookups
-    // work; the repack path itself lands in S6. Refuse install and dry run
-    // before any planning, state read or request.
-    if variant == .qwen36 {
-        printError("Qwen3.6 installation is not implemented yet")
-        return 1
-    }
     let installOptions = variant.installOptions(
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,

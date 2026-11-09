@@ -52,10 +52,11 @@ import TurboFieldfareFormat
         #expect(variant.installedBytes - measured < 100_000)
     }
 
-    /// S4 pinned the checkpoint from 3.1 (S1 confirmed the figures). The
-    /// download figure is the source index `total_size` and the installed
-    /// figure and minimum memory are provisional: S6's dry run replaces them.
-    @Test func qwen36VariantIsPinnedWithProvisionalSizes() {
+    /// Pinned from a metadata-only dry run of the Qwen source (S6): the
+    /// parts are the figures that run printed; see the catalog comments.
+    /// The minimum host memory keeps the 8-bit Mac class figure because a
+    /// dry run measures disk sizes, not memory.
+    @Test func qwen36VariantIsPinnedWithDryRunSizes() {
         let variant = SupportedModelVariant.qwen36
         #expect(variant.displayName == "Qwen3.6 35B-A3B 4-bit")
         #expect(variant.shortLabel == "Qwen3.6")
@@ -63,8 +64,22 @@ import TurboFieldfareFormat
         #expect(variant.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
         #expect(variant.sourceIndexSHA256
                 == "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
-        #expect(variant.approximateDownloadBytes == 20_401_929_952)
-        #expect(variant.installedBytes == 19_500_000_000)
+
+        let payloadRanges: UInt64 = 20_146_183_200
+        let sourceMetadata: UInt64 = 513_665
+        let tokenizerDownload: UInt64 = 19_998_246
+        #expect(variant.approximateDownloadBytes
+                == payloadRanges + sourceMetadata + tokenizerDownload)
+
+        let residentFile: UInt64 = 1_389_476_096
+        let expertFiles: UInt64 = 40 * 452_984_832
+        let layout: UInt64 = 22_493_846
+        let tokenizerInstalled: UInt64 = 20_021_837
+        let measured = residentFile + expertFiles + layout + tokenizerInstalled
+        #expect(variant.installedBytes == 19_551_400_000)
+        // The gap covers manifest.json and verified-install.json (a few KB).
+        #expect(variant.installedBytes > measured)
+        #expect(variant.installedBytes - measured < 100_000)
         #expect(variant.defaultDirectoryName == "qwen36.gturbo")
         #expect(variant.recommendedMinimumHostMemoryBytes == 16 << 30)
     }
