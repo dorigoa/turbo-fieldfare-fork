@@ -194,11 +194,13 @@ run_claude() { # $1 = numero della sezione, $2 = prompt
   local log rc
   log="$LOGDIR/S$1-$(date +%Y%m%d-%H%M%S).jsonl"
   say "S$1: avvio Claude CLI (log completo: $log)"
+  # Se il riassunto si interrompe, cat consuma il resto: claude non deve
+  # ricevere SIGPIPE e morire a metà sezione.
   printf '%s\n' "$2" | claude -p --settings "$SETTINGS" \
       --permission-mode acceptEdits --permission-prompts none \
       --allowedTools "${ALLOW[@]}" --disallowedTools "${DENY[@]}" \
       --output-format stream-json --verbose \
-    | tee "$log" | python3 -I -u -c "$VIEWER"
+    | tee "$log" | { python3 -I -X utf8 -u -c "$VIEWER"; cat >/dev/null; }
   rc=${PIPESTATUS[1]}
   say "S$1: Claude CLI terminato (exit $rc)"
 }
@@ -240,7 +242,7 @@ caffeinate -i -w $$ >/dev/null 2>&1 &   # il Mac non va in stop finché lo scrip
 
 # --- Sezioni --------------------------------------------------------------
 
-say "Sezioni S$start–S$end, branch $BRANCH, profilo $SETTINGS, riprese massime $MAX_RESUMES"
+say "Sezioni S${start}–S${end}, branch $BRANCH, profilo $SETTINGS, riprese massime $MAX_RESUMES"
 for n in $(seq "$start" "$end"); do
   st=$(status_of "$n")
   case $st in Completata*) say "S$n è già completata: la salto"; continue ;; esac
@@ -295,5 +297,5 @@ for n in $(seq "$start" "$end"); do
       exit 0 ;;
   esac
 done
-say "Fatto: S$start–S$end completate"
-notify "S$start–S$end completate"
+say "Fatto: S${start}–S${end} completate"
+notify "S${start}–S${end} completate"
