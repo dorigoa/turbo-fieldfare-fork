@@ -91,7 +91,9 @@ public final class QwenAssistantDecoder: @unchecked Sendable {
     private func scanContent(_ text: String) throws -> [StructuredAssistantEvent] {
         var events: [StructuredAssistantEvent] = []
         var input = text
-        while !input.isEmpty {
+        // A marker found here leaves its remainder behind in the scan state,
+        // so a state change must re-enter the switch even with no input left.
+        scanning: while true {
             switch scan {
             case .between(var tail):
                 tail += input
@@ -100,14 +102,15 @@ public final class QwenAssistantDecoder: @unchecked Sendable {
                     let visible = String(tail[..<open.lowerBound])
                     if !visible.isEmpty { events.append(.content(visible)) }
                     scan = .inside(body: "", tail: String(tail[open.upperBound...]))
-                } else {
-                    let held = Self.heldTagTailLength(of: tail,
-                                                      tag: QwenToolCallParser.callOpen)
-                    let split = tail.index(tail.endIndex, offsetBy: -held)
-                    let visible = String(tail[..<split])
-                    if !visible.isEmpty { events.append(.content(visible)) }
-                    scan = .between(tail: String(tail[split...]))
+                    continue scanning
                 }
+                let held = Self.heldTagTailLength(of: tail,
+                                                  tag: QwenToolCallParser.callOpen)
+                let split = tail.index(tail.endIndex, offsetBy: -held)
+                let visible = String(tail[..<split])
+                if !visible.isEmpty { events.append(.content(visible)) }
+                scan = .between(tail: String(tail[split...]))
+                break scanning
             case .inside(var body, var tail):
                 tail += input
                 input = ""
@@ -123,17 +126,18 @@ public final class QwenAssistantDecoder: @unchecked Sendable {
                         failed = true
                         throw error
                     }
-                } else {
-                    let held = Self.heldTagTailLength(of: tail,
-                                                      tag: QwenToolCallParser.callClose)
-                    let split = tail.index(tail.endIndex, offsetBy: -held)
-                    body += String(tail[..<split])
-                    guard body.utf8.count <= QwenToolCallParser.maximumBytes else {
-                        failed = true
-                        throw QwenToolCallParserError.oversized
-                    }
-                    scan = .inside(body: body, tail: String(tail[split...]))
+                    continue scanning
                 }
+                let held = Self.heldTagTailLength(of: tail,
+                                                  tag: QwenToolCallParser.callClose)
+                let split = tail.index(tail.endIndex, offsetBy: -held)
+                body += String(tail[..<split])
+                guard body.utf8.count <= QwenToolCallParser.maximumBytes else {
+                    failed = true
+                    throw QwenToolCallParserError.oversized
+                }
+                scan = .inside(body: body, tail: String(tail[split...]))
+                break scanning
             }
         }
         return events
