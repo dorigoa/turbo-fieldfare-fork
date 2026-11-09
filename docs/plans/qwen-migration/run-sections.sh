@@ -7,16 +7,18 @@
 #   docs/plans/qwen-migration/run-sections.sh S9        # da S9 fino al prossimo ⛔
 #   docs/plans/qwen-migration/run-sections.sh S9 S12    # da S9 a S12
 #
-# Se una sezione si interrompe a metà, la riprende (fino a MAX_RESUMES volte).
+# Se una sezione si interrompe a metà, la riprende finché fa progressi.
 # Si ferma quando:
 #   - una sezione è "Bloccata";
-#   - una sezione non è completata nemmeno dopo le riprese;
+#   - MAX_STALLS riprese di fila non producono nuovi commit, oppure la
+#     sezione supera MAX_ATTEMPTS tentativi in tutto;
 #   - finisce una sezione con il tuo controllo ⛔ (S1, S8, S19, S26; vedi 1.7);
 #   - un controllo iniziale fallisce (branch, working tree, server, altra sessione).
 # Le sezioni già "Completata" vengono saltate.
 #
-# Variabili: QWEN_SETTINGS (default ~/.claude/strata.json), MAX_RESUMES
-# (default 3), QWEN_RUNNER_NOTIFY=0 per niente notifiche di macOS.
+# Variabili: QWEN_SETTINGS (default ~/.claude/strata.json), MAX_STALLS
+# (default 3), MAX_ATTEMPTS (default 12), QWEN_RUNNER_NOTIFY=0 per niente
+# notifiche di macOS.
 # Log completi: scratch/logs/runner/ (un file .jsonl per tentativo).
 #
 # I comandi che l'agente può usare sono in ALLOW. Se un tentativo stampa
@@ -30,7 +32,8 @@ REPORTS=docs/plans/qwen-migration/reports
 TOOLS=docs/plans/qwen-migration/tools
 LOGDIR=scratch/logs/runner
 SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/strata.json}
-MAX_RESUMES=${MAX_RESUMES:-3}
+MAX_STALLS=${MAX_STALLS:-${MAX_RESUMES:-3}}
+MAX_ATTEMPTS=${MAX_ATTEMPTS:-12}
 NOTIFY=${QWEN_RUNNER_NOTIFY:-1}
 CHECKPOINTS=" 1 8 19 26 "
 LAST_SECTION=26
@@ -43,7 +46,7 @@ ALLOW=(
   "Bash(cmp *)" "Bash(du *)" "Bash(df *)" "Bash(stat *)" "Bash(file *)" "Bash(xxd *)"
   "Bash(od *)" "Bash(shasum *)" "Bash(jq *)" "Bash(seq *)" "Bash(basename *)"
   "Bash(dirname *)" "Bash(realpath *)" "Bash(readlink *)" "Bash(echo *)" "Bash(printf *)"
-  "Bash(test *)" "Bash(true)" "Bash(date*)" "Bash(sleep *)" "Bash(which *)" "Bash(tee *)"
+  "Bash(test *)" "Bash(true)" "Bash(date*)" "Bash(sleep *)" "Bash(which *)" "Bash(tee *)" "Bash(bc*)"
   "Bash(mkdir *)" "Bash(touch *)" "Bash(cp *)" "Bash(mv *)" "Bash(ln -s *)"
   "Bash(rm scratch/*)" "Bash(rm -f scratch/*)" "Bash(rm -rf scratch/*)"
   "Bash(uname*)" "Bash(sw_vers*)" "Bash(sysctl *)" "Bash(memory_pressure*)" "Bash(vm_stat*)"
@@ -79,26 +82,29 @@ def arg(i):
         return i
     return i.get("command") or i.get("file_path") or i.get("pattern") or i
 
-for line in sys.stdin:
-    try:
-        d = json.loads(line)
-    except ValueError:
-        continue
+def show(d, uses):
     t = d.get("type")
-    content = (d.get("message") or {}).get("content")
+    msg = d.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
     if t == "assistant" and isinstance(content, list):
         for p in content:
-            if p.get("type") == "text" and p.get("text", "").strip():
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") == "text" and str(p.get("text", "")).strip():
                 print("   · " + short(p["text"]), flush=True)
             elif p.get("type") == "tool_use":
+                uses[p.get("id")] = p.get("input")
                 print("   ▸ %s: %s" % (p.get("name"), short(arg(p.get("input")), 140)), flush=True)
     elif t == "user" and isinstance(content, list):
         for p in content:
             if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("is_error"):
                 c = p.get("content")
                 if isinstance(c, list):
-                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                    c = " ".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
                 print("   ✗ " + short(c), flush=True)
+    elif t == "system" and d.get("subtype") == "permission_denied":
+        cmd = arg(uses.get(d.get("tool_use_id"), "?"))
+        print("   ⚠ permesso negato, %s: %s" % (d.get("tool_name"), short(cmd, 140)), flush=True)
     elif t == "result":
         mins = (d.get("duration_ms") or 0) / 60000
         print("   ⏹ fine turno: %s, %s turni, %.0f min" % (d.get("subtype"), d.get("num_turns"), mins), flush=True)
@@ -106,7 +112,17 @@ for line in sys.stdin:
         if denials:
             print("   ⚠ permessi negati (se servono, aggiungili in ALLOW):", flush=True)
             for x in denials:
-                print("     - %s: %s" % (x.get("tool_name"), short(arg(x.get("tool_input")), 140)), flush=True)
+                if isinstance(x, dict):
+                    print("     - %s: %s" % (x.get("tool_name"), short(arg(x.get("tool_input")), 140)), flush=True)
+
+uses = {}
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        if isinstance(d, dict):
+            show(d, uses)
+    except Exception as e:
+        print("   (riga del log non riassunta: %s)" % short(e, 100), flush=True)
 PY
 )
 
@@ -143,6 +159,17 @@ non permessi vengono rifiutati.
   rifiutato e il piano non offre un'alternativa, segna "Stato: Bloccata
   (motivo)" nel report, scrivi i dettagli in "Problemi aperti", fai commit e
   push e fermati.
+- Dopo ogni passo spunta il passo nel report, poi commit e push: una ripresa
+  riparte dal primo passo non spuntato.
+- Non scrivere mai i marker della chat con le loro parentesi, né nelle
+  risposte né nel ragionamento, nemmeno quando citi codice, template o piano:
+  il server li prende per segnali e il turno si interrompe. Nel ragionamento
+  chiamali in maiuscolo: IM_START, IM_END, ENDOFTEXT, THINK, /THINK, TOOL_CALL,
+  /TOOL_CALL, TOOL_RESPONSE. Nei file scrivi il loro primo carattere come
+  escape: \\u{3C} in Swift, \\x3c in Python, \\u003c in JSON.
+- Se un comando viene rifiutato, prima riprova in forma più semplice: un
+  comando per volta; codice Python di più righe in un file sotto scratch/
+  (con Write) da lanciare con python3, invece di python3 -c.
 - Comandi che possono superare 10 minuti: non usare run_in_background. Avviali con
   $TOOLS/bg.sh start NOME COMANDO ARGOMENTI...
   e poi ripeti
@@ -242,7 +269,7 @@ caffeinate -i -w $$ >/dev/null 2>&1 &   # il Mac non va in stop finché lo scrip
 
 # --- Sezioni --------------------------------------------------------------
 
-say "Sezioni S${start}–S${end}, branch $BRANCH, profilo $SETTINGS, riprese massime $MAX_RESUMES"
+say "Sezioni S${start}–S${end}, branch $BRANCH, profilo $SETTINGS, stop dopo $MAX_STALLS riprese senza commit o $MAX_ATTEMPTS tentativi"
 for n in $(seq "$start" "$end"); do
   st=$(status_of "$n")
   case $st in Completata*) say "S$n è già completata: la salto"; continue ;; esac
@@ -264,10 +291,18 @@ for n in $(seq "$start" "$end"); do
 
   finished=0
   attempt=0
-  while [ "$attempt" -le "$MAX_RESUMES" ]; do
-    say "S$n: tentativo $((attempt + 1)) di $((MAX_RESUMES + 1)) ($mode)"
+  stalls=0
+  while :; do
+    attempt=$((attempt + 1))
+    say "S$n: tentativo $attempt ($mode)"
     if [ "$mode" = run ]; then prompt=$(run_prompt "$n"); else prompt=$(resume_prompt "$n"); fi
+    head_before=$(git rev-parse HEAD)
     run_claude "$n" "$prompt"
+    if [ "$(git rev-parse HEAD)" = "$head_before" ]; then
+      stalls=$((stalls + 1))
+    else
+      stalls=0
+    fi
     st=$(status_of "$n")
     case $st in
       Completata*)
@@ -276,13 +311,17 @@ for n in $(seq "$start" "$end"); do
       Bloccata*)
         stop "S$n: $st. Leggi $REPORTS/S$n.md e la 1.6, poi rilancia da S$n" ;;
       *)
-        say "S$n non è finita (stato: ${st:-nessun report})" ;;
+        say "S$n non è finita (stato: ${st:-nessun report}; tentativi di fila senza commit: $stalls)" ;;
     esac
+    [ "$stalls" -lt "$MAX_STALLS" ] || break
+    [ "$attempt" -lt "$MAX_ATTEMPTS" ] || break
     mode=resume
-    attempt=$((attempt + 1))
   done
-  [ "$finished" = 1 ] \
-    || stop "S$n non completata dopo $MAX_RESUMES riprese: leggi $REPORTS/S$n.md e i log in $LOGDIR"
+  if [ "$finished" != 1 ]; then
+    if [ "$stalls" -ge "$MAX_STALLS" ]; then why="$stalls tentativi di fila senza nuovi commit"
+    else why="raggiunto il limite di $MAX_ATTEMPTS tentativi"; fi
+    stop "S$n non completata ($why): leggi $REPORTS/S$n.md e i log in $LOGDIR"
+  fi
 
   say "S$n completata: $(git log -1 --format='%h %s')"
   notify "S$n completata"
