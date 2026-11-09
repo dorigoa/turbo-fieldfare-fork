@@ -153,7 +153,7 @@ def main():
     )
 
     wnorm = np.array(la.norm.weight.astype(mx.float32))
-    gated = rms(dec(l0["core_out"]), wnorm) * silu(dec(l0["z"]))
+    gated = rms(dec(l0["core_out"]), wnorm) * silu(dec(l0["z"]).reshape(T, 32, 128))
     check("l0.gated_norm*rmsnorm_w*silu(z)", gated, dec(l0["gated_out"]))
     Wo = deq(la.out_proj)
     check("l0.out_proj", gated.reshape(T, 4096) @ Wo.T, dec(l0["mixer_out"]))
@@ -241,10 +241,10 @@ def main():
         for t in range(T):
             ang = t * inv
             c, s = np.cos(ang), np.sin(ang)
-            a = x[..., :half]
-            bpart = x[..., half:head_dim_rot]
-            out[..., :half] = a * c - bpart * s
-            out[..., half:head_dim_rot] = bpart * c + a * s
+            a = x[t, ..., :half]
+            bpart = x[t, ..., half:head_dim_rot]
+            out[t, ..., :half] = a * c - bpart * s
+            out[t, ..., half:head_dim_rot] = bpart * c + a * s
         return out
 
     check("l3.rope_q", rope(dec(l3["q_pre_norm"])), dec(l3["q_rope"]))
@@ -258,18 +258,15 @@ def main():
     for t in range(T):
         for hq in range(16):
             hk = hq // 8
-            logits = (kf[: t + 1] @ qf[t, hq]) * scale  # [t+1]
+            logits = (kf[: t + 1, hk] @ qf[t, hq]) * scale  # [t+1]
             pr = softmax(logits)
-            attn[t, hq] = pr @ vf[: t + 1]
+            attn[t, hq] = pr @ vf[: t + 1, hk]
     check("l3.attention_gqa_h/8", attn, dec(l3["attn_out"]))
     gatef = dec(l3["gate"])
-    check(
-        "l3.attn_out*sigmoid(gate)",
-        attn * (1.0 / (1.0 + np.exp(-gatef))),
-        dec(l3["gated"]),
-    )
+    gated3 = (attn * (1.0 / (1.0 + np.exp(-gatef)))).reshape(T, 4096)
+    check("l3.attn_out*sigmoid(gate)", gated3, dec(l3["gated"]))
     Wo3 = deq(sa.o_proj)
-    check("l3.o_proj", (attn * (1.0 / (1.0 + np.exp(-gatef)))).reshape(T, 4096) @ Wo3.T, dec(l3["mixer_out"]))
+    check("l3.o_proj", gated3 @ Wo3.T, dec(l3["mixer_out"]))
 
     # --- Final norm and head (on p0 last position) ---
     wfin = np.array(tm.norm.weight.astype(mx.float32))
@@ -280,10 +277,11 @@ def main():
     )
     yf = dec(h["final_norm"])[-1]
     top_ids = topk["p0"]["top_ids"][-1]
+    tl = topk["p0"]["top_logits"]
     top_logits = np.frombuffer(
-        base64.b64decode(topk["p0"]["top_logits"]["f32b64"]), dtype="<f4"
-    ).reshape(-1)
-    mine = np.array([yf @ deq_row(tm.lm_head, i) for i in top_ids])
+        base64.b64decode(tl["f32b64"]), dtype="<f4"
+    ).reshape(tl["shape"])[-1]
+    mine = np.array([yf @ deq_row(lm.lm_head, i) for i in top_ids])
     d = float(np.max(np.abs(mine - top_logits)))
     s = float(np.max(np.abs(top_logits)))
     ok = d / s <= TOL
