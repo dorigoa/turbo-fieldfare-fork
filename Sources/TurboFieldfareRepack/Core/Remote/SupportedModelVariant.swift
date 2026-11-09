@@ -109,6 +109,13 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// The catalog entries whose `family` is Gemma 4 (`nil` model family,
+    /// the one v1 shipped with). The app's model selectors filter through
+    /// this until Qwen3.6 becomes installable there (S24).
+    public static var gemma4Variants: [SupportedModelVariant] {
+        allCases.filter { $0.family == nil }
+    }
+
     /// The manifest model family this variant installs (C1). `nil` is Gemma 4,
     /// the family v1 shipped with: a manifest without `modelFamily` is Gemma,
     /// so the Gemma variants keep declaring nothing.
