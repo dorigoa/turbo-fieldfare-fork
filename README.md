@@ -34,6 +34,8 @@ After testing (and using even in production) his inference engine on my laptop, 
  
 I will do my utmost to incorporate the most significant changes made to the original project into this fork (provided they do not conflict with my requirements or with the two main changes I have made).
 
+--------------------------
+
 ![TurboFieldfare Mac app generating text with Gemma 4 26B-A4B](docs/assets/turbofieldfare-app.webp)
 
 Memory got expensive. So I gave a 26-billion-parameter model a ~2 GB budget.
