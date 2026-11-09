@@ -1,0 +1,167 @@
+[
+  {
+   "name": "no_system_simple",
+   "messages": [{"role": "user", "content": "Ciao! Chi sei?"}],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "with_system",
+   "messages": [
+    {"role": "system", "content": "Sei un assistente conciso."},
+    {"role": "user", "content": "Qual è la capitale d'Italia?"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "no_generation_prompt",
+   "messages": [
+    {"role": "system", "content": "Rispondi in italiano."},
+    {"role": "user", "content": "Quattro per quattro?"},
+    {"role": "assistant", "content": "Sedici."},
+    {"role": "user", "content": "Più sei?"}
+   ],
+   "add_generation_prompt": false
+  },
+  {
+   "name": "tools_basic",
+   "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "City name"}, "units": {"type": "string", "enum": ["c", "f"]}}, "required": ["city"]}}},
+    {"type": "function", "function": {"name": "search", "description": "Search the web.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+   ],
+   "messages": [
+    {"role": "system", "content": "Usa i tool quando servono."},
+    {"role": "user", "content": "Che tempo fa a Roma?"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "tools_no_system",
+   "tools": [
+    {"type": "function", "function": {"name": "search", "description": "Search the web.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+   ],
+   "messages": [{"role": "user", "content": "Cerca: capitale del Giappone"}],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "tool_response_single",
+   "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "City name"}, "units": {"type": "string", "enum": ["c", "f"]}}, "required": ["city"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Che tempo fa a Roma?"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Roma", "units": "c"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\": 22, \"sky\": \"sereno\"}"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "tool_response_multi",
+   "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
+    {"type": "function", "function": {"name": "search", "description": "Search the web.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Confronta il meteo di Roma e Milano"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Roma"}}}]},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Milano"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "Roma: 22 gradi, sereno"},
+    {"role": "tool", "tool_call_id": "call_2", "content": "Milano: 14 gradi, nuvoloso"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "multi_tool_calls_one_turn",
+   "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
+    {"type": "function", "function": {"name": "search", "description": "Search the web.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Dimmi meteo di Roma e cercano il Tevere"},
+    {"role": "assistant", "content": "Faccio due ricerche.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Roma"}}}, {"id": "call_2", "type": "function", "function": {"name": "search", "arguments": {"query": "Tevere lunghezza"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "22 gradi"},
+    {"role": "tool", "tool_call_id": "call_2", "content": "405 km"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "thinking_off_generation_prompt",
+   "messages": [{"role": "user", "content": "Due più due?"}],
+   "enable_thinking": false,
+   "add_generation_prompt": true
+  },
+  {
+   "name": "thinking_off_tools_no_agp",
+   "tools": [
+    {"type": "function", "function": {"name": "search", "description": "Search the web.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Cerca il Po"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": {"query": "fiume Po lunghezza"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "652 km"}
+   ],
+   "enable_thinking": false,
+   "add_generation_prompt": false
+  },
+  {
+   "name": "reasoning_in_prev_turns",
+   "messages": [
+    {"role": "user", "content": "Radice di 144?"},
+    {"role": "assistant", "content": "È 12.", "reasoning_content": "Devo calcolare la radice quadrata di 144; 12 per 12 fa 144."},
+    {"role": "user", "content": "Perfetto, e il quadrato di 13?"},
+    {"role": "assistant", "content": "169.", "reasoning_content": "13 per 13: 130 più 39 uguale 169."},
+    {"role": "user", "content": "Grazie mille!"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "reasoning_after_last_query",
+   "messages": [
+    {"role": "user", "content": "Quanti stati ha gli USA?"},
+    {"role": "assistant", "content": "Sono 50.", "reasoning_content": "Gli Stati Uniti sono 50, incluso Alaska e Hawaii."}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "assistant_think_in_content",
+   "messages": [
+    {"role": "user", "content": "2 alla 10?"},
+    {"role": "assistant", "content": "<think>\n2^10 = 1024, power of two classico.\n</think>\n\n1024."}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "reasoning_with_tools_loop",
+   "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Domani a Napoli piove?"},
+    {"role": "assistant", "content": "", "reasoning_content": "Controllo il meteo con il tool.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Napoli"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "Pioggia debole, 16 gradi"}
+   ],
+   "add_generation_prompt": true
+  },
+  {
+   "name": "tool_nonstring_args",
+   "tools": [
+    {"type": "function", "function": {"name": "list_products", "description": "List products with filters.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "active": {"type": "boolean"}}, "required": ["limit"]}}}
+   ],
+   "messages": [
+    {"role": "user", "content": "Dammi 3 prodotti attivi con tag rosso o blu"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "list_products", "arguments": {"limit": 3, "tags": ["rosso", "blu"], "active": true}}}]}
+   ],
+   "add_generation_prompt": false
+  },
+  {
+   "name": "unicode_multiturn",
+   "messages": [
+    {"role": "system", "content": "你是多语言助手 🌍"},
+    {"role": "user", "content": "你好！Come stai?"},
+    {"role": "assistant", "content": "Bene, grazie! 谢谢。"},
+    {"role": "user", "content": "Mi scrivi una frase in cinese con emoji? 😊"}
+   ],
+   "add_generation_prompt": true
+  }
+]
+
+
