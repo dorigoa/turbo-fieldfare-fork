@@ -1,0 +1,299 @@
+#!/bin/bash
+# Esegue di fila le sezioni del piano docs/plans/qwen-migration-plan.md con
+# Claude CLI e il modello locale. Ogni sezione, e ogni ripresa, gira in un
+# processo `claude -p` nuovo: il contesto riparte sempre da zero.
+#
+# Uso, dalla radice del repository, sul branch qwen-support:
+#   docs/plans/qwen-migration/run-sections.sh S9        # da S9 fino al prossimo ⛔
+#   docs/plans/qwen-migration/run-sections.sh S9 S12    # da S9 a S12
+#
+# Se una sezione si interrompe a metà, la riprende (fino a MAX_RESUMES volte).
+# Si ferma quando:
+#   - una sezione è "Bloccata";
+#   - una sezione non è completata nemmeno dopo le riprese;
+#   - finisce una sezione con il tuo controllo ⛔ (S1, S8, S19, S26; vedi 1.7);
+#   - un controllo iniziale fallisce (branch, working tree, server, altra sessione).
+# Le sezioni già "Completata" vengono saltate.
+#
+# Variabili: QWEN_SETTINGS (default ~/.claude/strata.json), MAX_RESUMES
+# (default 3), QWEN_RUNNER_NOTIFY=0 per niente notifiche di macOS.
+# Log completi: scratch/logs/runner/ (un file .jsonl per tentativo).
+#
+# I comandi che l'agente può usare sono in ALLOW. Se un tentativo stampa
+# "permessi negati" per un comando che serve, aggiungilo lì e rilancia.
+
+set -u
+
+BRANCH=qwen-support
+PLAN=docs/plans/qwen-migration-plan.md
+REPORTS=docs/plans/qwen-migration/reports
+TOOLS=docs/plans/qwen-migration/tools
+LOGDIR=scratch/logs/runner
+SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/strata.json}
+MAX_RESUMES=${MAX_RESUMES:-3}
+NOTIFY=${QWEN_RUNNER_NOTIFY:-1}
+CHECKPOINTS=" 1 8 19 26 "
+LAST_SECTION=26
+
+ALLOW=(
+  "Read" "Edit" "Write"
+  "Bash(cd *)" "Bash(pwd)" "Bash(ls*)" "Bash(cat *)" "Bash(head *)" "Bash(tail *)"
+  "Bash(grep *)" "Bash(egrep *)" "Bash(rg *)" "Bash(sed *)" "Bash(awk *)" "Bash(wc *)"
+  "Bash(sort*)" "Bash(uniq*)" "Bash(cut *)" "Bash(tr *)" "Bash(find *)" "Bash(diff *)"
+  "Bash(cmp *)" "Bash(du *)" "Bash(df *)" "Bash(stat *)" "Bash(file *)" "Bash(xxd *)"
+  "Bash(od *)" "Bash(shasum *)" "Bash(jq *)" "Bash(seq *)" "Bash(basename *)"
+  "Bash(dirname *)" "Bash(realpath *)" "Bash(readlink *)" "Bash(echo *)" "Bash(printf *)"
+  "Bash(test *)" "Bash(true)" "Bash(date*)" "Bash(sleep *)" "Bash(which *)" "Bash(tee *)"
+  "Bash(mkdir *)" "Bash(touch *)" "Bash(cp *)" "Bash(mv *)" "Bash(ln -s *)"
+  "Bash(rm scratch/*)" "Bash(rm -f scratch/*)" "Bash(rm -rf scratch/*)"
+  "Bash(uname*)" "Bash(sw_vers*)" "Bash(sysctl *)" "Bash(memory_pressure*)" "Bash(vm_stat*)"
+  "Bash(pgrep *)" "Bash(ps *)" "Bash(lsof *)" "Bash(curl *)"
+  "Bash(git status*)" "Bash(git log*)" "Bash(git diff*)" "Bash(git show*)" "Bash(git add *)"
+  "Bash(git commit *)" "Bash(git push)" "Bash(git push origin $BRANCH*)" "Bash(git fetch*)"
+  "Bash(git pull --ff-only*)" "Bash(git rev-parse *)" "Bash(git branch*)" "Bash(git ls-files*)"
+  "Bash(git ls-tree *)" "Bash(git cat-file *)" "Bash(git grep *)" "Bash(git merge-base *)"
+  "Bash(git checkout $BRANCH)"
+  "Bash(swift build*)" "Bash(swift run *)" "Bash(swift --version*)" "Bash(xcrun *)"
+  "Bash(Scripts/*)" "Bash(.build/*)" "Bash(ruby Scripts/*)" "Bash(LC_ALL=en_US.UTF-8 ruby Scripts/*)"
+  "Bash(python3 *)" "Bash(scratch/qwen36-venv/bin/*)" "Bash($TOOLS/*)"
+)
+
+DENY=(
+  "Bash(git push *--force*)" "Bash(git push * -f*)" "Bash(git push -f*)" "Bash(git reset*)"
+  "Bash(git clean*)" "Bash(git stash*)" "Bash(git restore*)" "Bash(git checkout -- *)"
+  "Bash(git checkout main*)" "Bash(git checkout -b*)" "Bash(git switch*)" "Bash(git rebase*)"
+  "Bash(git merge*)" "Bash(git branch -d*)" "Bash(git branch -D*)" "Bash(git tag*)"
+  "Bash(kill*)" "Bash(pkill*)" "Bash(killall*)" "Bash(sudo*)"
+)
+
+# Riassume lo stream JSON di Claude CLI: testo, comandi, errori, fine turno.
+VIEWER=$(cat <<'PY'
+import json, sys
+
+def short(s, n=160):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+def arg(i):
+    if not isinstance(i, dict):
+        return i
+    return i.get("command") or i.get("file_path") or i.get("pattern") or i
+
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    t = d.get("type")
+    content = (d.get("message") or {}).get("content")
+    if t == "assistant" and isinstance(content, list):
+        for p in content:
+            if p.get("type") == "text" and p.get("text", "").strip():
+                print("   · " + short(p["text"]), flush=True)
+            elif p.get("type") == "tool_use":
+                print("   ▸ %s: %s" % (p.get("name"), short(arg(p.get("input")), 140)), flush=True)
+    elif t == "user" and isinstance(content, list):
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "tool_result" and p.get("is_error"):
+                c = p.get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                print("   ✗ " + short(c), flush=True)
+    elif t == "result":
+        mins = (d.get("duration_ms") or 0) / 60000
+        print("   ⏹ fine turno: %s, %s turni, %.0f min" % (d.get("subtype"), d.get("num_turns"), mins), flush=True)
+        denials = d.get("permission_denials") or []
+        if denials:
+            print("   ⚠ permessi negati (se servono, aggiungili in ALLOW):", flush=True)
+            for x in denials:
+                print("     - %s: %s" % (x.get("tool_name"), short(arg(x.get("tool_input")), 140)), flush=True)
+PY
+)
+
+say()    { printf '%s [runner] %s\n' "$(date +%H:%M:%S)" "$*"; }
+notify() {
+  [ "$NOTIFY" = 1 ] || return 0
+  osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Qwen runner"' \
+    -e 'end run' "$1" >/dev/null 2>&1 || true
+}
+stop()   { say "STOP: $*" >&2; notify "STOP: $*"; exit 1; }
+
+parse_section() {
+  local n=${1#[Ss]}
+  case $n in ''|*[!0-9]*) stop "sezione non valida: $1" ;; esac
+  n=$((10#$n))
+  { [ "$n" -ge 1 ] && [ "$n" -le "$LAST_SECTION" ]; } || stop "sezione fuori da S1–S$LAST_SECTION: $1"
+  echo "$n"
+}
+
+status_of() { sed -n 's/^- Stato:[[:space:]]*//p' "$REPORTS/S$1.md" 2>/dev/null | head -n 1; }
+
+synced() {
+  git fetch -q origin "$BRANCH" 2>/dev/null || return 1
+  [ -z "$(git status --porcelain)" ] || return 1
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ]
+}
+
+auto_rules() {
+  cat <<EOF
+Esecuzione automatica: nessuno legge i tuoi messaggi né risponde, e i comandi
+non permessi vengono rifiutati.
+- Non fare domande e non chiudere il turno prima della fine della sezione.
+- Dove la Parte 2 dice di chiedere o avvisare l'utente, o se un comando viene
+  rifiutato e il piano non offre un'alternativa, segna "Stato: Bloccata
+  (motivo)" nel report, scrivi i dettagli in "Problemi aperti", fai commit e
+  push e fermati.
+- Comandi che possono superare 10 minuti: non usare run_in_background. Avviali con
+  $TOOLS/bg.sh start NOME COMANDO ARGOMENTI...
+  e poi ripeti
+  $TOOLS/bg.sh wait NOME
+  finché non stampa "finished". L'output completo è in scratch/logs/NOME.log.
+- Vietati: kill, pkill, git reset, git clean, git stash, checkout di altri
+  branch, push con --force.
+EOF
+}
+
+run_prompt() {
+  cat <<EOF
+Esegui la sezione S$1 del piano $PLAN.
+Leggi prima AGENTS.md e la Parte 2 del piano e seguile alla lettera; poi
+leggi la scheda S$1 nella Parte 4 e, della Parte 3, solo ciò che la scheda
+indica. Il piano è lungo: trova le righe di ogni parte con
+grep -n '^# Parte\|^## \|^### S' $PLAN
+e leggi solo quegli intervalli.
+Lavora solo sul branch $BRANCH e modifica solo i file che la
+scheda permette.
+Dopo ogni passo aggiorna $REPORTS/S$1.md, fai commit
+e push.
+Alla fine segui la Parte 2.9 (report finale, commit, push) e fermati: non
+iniziare la sezione successiva.
+
+EOF
+  auto_rules
+}
+
+resume_prompt() {
+  cat <<EOF
+Riprendi la sezione S$1 del piano $PLAN.
+Leggi AGENTS.md, la Parte 2 del piano (in particolare 2.8, Ripresa), la scheda
+S$1 e il report $REPORTS/S$1.md; poi continua dal primo
+passo non completato. Il piano è lungo: trova le righe di ogni parte con
+grep -n '^# Parte\|^## \|^### S' $PLAN
+e leggi solo gli intervalli che servono.
+Eccezione a 2.8 punto 4: le modifiche non committate a file che la scheda S$1
+permette vengono dalla sessione interrotta di questa sezione: tienile,
+controllale e prosegui senza chiedere. Modifiche ad altri file: Bloccata.
+Se il report dice Bloccata, il problema è stato risolto: rimetti "Stato: In
+corso" e riprendi dal passo che si era bloccato.
+
+EOF
+  auto_rules
+}
+
+run_claude() { # $1 = numero della sezione, $2 = prompt
+  local log rc
+  log="$LOGDIR/S$1-$(date +%Y%m%d-%H%M%S).jsonl"
+  say "S$1: avvio Claude CLI (log completo: $log)"
+  printf '%s\n' "$2" | claude -p --settings "$SETTINGS" \
+      --permission-mode acceptEdits --permission-prompts none \
+      --allowedTools "${ALLOW[@]}" --disallowedTools "${DENY[@]}" \
+      --output-format stream-json --verbose \
+    | tee "$log" | python3 -I -u -c "$VIEWER"
+  rc=${PIPESTATUS[1]}
+  say "S$1: Claude CLI terminato (exit $rc)"
+}
+
+# --- Controlli iniziali ---------------------------------------------------
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  sed -n '2,23p' "$0"; exit 2
+fi
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || stop "non sono in un repository git"
+start=$(parse_section "$1") || exit 1
+end=$(parse_section "${2:-S$LAST_SECTION}") || exit 1
+[ "$start" -le "$end" ] || stop "S$start viene dopo S$end"
+
+# Variabili ereditate da un'altra sessione di Claude (per esempio il terminale
+# dell'app desktop) prevalgono sul profilo: le togliamo, così server e modello
+# vengono solo da $SETTINGS.
+for v in $(env | sed -n -E 's/^((ANTHROPIC_|CLAUDE_CODE_|CLAUDE_AGENT_SDK_)[A-Za-z0-9_]*|CLAUDECODE)=.*/\1/p'); do
+  unset "$v"
+done
+
+[ -f "$PLAN" ] || stop "manca $PLAN"
+[ -f "$SETTINGS" ] || stop "manca il profilo $SETTINGS (imposta QWEN_SETTINGS)"
+command -v claude >/dev/null || stop "claude non è nel PATH"
+[ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] || stop "il branch attivo non è $BRANCH"
+if pgrep -f -- "--settings $SETTINGS" >/dev/null 2>&1; then
+  stop "c'è già una sessione di Claude CLI con $SETTINGS: chiudila prima"
+fi
+url=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("env", {}).get("ANTHROPIC_BASE_URL", ""))' "$SETTINGS" 2>/dev/null)
+if [ -n "$url" ] && [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$url")" = 000 ]; then
+  stop "il server del modello $url non risponde"
+fi
+
+mkdir -p "$LOGDIR"
+mkdir "$LOGDIR/lock" 2>/dev/null \
+  || stop "c'è già un run-sections.sh in corso (se non è vero: rmdir $LOGDIR/lock)"
+trap 'rmdir "$LOGDIR/lock" 2>/dev/null' EXIT
+caffeinate -i -w $$ >/dev/null 2>&1 &   # il Mac non va in stop finché lo script gira
+
+# --- Sezioni --------------------------------------------------------------
+
+say "Sezioni S$start–S$end, branch $BRANCH, profilo $SETTINGS, riprese massime $MAX_RESUMES"
+for n in $(seq "$start" "$end"); do
+  st=$(status_of "$n")
+  case $st in Completata*) say "S$n è già completata: la salto"; continue ;; esac
+  if [ "$n" -gt 1 ]; then
+    prev=$(status_of $((n - 1)))
+    case $prev in
+      Completata*) ;;
+      *) stop "S$((n - 1)) non è completata (stato: ${prev:-nessun report})" ;;
+    esac
+  fi
+  git pull -q --ff-only origin "$BRANCH" || stop "git pull non riuscito prima di S$n"
+  if [ -z "$st" ]; then
+    mode=run
+    [ -z "$(git status --porcelain)" ] || stop "working tree non pulito prima di S$n"
+  else
+    mode=resume
+    say "S$n ha già un report (stato: $st): la riprendo"
+  fi
+
+  finished=0
+  attempt=0
+  while [ "$attempt" -le "$MAX_RESUMES" ]; do
+    say "S$n: tentativo $((attempt + 1)) di $((MAX_RESUMES + 1)) ($mode)"
+    if [ "$mode" = run ]; then prompt=$(run_prompt "$n"); else prompt=$(resume_prompt "$n"); fi
+    run_claude "$n" "$prompt"
+    st=$(status_of "$n")
+    case $st in
+      Completata*)
+        if synced; then finished=1; break; fi
+        say "S$n: il report dice Completata, ma il branch non è pulito o non è pushato" ;;
+      Bloccata*)
+        stop "S$n: $st. Leggi $REPORTS/S$n.md e la 1.6, poi rilancia da S$n" ;;
+      *)
+        say "S$n non è finita (stato: ${st:-nessun report})" ;;
+    esac
+    mode=resume
+    attempt=$((attempt + 1))
+  done
+  [ "$finished" = 1 ] \
+    || stop "S$n non completata dopo $MAX_RESUMES riprese: leggi $REPORTS/S$n.md e i log in $LOGDIR"
+
+  say "S$n completata: $(git log -1 --format='%h %s')"
+  notify "S$n completata"
+  case $CHECKPOINTS in
+    *" $n "*)
+      if [ "$n" -lt "$LAST_SECTION" ]; then
+        say "⛔ Dopo S$n tocca a te: fai i controlli della 1.7, poi rilancia da S$((n + 1))"
+      else
+        say "⛔ Piano finito: fai i controlli finali della 1.7"
+      fi
+      notify "⛔ Controllo dopo S$n"
+      exit 0 ;;
+  esac
+done
+say "Fatto: S$start–S$end completate"
+notify "S$start–S$end completate"

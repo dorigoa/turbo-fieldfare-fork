@@ -146,6 +146,21 @@ stesso Mac, quello con più memoria.
      altro Mac (dopo i controlli ⛔ di 1.7, dove previsti);
    - `Stato: Bloccata` → leggi il motivo e vedi 1.6.
 
+**Più sezioni di fila, senza intervento.** Chiudi Claude CLI e, dalla radice
+del repository, lancia
+[`run-sections.sh`](qwen-migration/run-sections.sh):
+
+```bash
+docs/plans/qwen-migration/run-sections.sh S9        # da S9 fino al prossimo ⛔
+docs/plans/qwen-migration/run-sections.sh S9 S11    # da S9 a S11
+```
+
+Ogni sezione gira in una sessione nuova (contesto vuoto), con lo stesso prompt
+di questo passo 3. Se una sezione si interrompe a metà, lo script la riprende
+con il prompt di 1.4 (fino a 3 volte). Si ferma quando una sezione è
+`Bloccata`, quando non riesce a finirla e dopo ogni sezione ⛔. Le istruzioni
+complete sono in testa allo script.
+
 ## 1.4 Riprendere una sezione interrotta
 
 Crash, contesto esaurito, Claude CLI chiuso: apri una sessione nuova e incolla
