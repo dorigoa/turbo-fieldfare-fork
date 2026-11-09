@@ -63,6 +63,24 @@ import Testing
         ], "fixture hashes: \(hashes)")
     }
 
+    @Test func v1JSONFixturesDecodeAndReencodeUnchanged() throws {
+        // The optional Qwen fields added by D1 must stay absent for Gemma
+        // fixtures: every decoded fixture re-encodes to the identical bytes.
+        // The writer-vs-fixture byte equality in the suite's first test keeps
+        // pinning layout.json and resident-index.bin.
+        let manifestFixture = try frozenFixture("manifest.json")
+        #expect(try GTurboManifestCodec.encode(
+            try GTurboManifestCodec.decode(manifestFixture)) == manifestFixture)
+
+        let visionManifestFixture = try frozenFixture("vision-manifest.json")
+        #expect(try GTurboVisionManifestCodec.encode(
+            try GTurboVisionManifestCodec.decode(visionManifestFixture)) == visionManifestFixture)
+
+        let receiptFixture = try frozenFixture("vision-receipt.json")
+        #expect(try GTurboVisionReceiptCodec.encode(
+            try GTurboVisionReceiptCodec.decode(receiptFixture)) == receiptFixture)
+    }
+
     @Test func sharedConstantsMatchExistingFacades() {
         #expect(GTurboJSON.magic == GTurboFormatV1.magic)
         #expect(GTurboJSON.versionMajor == GTurboFormatV1.versionMajor)
