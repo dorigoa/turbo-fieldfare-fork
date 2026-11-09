@@ -703,6 +703,22 @@ enum RepackPlanner {
         if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 17 }
         if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
         if n.hasSuffix(".layer_scalar")           { return 19 }
+        // Qwen layer slots (3.3): DeltaNet projections first, then the gated
+        // attention block, the router, and the shared expert.
+        if n.contains(".linear_attn.in_proj_qkv.weight")    { return 20 }
+        if n.contains(".linear_attn.in_proj_z.weight")      { return 21 }
+        if n.contains(".linear_attn.in_proj_a.weight")      { return 22 }
+        if n.contains(".linear_attn.in_proj_b.weight")      { return 23 }
+        if n.contains(".linear_attn.out_proj.weight")       { return 24 }
+        if n.contains(".linear_attn.conv1d.weight")         { return 25 }
+        if n.contains(".linear_attn.A_log")                 { return 26 }
+        if n.contains(".linear_attn.dt_bias")               { return 27 }
+        if n.contains(".linear_attn.norm.weight")           { return 28 }
+        if n.contains(".mlp.gate.weight")                   { return 30 }
+        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 31 }
+        if n.contains(".mlp.shared_expert.up_proj.weight")  { return 32 }
+        if n.contains(".mlp.shared_expert.down_proj.weight") { return 33 }
+        if n.contains(".mlp.shared_expert_gate.weight")     { return 34 }
         return 100
     }
 }
