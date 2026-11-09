@@ -179,6 +179,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath
         case .int8: selectedModelPathInt8
+        case .qwen36:
+            // Qwen3.6 has no saved location yet (S24 adds one); the catalog
+            // entry exists so the installer knows the checkpoint.
+            nil
         }
     }
 
@@ -186,6 +190,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath = path
         case .int8: selectedModelPathInt8 = path
+        case .qwen36:
+            // No location to remember yet; the picker cannot select this
+            // variant until S24 gives it one.
+            break
         }
     }
 

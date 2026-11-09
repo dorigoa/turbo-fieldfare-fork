@@ -30,6 +30,7 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case settingsModelVariant = "settings.modelVariant"
     case settingsModelVariantFourBit = "settings.modelVariant.fourBit"
     case settingsModelVariantEightBit = "settings.modelVariant.eightBit"
+    case settingsModelVariantQwen = "settings.modelVariant.qwen"
 
     public static func textSizeOption(_ size: AppTextSize) -> AccessibilityID {
         switch size {
@@ -47,6 +48,7 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
         switch variant {
         case .int4: .settingsModelVariantFourBit
         case .int8: .settingsModelVariantEightBit
+        case .qwen36: .settingsModelVariantQwen
         }
     }
 

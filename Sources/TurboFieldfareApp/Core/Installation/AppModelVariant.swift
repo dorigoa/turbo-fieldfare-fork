@@ -11,10 +11,15 @@ public typealias AppModelVariant = SupportedModelVariant
 
 extension SupportedModelVariant {
     /// The quantization profile a complete install of this variant carries.
+    ///
+    /// `qwen36` shares the 4-bit profile: embedding, attention and routed
+    /// experts at 4 bits, router and shared-expert gate at 8, affine groups
+    /// of 64, the same slot shape `QuantProfile.affine4` describes.
     public var quantProfile: QuantProfile {
         switch self {
         case .int4: .affine4
         case .int8: .affine8
+        case .qwen36: .affine4
         }
     }
 
@@ -36,6 +41,10 @@ extension SupportedModelVariant {
     public var installNote: String? {
         switch self {
         case .int4:
+            return nil
+        case .qwen36:
+            // The app picker does not offer Qwen3.6 yet (S24 adds the copy
+            // and lifts the filter); nothing downloads through this path.
             return nil
         case .int8:
             let download = Int((Double(approximateDownloadBytes) / 1e9).rounded())
