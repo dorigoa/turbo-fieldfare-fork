@@ -111,6 +111,50 @@ public struct ArchConfig: Sendable, Equatable {
         for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
         return mask
     }
+
+    /// Pinned Qwen 3.5-MoE 35B-A3B baseline (D1), checked against the
+    /// installed model manifest. `intermediateSize = 512` is the shared-expert
+    /// FFN width; `slidingWindow = 0` means there is no sliding window at all,
+    /// which is legal only for this family.
+    public static let qwen36_35B_A3B = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 512,
+        moeIntermediateSize: 512,
+        numHeads: 16,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0,
+        ropeTheta: 10_000_000,
+        fullRopeTheta: 10_000_000,
+        partialRotaryFactor: 0.25,
+        numLayers: 40,
+        numExperts: 256,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen36LayerMask(),
+        hiddenActivation: "silu"
+    )
+
+    /// Full-attention layers sit at 3, 7, …, 39; every other layer is the
+    /// Gated DeltaNet linear block (D1).
+    private static func qwen36LayerMask() -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: 40)
+        for i in stride(from: 3, to: 40, by: 4) { mask[i] = 1 }
+        return mask
+    }
+}
+
+/// Model family a checkpoint belongs to (C1). The wire carries the family as
+/// `manifest.json -> modelFamily`; absence means `.gemma4`, the only family
+/// the pre-Qwen readers knew.
+public enum ModelFamily: String, Sendable, Equatable {
+    case gemma4
+    case qwen35Moe = "qwen3_5_moe"
 }
 
 /// Failure modes for the validation gates in `Model.load`.
