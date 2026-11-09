@@ -97,7 +97,8 @@ struct QwenTokenizerContractTests {
             ["content": Config(QwenTokenizer.endoftextToken), "id": 248044, "special": true],
         ])
         #expect(throws: QwenTokenizerError.self) {
-            _ = try QwenTokenizer(tokenizer: tokenizer.tokenizer, tokenizerData: config)
+            _ = try QwenTokenizer(tokenizer: tokenizer.tokenizer, tokenizerData: config,
+                chatFormat: QwenChatFormat(jinjaTemplate: ""))
         }
     }
 
@@ -108,7 +109,8 @@ struct QwenTokenizerContractTests {
             ["content": Config(QwenTokenizer.imEndToken), "id": 3_000_000_000, "special": true],
         ])
         #expect(throws: QwenTokenizerError.self) {
-            _ = try QwenTokenizer(tokenizer: tokenizer.tokenizer, tokenizerData: config)
+            _ = try QwenTokenizer(tokenizer: tokenizer.tokenizer, tokenizerData: config,
+                chatFormat: QwenChatFormat(jinjaTemplate: ""))
         }
     }
 }

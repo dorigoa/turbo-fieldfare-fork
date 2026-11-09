@@ -7,6 +7,7 @@ public enum QwenTokenizerError: Error, CustomStringConvertible {
     case unsupportedPipeline(actual: String)
     case missingSpecialToken(String)
     case invalidTokenID(token: String, id: Int)
+    case invalidChatTemplate(String)
 
     public var description: String {
         switch self {
@@ -20,6 +21,8 @@ public enum QwenTokenizerError: Error, CustomStringConvertible {
             return "tokenizer missing required special token: \(t)"
         case .invalidTokenID(let token, let id):
             return "tokenizer declares out-of-range ID \(id) for token \(token)"
+        case .invalidChatTemplate(let reason):
+            return "chat template continuation error: \(reason)"
         }
     }
 }
@@ -105,6 +108,10 @@ public struct QwenTokenizer: @unchecked Sendable {
     @usableFromInline
     let tokenizer: any Tokenizer
 
+    /// The pinned `chat_template.jinja` compiler, loaded with the tokenizer
+    /// files (S10/D8). Chat rendering and continuations go through it.
+    let chatFormat: QwenChatFormat
+
     // MARK: - Loading
 
     /// Load the tokenizer from a folder holding `tokenizer.json` +
@@ -113,8 +120,7 @@ public struct QwenTokenizer: @unchecked Sendable {
     /// entry point: the tokenizer is part of the installed model directory
     /// and must not be fetched from the Hub at runtime (C6, D7).
     public static func load(from folder: URL) async throws -> QwenTokenizer {
-        try await make(from: LanguageModelConfigurationFromHub(
-            modelFolder: folder.standardizedFileURL))
+        try await make(from: folder)
     }
 
     /// Qwen model directory -> its `tokenizer/` sidecar, then the
@@ -145,22 +151,27 @@ public struct QwenTokenizer: @unchecked Sendable {
     }
 
     static func loadUncached(from folder: URL) async throws -> QwenTokenizer {
-        try await make(from: LanguageModelConfigurationFromHub(
-            modelFolder: folder.standardizedFileURL))
+        try await make(from: folder)
     }
 
     /// Build from the raw tokenizer configs so the pipeline and the
     /// special-token set can be validated against `tokenizer.json` itself.
     /// Same fetch/caching path `AutoTokenizer.from(pretrained:)` uses
-    /// internally (and the one `GFTokenizer.make` uses).
-    private static func make(from hub: LanguageModelConfigurationFromHub) async throws -> QwenTokenizer {
+    /// internally (and the one `GFTokenizer.make` uses). The chat template
+    /// travels with the tokenizer files (C6), so a folder without
+    /// `chat_template.jinja` fails at load like any other missing input.
+    private static func make(from folder: URL) async throws -> QwenTokenizer {
+        let folder = folder.standardizedFileURL
+        let hub = LanguageModelConfigurationFromHub(modelFolder: folder)
         guard let tokenizerConfig = try await hub.tokenizerConfig else {
             throw QwenTokenizerError.missingTokenizerConfig
         }
         let tokenizerData = try await hub.tokenizerData
         let underlying = try AutoTokenizer.from(
             tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
-        return try QwenTokenizer(tokenizer: underlying, tokenizerData: tokenizerData)
+        let chatFormat = try QwenChatFormat.load(from: folder)
+        return try QwenTokenizer(
+            tokenizer: underlying, tokenizerData: tokenizerData, chatFormat: chatFormat)
     }
 
     private static func hasTokenizerJSON(in folder: URL, fileManager: FileManager) -> Bool {
@@ -245,8 +256,11 @@ public struct QwenTokenizer: @unchecked Sendable {
         return resolved
     }
 
-    public init(tokenizer: any Tokenizer, tokenizerData: Config) throws {
+    public init(tokenizer: any Tokenizer,
+                tokenizerData: Config,
+                chatFormat: QwenChatFormat) throws {
         self.tokenizer = tokenizer
+        self.chatFormat = chatFormat
         try Self.verifyPipeline(tokenizerData)
 
         // `added_tokens[special == true]` reproduces the ID set the library's
@@ -311,8 +325,66 @@ public struct QwenTokenizer: @unchecked Sendable {
         output += detokenizer.flush()
         return output
     }
+
+    // MARK: - Chat template (S10, D8)
+
+    /// The Qwen counterpart of `GFTokenizer.applyChatTemplate`: render the
+    /// conversation with the generation prompt attached and no tool schemas,
+    /// through the pinned `chat_template.jinja`.
+    ///
+    /// `enableThinking` defaults to `true`, the checkpoint's own default;
+    /// passing `false` selects the template's empty-think generation prompt.
+    public func applyChatTemplate(_ messages: [GFTokenizer.Message],
+                                  enableThinking: Bool = true) throws -> String {
+        try chatFormat.render(
+            messages: messages.map(Self.chatMessage),
+            tools: nil,
+            addGenerationPrompt: true,
+            enableThinking: enableThinking)
+    }
+
+    /// The Qwen counterpart of `GFTokenizer.encodeToolChat`: render with tool
+    /// schemas and the generation prompt, then encode without injected specials.
+    public func encodeToolChat(messages: [GFTokenizer.Message],
+                               tools: [GFTokenizer.FunctionDefinition],
+                               enableThinking: Bool = true) throws -> [Int32] {
+        let rendered = try chatFormat.render(
+            messages: messages.map(Self.chatMessage),
+            tools: tools.map(Self.toolSpec),
+            addGenerationPrompt: true,
+            enableThinking: enableThinking)
+        return encode(rendered, addBOS: false)
+    }
+
+    // MARK: - Chat mapping helpers
+
+    /// Map a runtime message onto the template's representation. Roles pass
+    /// through by name; `reasoning_content` is never attached from here, so
+    /// older turns re-render without their reasoning (the pinned default,
+    /// see the S2 report — continuations are what preserve it).
+    private static func chatMessage(_ message: GFTokenizer.Message) -> QwenChatMessage {
+        QwenChatMessage(
+            role: message.role.rawValue,
+            content: message.content,
+            name: message.name,
+            toolCallID: message.toolCallID,
+            toolCalls: message.toolCalls.map {
+                QwenToolCall(id: $0.id, name: $0.name, arguments: QwenChatValue($0.arguments))
+            })
+    }
+
+    /// Tool schema in the shape the template consumes, with the key order the
+    /// pinned goldens render (`type` first, then `function`).
+    private static func toolSpec(_ tool: GFTokenizer.FunctionDefinition) -> QwenChatValue {
+        .object([
+            (key: "type", value: .string("function")),
+            (key: "function", value: .object([
+                (key: "name", value: .string(tool.name)),
+                (key: "description", value: .string(tool.description)),
+                (key: "parameters", value: QwenChatValue(tool.parameters)),
+            ])),
+        ])
+    }
+
 }
-
-
-
 
