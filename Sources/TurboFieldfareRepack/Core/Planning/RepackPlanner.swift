@@ -95,6 +95,12 @@ struct RepackPlan: Sendable {
     /// 1 keeps the historical tightly packed layout (every affine4 install);
     /// an all-8-bit source gets `RepackPlanner.affine8ResidentWeightAlignment`.
     var residentQuantizedWeightAlignment: UInt64 = 1
+    /// `GTurboModelFamily` raw value written to `manifest.json -> modelFamily`
+    /// (D1). `nil` keeps the Gemma manifest byte-identical.
+    var modelFamily: String? = nil
+    /// Qwen hybrid block (C4) written to `manifest.json -> qwen35`;
+    /// `nil` for Gemma 4.
+    var qwen35: GTurboManifestQwen35V1? = nil
 }
 
 // MARK: - Planner
@@ -326,7 +332,9 @@ enum RepackPlanner {
                           layers: layerPlans,
                           matchedModelID: matched,
                           excludedMultimodalTensorNames: excludedMultimodalNames,
-                          residentQuantizedWeightAlignment: weightAlignment)
+                          residentQuantizedWeightAlignment: weightAlignment,
+                          modelFamily: arch.modelFamily,
+                          qwen35: arch.qwen35)
     }
 
     /// Resident alignment for quantized weights in an all-8-bit (`affine8`)
