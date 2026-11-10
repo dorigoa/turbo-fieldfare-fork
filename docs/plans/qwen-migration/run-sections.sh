@@ -19,7 +19,7 @@
 #   - un controllo iniziale fallisce (branch, working tree, server, altra sessione).
 # Le sezioni già "Completata" vengono saltate.
 #
-# Variabili: QWEN_SETTINGS (default ~/.claude/strata.json), MAX_STALLS
+# Variabili: QWEN_SETTINGS (default ~/.claude/llama.json), MAX_STALLS
 # (default 3), MAX_ATTEMPTS (default 12), ERROR_PAUSE (default 60),
 # QWEN_RUNNER_NOTIFY=0 per niente notifiche di macOS.
 # Log completi: scratch/logs/runner/ (un file .jsonl per tentativo).
@@ -34,7 +34,7 @@ PLAN=docs/plans/qwen-migration-plan.md
 REPORTS=docs/plans/qwen-migration/reports
 TOOLS=docs/plans/qwen-migration/tools
 LOGDIR=scratch/logs/runner
-SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/strata.json}
+SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/llama.json}
 MAX_STALLS=${MAX_STALLS:-${MAX_RESUMES:-3}}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-12}
 ERROR_PAUSE=${ERROR_PAUSE:-60}
