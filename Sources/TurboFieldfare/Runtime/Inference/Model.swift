@@ -455,10 +455,26 @@ extension Model {
 
         let residentIndex = try ResidentIndexReader.load(
             fileDescriptor: weightsFD, displayPath: "model_weights.bin")
-        try validateRuntimeSchema(residentIndex: residentIndex,
-                                  layout: layout,
-                                  manifest: manifest,
-                                  config: expecting)
+        // D2: the manifest family picks the runtime schema. A Qwen manifest
+        // validates against the pinned Qwen constants (the `arch`/`qwen35`
+        // manifest blocks were already checked against them by
+        // ManifestReader.validate); Gemma keeps the caller's `expecting`.
+        let resolvedConfig: ArchConfig
+        switch Model.family(of: manifest) {
+        case .qwen35Moe:
+            resolvedConfig = .qwen36_35B_A3B
+            try validateQwenRuntimeSchema(residentIndex: residentIndex,
+                                          layout: layout,
+                                          manifest: manifest,
+                                          config: resolvedConfig,
+                                          hybrid: .qwen36_35B_A3B)
+        case .gemma4:
+            resolvedConfig = expecting
+            try validateRuntimeSchema(residentIndex: residentIndex,
+                                      layout: layout,
+                                      manifest: manifest,
+                                      config: resolvedConfig)
+        }
 
         // The resident index must account for the complete weights file.
         let fileSize = weightsSize
@@ -481,7 +497,7 @@ extension Model {
 
         return Model(
             device: device,
-            config: expecting,
+            config: resolvedConfig,
             streamingMode: streamingMode,
             expertCachePolicy: expertCachePolicy,
             integrityPolicy: resolvedIntegrityPolicy,
