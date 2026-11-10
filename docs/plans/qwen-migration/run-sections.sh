@@ -20,7 +20,7 @@
 # Le sezioni già "Completata" vengono saltate.
 #
 # Variabili: QWEN_SETTINGS (default ~/.claude/llama.json), MAX_STALLS
-# (default 3), MAX_ATTEMPTS (default 12), ERROR_PAUSE (default 60),
+# (default 3), MAX_ATTEMPTS (default 20), ERROR_PAUSE (default 60),
 # QWEN_RUNNER_NOTIFY=0 per niente notifiche di macOS.
 # Log completi: scratch/logs/runner/ (un file .jsonl per tentativo).
 #
@@ -36,7 +36,7 @@ TOOLS=docs/plans/qwen-migration/tools
 LOGDIR=scratch/logs/runner
 SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/llama.json}
 MAX_STALLS=${MAX_STALLS:-${MAX_RESUMES:-3}}
-MAX_ATTEMPTS=${MAX_ATTEMPTS:-12}
+MAX_ATTEMPTS=${MAX_ATTEMPTS:-20}
 ERROR_PAUSE=${ERROR_PAUSE:-60}
 NOTIFY=${QWEN_RUNNER_NOTIFY:-1}
 CHECKPOINTS=" 1 8 19 26 "
@@ -182,7 +182,9 @@ auto_rules() {
   cat <<EOF
 Esecuzione automatica: nessuno legge i tuoi messaggi né risponde, e i comandi
 non permessi vengono rifiutati.
-- Non fare domande e non chiudere il turno prima della fine della sezione.
+- Non fare domande. Non chiudere il turno prima della fine della sezione,
+  tranne quando la scheda chiede una sessione per passo: allora chiudilo dopo
+  il commit e il push di ogni passo.
 - Dove la Parte 2 dice di chiedere o avvisare l'utente, o se un comando viene
   rifiutato e il piano non offre un'alternativa, segna "Stato: Bloccata
   (motivo)" nel report, scrivi i dettagli in "Problemi aperti", fai commit e

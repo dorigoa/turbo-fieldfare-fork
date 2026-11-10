@@ -160,8 +160,9 @@ di questo passo 3. Se una sezione si interrompe a metà, lo script la riprende
 con il prompt di 1.4 finché fa progressi; se Claude CLI finisce con un errore
 (per esempio del server del modello), aspetta un minuto prima di riprovare. Si
 ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza nuovi
-commit (o 12 tentativi in tutto) e dopo ogni sezione ⛔. Le istruzioni complete
-sono in testa allo script.
+commit (o 20 tentativi in tutto) e dopo ogni sezione ⛔. Se la scheda chiede
+una sessione per passo (S19), ogni passo è un tentativo con il contesto vuoto.
+Le istruzioni complete sono in testa allo script.
 
 ## 1.4 Riprendere una sezione interrotta
 
@@ -1553,33 +1554,87 @@ accessori) e in `Runtime/KVCache/Qwen/`; test in
 **Obiettivo.** Il modello Qwen genera token, e i logit coincidono con i
 golden di `mlx-lm`.
 
-**Requisiti.** Modello reale: sì (2.4). Report da leggere: S8, S18.
+**Requisiti.** Modello reale: sì (2.4), dal passo 2. Report da leggere: S18
+(solo "Note per le sezioni successive"); S8 solo se un confronto diverge.
 
-**Leggi.** Tutta la 3.5; D3, D5; C7, C8, C9;
-`Runtime/Generation/LogitProducer.swift`; le firme dei wrapper Qwen
-(`grep -n "func encode\|init(" Sources/TurboFieldfare/Kernels/Qwen/*.swift`).
+**Una sessione per passo.** Scrivere `QwenHybridForwardRunner` richiede di
+conoscere molto codice, più di quanto stia in un contesto: per questo la
+sezione è divisa in passi piccoli, e la mappa del passo 1 sostituisce la
+rilettura del codice. Dopo il commit e il push di ogni passo, aggiungi alla
+mappa ciò che il passo successivo deve sapere (nomi, buffer, scoperte) e
+chiudi la sessione con una riga di riepilogo: la sezione riprende dal passo
+successivo con il contesto vuoto (`run-sections.sh` lo fa da solo; a mano, con
+il prompt di 1.4). Dal passo 2 in poi leggi solo la scheda, il report, la
+mappa e ciò che il passo elenca; mai `RealForwardRunner.swift`.
+
+**Leggi.** Ogni passo dice cosa leggere. Le grandezze dei golden sono in C7 e
+in Appendice D ("Grandezze interne"); le tolleranze in C8; i test con il
+modello seguono C9.
 
 **Puoi modificare.** File nuovi in `Runtime/Inference/Qwen/`; test in
-`Tests/TurboFieldfare/Core/Runtime/Qwen/`. CLI, server e app non si toccano.
+`Tests/TurboFieldfare/Core/Runtime/Qwen/`; la mappa
+`docs/plans/qwen-migration/reports/S19-map.md`. CLI, server e app non si
+toccano.
 
 **Passi.**
 
-1. `QwenHybridForwardRunner`: inizializzazione (viste sui tensori, cache,
-   buffer di lavoro, pipeline), conforme a `LogitProducer`,
-   `ContinuableLogitProducer` e `ContextWindowReporting`.
-2. `produce(token:position:into:)`: embedding → 40 layer secondo la maschera
-   → norma finale → `lm_head` → logit FP16. Prefill v1 = un token alla volta.
-3. Prese di debug interne (solo per i test): stato nascosto dopo un layer
-   scelto.
-4. Test contro i golden: grandezze interne dei layer 0 e 3; stati dopo i layer
-   0, 3, 39; top-20 su tutte le posizioni; logit completi dell'ultima
-   posizione; 32 token greedy (C8). Il ciclo greedy sta nel test (con
-   `QwenTokenizer`), non nel CLI.
-5. Nel report: la continuazione greedy di p0 e p4 decodificata in testo, i
-   numeri di C8, il tempo per token.
+1. Mappa, senza codice Swift. Scrivi `reports/S19-map.md`, al massimo 150
+   righe: per ogni chiamata che il runner farà, la firma esatta e
+   `file:riga`; per un layer DeltaNet, un layer di attention, il MoE e la
+   testa, l'ordine delle operazioni di 3.5 con il wrapper che esegue ciascuna
+   e le forme dei buffer; come si leggono gli expert instradati (C5). Leggi:
+   3.5; D3, D5; C5; `Runtime/Generation/LogitProducer.swift`; le firme dei
+   wrapper (`grep -n "func encode\|init(" Sources/TurboFieldfare/Kernels/Qwen/*.swift Sources/TurboFieldfare/Kernels/Quant/*.swift`);
+   accessori di `Runtime/Inference/Qwen/Model+Qwen.swift` e di
+   `Runtime/Inference/ModelExpertIO.swift`, API di `QwenHybridCache` (con
+   `grep -n "public\|func "`); nomi e forme delle chiavi dei golden di C7 (con
+   `python3`, senza stampare i valori).
+2. Scheletro. `QwenHybridForwardRunner` in
+   `Runtime/Inference/Qwen/QwenHybridForwardRunner.swift`: inizializzazione
+   (viste sui tensori, cache, buffer di lavoro, pipeline), conforme a
+   `LogitProducer`, `ContinuableLogitProducer` e `ContextWindowReporting`.
+   Per ora `produce(token:position:into:)` fa embedding → norma finale →
+   `lm_head` → logit FP16, senza layer; prefill v1 = un token alla volta.
+   Prese di debug (solo per i test) per lo stato nascosto dopo l'embedding o
+   dopo un layer scelto, e per le grandezze interne dei passi 3–5. Test con il
+   modello: embedding dei token di p0 contro `hidden_p0.json` → `embedding`
+   (coseno ≥ 0,9999). Leggi: la mappa.
+3. Mixer DeltaNet (layer lineari): norma d'ingresso, proiezioni, conv e SiLU,
+   preparazione, scansione con lo stato in `QwenHybridCache`, norma gated,
+   proiezione d'uscita, residuo. Test sul layer 0 con i token di p0: `x_norm`,
+   `qkv_raw`, `z`, `a`, `b`, `conv_out`, `q`, `k`, `v`, `beta`, `g`,
+   `core_out`, `gated_out`, `mixer_out` di `layer0_internals.json` (coseno ≥
+   0,995 per ciascuna, come i layer in C8) e `state_heads0to3` (errore
+   relativo ≤ 1e-4, C8). Leggi: la mappa; in 3.5 la parte DeltaNet.
+4. MoE e layer 0 completo: norma prima del MoE, router top-8, expert
+   instradati letti dal file del layer (C5), shared expert con il suo gate,
+   somma e residuo. Test: `moe_x`, `router_top_ids` (uguali, salvo
+   quasi-pareggi annotati con i due pesi), `router_top_weights`,
+   `routed_out`, `shared_out`, `layer_out` di `layer0_internals.json`; stato
+   dopo il layer 0 contro `hidden_p0.json` → `layer0` (coseno ≥ 0,995, C8).
+   Leggi: la mappa; in 3.5 la parte MoE; C5.
+5. Attention (layer 3): norma, proiezioni di q, gate, k e v, norme per testa,
+   RoPE, scrittura nella cache KV, attention, gate, proiezione d'uscita,
+   residuo e il MoE del passo 4. I layer 1 e 2 sono lineari come lo 0:
+   esegui i layer 0–2 e confronta il layer 3 con tutte le chiavi di
+   `layer3_internals.json` (coseno ≥ 0,995) e con `hidden_p0.json` →
+   `layer3` (coseno ≥ 0,995, C8). Leggi: la mappa; in 3.5 la parte
+   attention.
+6. Modello completo: i 40 layer secondo la maschera, norma finale, `lm_head`;
+   reset e posizioni per un prompt nuovo. Test: `hidden_p0.json` → `layer39`
+   (coseno ≥ 0,99) e `final_norm`; top-20 su tutte le posizioni di tutti i
+   prompt contro `logits_topk.json` (top-1 uguale in almeno il 98%); logit
+   completi dell'ultima posizione di p0 e p1 contro `logits_last.json`
+   (coseno ≥ 0,999). Leggi: la mappa.
+7. Greedy: il ciclo sta nel test (con `QwenTokenizer`), non nel CLI. 32 token
+   per i 6 prompt contro `greedy.json`, identici per almeno 4 prompt su 6
+   (C8); ogni divergenza spiegata come quasi-pareggio, con i due logit in
+   gioco. Leggi: la mappa; C9.
+8. Nel report: la continuazione greedy di p0 e p4 decodificata in testo, i
+   numeri di C8, il tempo per token. Poi 2.9.
 
-**Fatto quando.** Tolleranze C8 rispettate; testo sensato nel report. Se i
-logit divergono, segui 2.5 (layer per layer, poi grandezze interne).
+**Fatto quando.** Tolleranze C8 rispettate; testo sensato nel report. Se un
+confronto diverge, segui 2.5 (layer per layer, poi grandezze interne).
 
 ### S20 — Runner: prefill a blocchi e riuso del prefisso
 
