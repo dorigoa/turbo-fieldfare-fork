@@ -25,3 +25,33 @@ kernel void qwen_split_qg(
     q[dst] = qg[src + d];
     gate[dst] = qg[src + headDim + d];
 }
+
+// Partial NeoX-style RoPE (plan 3.5): rotate only the FIRST 2*rotatedPairs
+// dims of each head, pairing dimension i with i + rotatedPairs
+// (Qwen "rotate_half" over the rotated block), with
+// inv_freq_i = theta^(-2i / (2*rotatedPairs)). The attention layer rotates
+// the first 64 dims of a 256-wide head with theta 1e7. Token r sits at
+// position positionBase + r. In-place safe: each pair touches only its two
+// dimensions. This is NOT Gemma's rope_proportional_neox, which pairs
+// (i, headDim/2 + i) and divides the exponent by headDim.
+kernel void qwen_rope_partial(
+    device half* data [[buffer(0)]],           // [rows][heads*headDim] FP16
+    constant uint& positionBase [[buffer(1)]], // position of token row 0
+    constant uint& headDim [[buffer(2)]],
+    constant uint& numHeads [[buffer(3)]],
+    constant uint& rotatedPairs [[buffer(4)]],
+    constant float& theta [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]      // (pair, head, row)
+) {
+    const uint pair = gid.x, h = gid.y, r = gid.z;
+    if (pair >= rotatedPairs || h >= numHeads) return;
+    device half* head0 = data + ((size_t)r * numHeads + h) * (size_t)headDim;
+    const float rotDim = float(2u * rotatedPairs);
+    const float invFreq = pow(theta, -float(2u * pair) / rotDim);
+    const float angle = float(positionBase + r) * invFreq;
+    const float c = cos(angle), s = sin(angle);
+    const float x0 = float(head0[pair]);
+    const float x1 = float(head0[rotatedPairs + pair]);
+    head0[pair] = half(x0 * c - x1 * s);
+    head0[rotatedPairs + pair] = half(x0 * s + x1 * c);
+}

@@ -28,9 +28,11 @@ import Metal
 final class QwenAttention {
 
     private let psoSplitQG: MTLComputePipelineState
+    private let psoRope: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoSplitQG = try context.pipeline("qwen_split_qg")
+        self.psoRope = try context.pipeline("qwen_rope_partial")
     }
 
     /// Separate query and gate of a `q_proj` output: `qg` FP16
@@ -58,6 +60,41 @@ final class QwenAttention {
         enc.setBytes(&rw, length: MemoryLayout<UInt32>.size, index: 5)
         enc.dispatchThreads(MTLSize(width: headDim, height: queryHeads, depth: rows),
                             threadsPerThreadgroup: MTLSize(width: 64,
+                                                           height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Partial RoPE in place on `data` FP16 [rows][heads * headDim]: rotate
+    /// the first `2 * rotatedPairs` dims of every head, pairs (i, i + pairs),
+    /// inv_freq_i = theta^(-2i / (2*pairs)); token row r sits at position
+    /// `positionBase + r`. Real call: q 16×256 / k 2×256, pairs 32, theta 1e7.
+    func encodeRopePartial(commandBuffer: MTLCommandBuffer,
+                           data: MTLBuffer, dataOffset: Int = 0,
+                           positionBase: UInt32,
+                           headDim: Int,
+                           numHeads: Int,
+                           rows: Int,
+                           rotatedPairs: Int,
+                           theta: Float) {
+        precondition(rotatedPairs > 0 && 2 * rotatedPairs <= headDim,
+                     "rotation block must fit in headDim")
+        precondition(numHeads > 0)
+        guard rows > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoRope)
+        enc.setBuffer(data, offset: dataOffset, index: 0)
+        var pos = positionBase
+        var hd = UInt32(headDim)
+        var nh = UInt32(numHeads)
+        var rp = UInt32(rotatedPairs)
+        var th = theta
+        enc.setBytes(&pos, length: MemoryLayout<UInt32>.size, index: 1)
+        enc.setBytes(&hd,  length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&nh,  length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&rp,  length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&th,  length: MemoryLayout<Float>.size,  index: 5)
+        enc.dispatchThreads(MTLSize(width: rotatedPairs, height: numHeads, depth: rows),
+                            threadsPerThreadgroup: MTLSize(width: 32,
                                                            height: 1, depth: 1))
         enc.endEncoding()
     }

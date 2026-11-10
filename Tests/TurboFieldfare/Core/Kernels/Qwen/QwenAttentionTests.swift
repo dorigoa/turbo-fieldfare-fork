@@ -149,4 +149,64 @@ import TurboFieldfareValidationSupport
         try Self.runNorms(rows: 3, queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
                           headDim: Self.headDim, seed: 0xB11)
     }
+
+    // MARK: - Partial RoPE
+
+    /// In-place rotation vs the reference: rotated dims within
+    /// `fp16Reduction`, dims past the rotated block bit-exact.
+    private static func runRope(rows: Int, heads: Int, headDim: Int,
+                                positionBase: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed)
+            .key("qwen-rope-r\(rows)-h\(heads)-d\(headDim)-p\(positionBase)")
+        let n = rows * heads * headDim
+        let xFp16 = (0..<n).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let buf = Fp16Buffer.make(ctx.device, halves: xFp16) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeRopePartial(commandBuffer: cb, data: buf,
+                               positionBase: UInt32(positionBase),
+                               headDim: headDim, numHeads: heads, rows: rows,
+                               rotatedPairs: rotatedPairs, theta: ropeTheta)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.partialRoPE(x: xFp16.map { Float($0) },
+                                               rows: rows, heads: heads,
+                                               headDim: headDim,
+                                               positionBase: positionBase,
+                                               rotatedPairs: rotatedPairs,
+                                               theta: ropeTheta)
+        let out = Fp16Buffer.read(buf, count: n)
+        let rel = RelError.compute(actual: out, reference: ref)
+        #expect(rel < Tolerance.fp16Reduction,
+                "rope r\(rows) h\(heads) d\(headDim) p\(positionBase): relErr=\(rel)")
+
+        var maxUntouched: Float = 0
+        for r in 0..<rows {
+            for h in 0..<heads {
+                for d in (2 * rotatedPairs)..<headDim {
+                    let i = (r * heads + h) * headDim + d
+                    maxUntouched = max(maxUntouched, abs(out[i] - Float(xFp16[i])))
+                }
+            }
+        }
+        #expect(maxUntouched == 0, "dims past the rotated block must be untouched")
+    }
+
+    @Test func rope_small() throws {
+        try Self.runRope(rows: 3, heads: 4, headDim: 128, positionBase: 0, seed: 0xB20)
+        // Non-zero base: token r must use position positionBase + r.
+        try Self.runRope(rows: 3, heads: 4, headDim: 128, positionBase: 7, seed: 0xB21)
+    }
+
+    @Test func rope_real() throws {
+        // Real geometry q 16×256 and k 2×256, first 64 dims, theta 1e7.
+        try Self.runRope(rows: 5, heads: Self.queryHeads, headDim: Self.headDim,
+                         positionBase: 0, seed: 0xB22)
+        try Self.runRope(rows: 5, heads: Self.kvHeads, headDim: Self.headDim,
+                         positionBase: 4095, seed: 0xB23)
+    }
 }

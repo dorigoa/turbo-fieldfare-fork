@@ -31,4 +31,32 @@ public enum QwenAttentionRef {
         }
         return (q, gate)
     }
+
+    /// Partial NeoX-style RoPE (plan 3.5): for each head, rotate only the
+    /// first `2 * rotatedPairs` dims, pairing `i` with `i + rotatedPairs`,
+    /// inv_freq_i = theta^(-2i / (2*rotatedPairs)); token row r sits at
+    /// position `positionBase + r`. `x` is [rows][heads * headDim], returned
+    /// rotated; dims outside the rotated block are untouched.
+    public static func partialRoPE(x: [Float], rows: Int, heads: Int, headDim: Int,
+                                   positionBase: Int, rotatedPairs: Int,
+                                   theta: Float) -> [Float] {
+        precondition(x.count == rows * heads * headDim, "x shape")
+        precondition(2 * rotatedPairs <= headDim, "rotation exceeds headDim")
+        var y = x
+        for r in 0..<rows {
+            let position = Float(positionBase + r)
+            for h in 0..<heads {
+                let base = (r * heads + h) * headDim
+                for i in 0..<rotatedPairs {
+                    let invFreq = pow(theta, -Float(2 * i) / Float(2 * rotatedPairs))
+                    let angle = position * invFreq
+                    let c = cos(angle), s = sin(angle)
+                    let x0 = y[base + i], x1 = y[base + rotatedPairs + i]
+                    y[base + i] = x0 * c - x1 * s
+                    y[base + rotatedPairs + i] = x0 * s + x1 * c
+                }
+            }
+        }
+        return y
+    }
 }
