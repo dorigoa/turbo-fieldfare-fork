@@ -55,3 +55,30 @@ kernel void qwen_rope_partial(
     head0[pair] = half(x0 * c - x1 * s);
     head0[rotatedPairs + pair] = half(x0 * s + x1 * c);
 }
+
+// Append rows of K and V to the attention KV cache (D5 layout inside the
+// per-layer slice: [position][kvHead][headDim], so headStride = headDim and
+// posStride = kvHeads * headDim; both are parameters so the runner can pass
+// a capacity-strided buffer and write token t at cache position
+// kvStart + t). Pure element copy: bit-exact.
+kernel void qwen_kv_write(
+    device const half* k [[buffer(0)]],      // [rows][kvHeads*headDim]
+    device const half* v [[buffer(1)]],
+    device half* kvK [[buffer(2)]],          // cache [positions][kvHeads][headDim]
+    device half* kvV [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& kvHeads [[buffer(5)]],
+    constant uint& headDim [[buffer(6)]],
+    constant uint& kvStart [[buffer(7)]],
+    constant uint& posStride [[buffer(8)]],  // elements between cached positions
+    constant uint& headStride [[buffer(9)]], // elements between KV heads
+    uint3 gid [[thread_position_in_grid]]    // (dim, head, row)
+) {
+    const uint d = gid.x, h = gid.y, r = gid.z;
+    if (d >= headDim || h >= kvHeads || r >= rows) return;
+    const size_t src = ((size_t)r * kvHeads + h) * (size_t)headDim + d;
+    const size_t dst = ((size_t)(kvStart + r) * (size_t)posStride)
+                     + (size_t)h * (size_t)headStride + d;
+    kvK[dst] = k[src];
+    kvV[dst] = v[src];
+}

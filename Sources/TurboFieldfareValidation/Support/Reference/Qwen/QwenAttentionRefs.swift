@@ -59,4 +59,31 @@ public enum QwenAttentionRef {
         }
         return y
     }
+
+    /// Append `k`/`v` ([rows][kvHeads * headDim]) to the KV caches at cache
+    /// position `kvStart + r`, layout [position][kvHead][headDim] with the
+    /// element strides `posStride`/`headStride` (D5: headStride = headDim,
+    /// posStride = kvHeads * headDim, or larger for a capacity-strided cache).
+    public static func writeKV(k: [Float], v: [Float],
+                               cacheK: inout [Float], cacheV: inout [Float],
+                               rows: Int, kvHeads: Int, headDim: Int,
+                               kvStart: Int, posStride: Int, headStride: Int) {
+        precondition(k.count == rows * kvHeads * headDim, "k shape")
+        precondition(v.count == k.count, "v must match k")
+        precondition(headStride >= headDim, "headStride must span a head")
+        let needed = (kvStart + rows - 1) * posStride
+            + (kvHeads - 1) * headStride + headDim
+        precondition(cacheK.count >= needed && cacheV.count >= needed,
+                     "cache too small")
+        for r in 0..<rows {
+            for h in 0..<kvHeads {
+                let src = (r * kvHeads + h) * headDim
+                let dst = (kvStart + r) * posStride + h * headStride
+                for d in 0..<headDim {
+                    cacheK[dst + d] = k[src + d]
+                    cacheV[dst + d] = v[src + d]
+                }
+            }
+        }
+    }
 }

@@ -209,4 +209,84 @@ import TurboFieldfareValidationSupport
         try Self.runRope(rows: 5, heads: Self.kvHeads, headDim: Self.headDim,
                          positionBase: 4095, seed: 0xB23)
     }
+
+    // MARK: - KV cache write (D5 layout, strides as parameters)
+
+    /// The write is a pure element copy: the whole cache (prefill + written
+    /// rows + untouched tail) must match the reference bit-exactly.
+    private static func runKVWrite(rows: Int, kvHeads: Int, headDim: Int,
+                                   kvStart: Int, posStride: Int, headStride: Int,
+                                   seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-kvw-r\(rows)-h\(kvHeads)-d\(headDim)-p\(kvStart)")
+        let positions = kvStart + rows
+        let cacheCount = positions * posStride
+        var preK = [Float16](repeating: 0, count: cacheCount)
+        var preV = [Float16](repeating: 0, count: cacheCount)
+        // Prefill every head slot of every position so untouched slots are
+        // checked against random values, not zeros.
+        for p in 0..<positions {
+            for h in 0..<kvHeads {
+                let base = p * posStride + h * headStride
+                for d in 0..<headDim {
+                    preK[base + d] = Float16(rng.uniform(-1.0, 1.0))
+                    preV[base + d] = Float16(rng.uniform(-1.0, 1.0))
+                }
+            }
+        }
+        let k = (0..<rows * kvHeads * headDim).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let v = (0..<rows * kvHeads * headDim).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let kBuf = Fp16Buffer.make(ctx.device, halves: k),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: v),
+              let cacheKBuf = Fp16Buffer.make(ctx.device, halves: preK),
+              let cacheVBuf = Fp16Buffer.make(ctx.device, halves: preV) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeKVWrite(commandBuffer: cb, k: kBuf, v: vBuf,
+                           kvK: cacheKBuf, kvV: cacheVBuf,
+                           rows: rows, kvHeads: kvHeads, headDim: headDim,
+                           kvStart: UInt32(kvStart),
+                           posStride: posStride, headStride: headStride)
+        cb.commit(); cb.waitUntilCompleted()
+
+        var refK = preK.map { Float($0) }
+        var refV = preV.map { Float($0) }
+        QwenAttentionRef.writeKV(k: k.map { Float($0) }, v: v.map { Float($0) },
+                                 cacheK: &refK, cacheV: &refV,
+                                 rows: rows, kvHeads: kvHeads, headDim: headDim,
+                                 kvStart: kvStart, posStride: posStride,
+                                 headStride: headStride)
+        let outK = Fp16Buffer.read(cacheKBuf, count: cacheCount)
+        let outV = Fp16Buffer.read(cacheVBuf, count: cacheCount)
+        #expect(maxAbsDiff(outK, refK) == 0, "K cache must match bit-exactly")
+        #expect(maxAbsDiff(outV, refV) == 0, "V cache must match bit-exactly")
+    }
+
+    @Test func kvWrite_small() throws {
+        // Plain D5 layout (posStride = kvHeads * headDim), write mid-cache.
+        try Self.runKVWrite(rows: 3, kvHeads: 2, headDim: 128, kvStart: 5,
+                            posStride: 2 * 128, headStride: 128, seed: 0xB30)
+    }
+
+    @Test func kvWrite_real() throws {
+        // Plain D5 layout at real geometry, appending at position 0.
+        try Self.runKVWrite(rows: 4, kvHeads: Self.kvHeads, headDim: Self.headDim,
+                            kvStart: 0,
+                            posStride: Self.kvHeads * Self.headDim,
+                            headStride: Self.headDim,
+                            seed: 0xB31)
+    }
+
+    @Test func kvWrite_stridedCache() throws {
+        // Capacity-strided cache: positions 8 * headDim apart (twice the
+        // plain stride) near the 4096-position end, real 2 KV heads of 256.
+        try Self.runKVWrite(rows: 3, kvHeads: Self.kvHeads, headDim: Self.headDim,
+                            kvStart: 4093,
+                            posStride: 2 * Self.kvHeads * Self.headDim,
+                            headStride: Self.headDim,
+                            seed: 0xB32)
+    }
 }
