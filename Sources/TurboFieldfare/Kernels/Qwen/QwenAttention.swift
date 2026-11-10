@@ -30,11 +30,13 @@ final class QwenAttention {
     private let psoSplitQG: MTLComputePipelineState
     private let psoRope: MTLComputePipelineState
     private let psoKvWrite: MTLComputePipelineState
+    private let psoAttention: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoSplitQG = try context.pipeline("qwen_split_qg")
         self.psoRope = try context.pipeline("qwen_rope_partial")
         self.psoKvWrite = try context.pipeline("qwen_kv_write")
+        self.psoAttention = try context.pipeline("qwen_attention")
     }
 
     /// Separate query and gate of a `q_proj` output: `qg` FP16
@@ -144,6 +146,62 @@ final class QwenAttention {
         enc.dispatchThreads(MTLSize(width: headDim, height: kvHeads, depth: rows),
                             threadsPerThreadgroup: MTLSize(width: 64,
                                                            height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Causal GQA attention over the D5 KV cache: `q` FP16 [T][queryHeads *
+    /// headDim], `kvK`/`kvV` the cache slices with the encodeKVWrite strides,
+    /// `out` FP16 like q. Query token t attends cache positions
+    /// [0, kvStart + t]; decode is queryTokens = 1, prefill T (call after
+    /// encodeKVWrite on the same command buffer). FP32 online softmax,
+    /// GQA ratio queryHeads/kvHeads (real 16/2 = 8). headDim must be <= 256
+    /// (the kernel gives one dimension to each of 256 threads).
+    func encodeAttention(commandBuffer: MTLCommandBuffer,
+                         q: MTLBuffer, qOffset: Int = 0,
+                         kvK: MTLBuffer, kvKOffset: Int = 0,
+                         kvV: MTLBuffer, kvVOffset: Int = 0,
+                         out: MTLBuffer, outOffset: Int = 0,
+                         queryHeads: Int,
+                         kvHeads: Int,
+                         headDim: Int,
+                         queryTokens: Int,
+                         kvStart: UInt32,
+                         posStride: Int,
+                         headStride: Int,
+                         scale: Float) {
+        precondition(queryHeads > 0 && kvHeads > 0)
+        precondition(queryHeads % kvHeads == 0,
+                     "queryHeads must be a multiple of kvHeads for GQA")
+        precondition(headDim > 0 && headDim <= 256,
+                     "headDim must be <= 256 (one dimension per thread)")
+        precondition(posStride >= headStride && headStride >= headDim,
+                     "strides must not overlap between heads/positions")
+        guard queryTokens > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoAttention)
+        enc.setBuffer(q,    offset: qOffset,    index: 0)
+        enc.setBuffer(kvK,  offset: kvKOffset,  index: 1)
+        enc.setBuffer(kvV,  offset: kvVOffset,  index: 2)
+        enc.setBuffer(out,  offset: outOffset,  index: 3)
+        var qh = UInt32(queryHeads)
+        var kh = UInt32(kvHeads)
+        var hd = UInt32(headDim)
+        var qt = UInt32(queryTokens)
+        var ks = kvStart
+        var ps = UInt32(posStride)
+        var hs = UInt32(headStride)
+        var sc = scale
+        enc.setBytes(&qh, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&kh, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&qt, length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBytes(&ks, length: MemoryLayout<UInt32>.size, index: 8)
+        enc.setBytes(&ps, length: MemoryLayout<UInt32>.size, index: 9)
+        enc.setBytes(&hs, length: MemoryLayout<UInt32>.size, index: 10)
+        enc.setBytes(&sc, length: MemoryLayout<Float>.size, index: 11)
+        enc.dispatchThreadgroups(MTLSize(width: queryHeads, height: queryTokens, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256,
+                                                                height: 1, depth: 1))
         enc.endEncoding()
     }
 }

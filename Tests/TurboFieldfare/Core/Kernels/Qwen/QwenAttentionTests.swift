@@ -289,4 +289,106 @@ import TurboFieldfareValidationSupport
                             headStride: Self.headDim,
                             seed: 0xB32)
     }
+
+    // MARK: - Causal GQA attention
+
+    /// Realistic head distribution: L2-normalized then scaled back to unit
+    /// per-dimension RMS — what q/k actually look like after q_norm/k_norm +
+    /// RoPE (score std ~ 1 after the 1/sqrt(headDim) scale).
+    private static func realisticHeads(rng: inout SplitMix64, rows: Int,
+                                       heads: Int, dim: Int) -> [Float16] {
+        var out = [Float16]()
+        let target = Float(Double(dim).squareRoot())
+        for _ in 0..<rows * heads {
+            let x = (0..<dim).map { _ in rng.uniform(-2.0, 2.0) }
+            let norm = max(x.reduce(0) { $0 + $1 * $1 }.squareRoot(), 1e-6)
+            let scale = target / norm
+            out += x.map { Float16($0 * scale) }
+        }
+        return out
+    }
+
+    /// One attention run: GPU vs the two-pass CPU reference,
+    /// `fp16ChainedReduction` tolerance (softmax chain) per C8.
+    private static func runAttention(queryHeads: Int, kvHeads: Int, headDim: Int,
+                                     queryTokens: Int, kvStart: Int,
+                                     seed: UInt64) throws {
+        var rng = SeedTree(seed)
+            .key("qwen-attn-q\(queryHeads)-kv\(kvHeads)-d\(headDim)-T\(queryTokens)-s\(kvStart)")
+        let cachePositions = kvStart + queryTokens
+        let posStride = kvHeads * headDim
+        let headStride = headDim
+        let qFp16 = realisticHeads(rng: &rng, rows: queryTokens,
+                                   heads: queryHeads, dim: headDim)
+        let kCache = realisticHeads(rng: &rng, rows: cachePositions,
+                                    heads: kvHeads, dim: headDim)
+        let vCache = (0..<cachePositions * kvHeads * headDim)
+            .map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
+              let kBuf = Fp16Buffer.make(ctx.device, halves: kCache),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: vCache),
+              let outBuf = Fp16Buffer.make(ctx.device, count: qFp16.count) else {
+            Issue.record("alloc failed"); return
+        }
+        let scale = Float(1.0 / Double(headDim).squareRoot())
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeAttention(commandBuffer: cb, q: qBuf, kvK: kBuf, kvV: vBuf,
+                             out: outBuf,
+                             queryHeads: queryHeads, kvHeads: kvHeads,
+                             headDim: headDim, queryTokens: queryTokens,
+                             kvStart: UInt32(kvStart),
+                             posStride: posStride, headStride: headStride,
+                             scale: scale)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.attention(
+            q: qFp16.map { Float($0) },
+            cacheK: kCache.map { Float($0) },
+            cacheV: vCache.map { Float($0) },
+            posStride: posStride, headStride: headStride,
+            queryTokens: queryTokens, queryHeads: queryHeads, kvHeads: kvHeads,
+            headDim: headDim, kvStart: kvStart, scale: scale)
+        let out = Fp16Buffer.read(outBuf, count: qFp16.count)
+        let rel = RelError.compute(actual: out, reference: ref)
+        print("attn q\(queryHeads)/kv\(kvHeads) d\(headDim) T\(queryTokens) "
+              + "kvStart\(kvStart): relErr=\(rel)")
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "attn q\(queryHeads)/kv\(kvHeads) d\(headDim) T\(queryTokens) kvStart\(kvStart): relErr=\(rel)")
+    }
+
+    @Test func attention_small() throws {
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 1, kvStart: 0, seed: 0xB40)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 1, kvStart: 3, seed: 0xB41)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 5, kvStart: 0, seed: 0xB42)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 5, kvStart: 7, seed: 0xB43)
+    }
+
+    @Test func attention_real() throws {
+        // Real geometry 16/2 heads of 256, scale 1/16: decode, short prefill,
+        // long prefill.
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 1, kvStart: 10,
+                              seed: 0xB44)
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 7, kvStart: 0,
+                              seed: 0xB45)
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 300, kvStart: 0,
+                              seed: 0xB46)
+    }
+
+    @Test func attention_cache4096() throws {
+        // Decode at position 4096 with a full 4096-position cache (the D5
+        // attention context size).
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 1, kvStart: 4096,
+                              seed: 0xB47)
+    }
 }

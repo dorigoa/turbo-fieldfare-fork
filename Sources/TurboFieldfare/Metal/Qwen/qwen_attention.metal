@@ -82,3 +82,81 @@ kernel void qwen_kv_write(
     kvK[dst] = k[src];
     kvV[dst] = v[src];
 }
+
+// Causal GQA attention over the D5 KV cache (plan 3.5): query head h reads
+// KV head h / (queryHeads / kvHeads); scores carry `scale` (1/sqrt(headDim)
+// = 1/16 at the real head_dim 256) and the softmax runs in FP32 with an
+// online max/rescale. One threadgroup per (query head, query token): thread
+// tid owns dimension tid (headDim <= 256), the per-position dot is a
+// simd_sum tree plus an 8-way threadgroup reduce, the output accumulator
+// lives in a register. Query token t attends cache positions
+// [0, kvStart + t] — causal; decode (queryTokens = 1) and prefill (T)
+// share the code path. K/V use the same cache strides as qwen_kv_write.
+kernel void qwen_attention(
+    device const half* q [[buffer(0)]],      // [T][queryHeads*headDim]
+    device const half* kvK [[buffer(1)]],    // cache, D5 strides
+    device const half* kvV [[buffer(2)]],
+    device half* out [[buffer(3)]],          // [T][queryHeads*headDim]
+    constant uint& queryHeads [[buffer(4)]],
+    constant uint& kvHeads [[buffer(5)]],
+    constant uint& headDim [[buffer(6)]],
+    constant uint& queryTokens [[buffer(7)]],
+    constant uint& kvStart [[buffer(8)]],
+    constant uint& posStride [[buffer(9)]],
+    constant uint& headStride [[buffer(10)]],
+    constant float& scale [[buffer(11)]],
+    uint2 tg [[threadgroup_position_in_grid]],   // (head, token)
+    uint tid [[thread_index_in_threadgroup]]     // 0..255
+) {
+    const uint h = tg.x, t = tg.y;
+    if (h >= queryHeads || t >= queryTokens) return;
+    const uint kvh = h / (queryHeads / kvHeads);
+    const uint kvLen = kvStart + t + 1u;
+    const uint lane = tid & 31u, sg = tid >> 5;
+    const bool active = tid < headDim;
+
+    threadgroup float qv[256];
+    threadgroup float parts[8];
+    threadgroup float mRun, sumRun, alphaBC, eBC;
+
+    device const half* qrow = q + ((size_t)t * queryHeads + h) * (size_t)headDim;
+    if (active) qv[tid] = float(qrow[tid]);
+    if (tid == 0u) { mRun = -1e30f; sumRun = 0.f; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const half* kbase = kvK + (size_t)kvh * (size_t)headStride;
+    device const half* vbase = kvV + (size_t)kvh * (size_t)headStride;
+    const float qd = active ? qv[tid] : 0.f;
+    float acc = 0.f;
+
+    for (uint p = 0u; p < kvLen; ++p) {
+        const size_t pbase = (size_t)p * (size_t)posStride;
+        float part = 0.f;
+        if (active) part = qd * float(kbase[pbase + tid]);
+        part = simd_sum(part);
+        if (lane == 0u) parts[sg] = part;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            float s = 0.f;
+            for (uint g = 0u; g < (headDim + 31u) / 32u; ++g) s += parts[g];
+            s *= scale;
+            const float mOld = mRun;
+            const float mNew = max(mOld, s);
+            const float e = exp(s - mNew);
+            const float alpha = exp(mOld - mNew);
+            sumRun = sumRun * alpha + e;
+            mRun = mNew;
+            alphaBC = alpha;
+            eBC = e;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float vp = 0.f;
+        if (active) vp = float(vbase[pbase + tid]);
+        acc = acc * alphaBC + eBC * vp;
+    }
+
+    if (active) {
+        out[((size_t)t * queryHeads + h) * (size_t)headDim + tid]
+            = half(acc / sumRun);
+    }
+}

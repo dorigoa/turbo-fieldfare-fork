@@ -86,4 +86,56 @@ public enum QwenAttentionRef {
             }
         }
     }
+
+    /// Causal GQA attention over a KV cache (plan 3.5): query head h uses KV
+    /// head `h / (queryHeads / kvHeads)`, query token t (absolute position
+    /// `kvStart + t`) attends cache positions `[0, kvStart + t]`, scores are
+    /// scaled by `scale` and the softmax is a plain FP32 two-pass (max, sum,
+    /// weighted V) — the deliberate counterpart to the kernel's online
+    /// softmax. `q` is [queryTokens][queryHeads * headDim], the output has
+    /// the same shape; the caches use the writeKV layout and strides.
+    public static func attention(q: [Float], cacheK: [Float], cacheV: [Float],
+                                 posStride: Int, headStride: Int,
+                                 queryTokens: Int, queryHeads: Int, kvHeads: Int,
+                                 headDim: Int, kvStart: Int, scale: Float) -> [Float] {
+        precondition(q.count == queryTokens * queryHeads * headDim, "q shape")
+        precondition(queryHeads % kvHeads == 0, "GQA requires queryHeads % kvHeads == 0")
+        precondition(headStride >= headDim && posStride >= headStride, "strides")
+        let groups = queryHeads / kvHeads
+        var out = [Float](repeating: 0, count: q.count)
+        var scores = [Float](repeating: 0, count: kvStart + queryTokens)
+        var probs = [Float](repeating: 0, count: scores.count)
+        for t in 0..<queryTokens {
+            let kvLen = kvStart + t + 1
+            for h in 0..<queryHeads {
+                let kvh = h / groups
+                let qBase = (t * queryHeads + h) * headDim
+                for p in 0..<kvLen {
+                    let kBase = p * posStride + kvh * headStride
+                    var dot: Float = 0
+                    for d in 0..<headDim {
+                        dot += q[qBase + d] * cacheK[kBase + d]
+                    }
+                    scores[p] = dot * scale
+                }
+                var maxS: Float = -1e30
+                for p in 0..<kvLen { maxS = max(maxS, scores[p]) }
+                var sum: Float = 0
+                for p in 0..<kvLen {
+                    let e = exp(scores[p] - maxS)
+                    probs[p] = e
+                    sum += e
+                }
+                let vBaseHead = kvh * headStride
+                for d in 0..<headDim {
+                    var o: Float = 0
+                    for p in 0..<kvLen {
+                        o += probs[p] * cacheV[p * posStride + vBaseHead + d]
+                    }
+                    out[qBase + d] = o / sum
+                }
+            }
+        }
+        return out
+    }
 }
