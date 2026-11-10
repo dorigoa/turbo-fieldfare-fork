@@ -21,6 +21,70 @@ extension Model {
         return ModelFamily(rawValue: name) == .qwen35Moe ? .qwen35Moe : .gemma4
     }
 
+    // MARK: - Qwen resident accessors (3.3)
+
+    /// The pinned hybrid block for a loaded Qwen model (C4/D2); `nil` for
+    /// Gemma. `ManifestReader.validate` already checked `manifest.qwen35`
+    /// field-by-field against this constant at load time.
+    public var qwenHybridConfig: QwenHybridConfig? {
+        guard family == .qwen35Moe else { return nil }
+        return .qwen36_35B_A3B
+    }
+
+    /// Qwen does not tie the embeddings: the LM head is its own quantized
+    /// tensor, validated against the embedding slot at load time.
+    /// Valid only for Qwen models.
+    public var qwenLMHead: TensorView {
+        try! resident(name: "language_model.lm_head.weight")
+    }
+
+    public func qwenInProjQKV(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_qkv.weight")
+    }
+    public func qwenInProjZ(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_z.weight")
+    }
+    public func qwenInProjA(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_a.weight")
+    }
+    public func qwenInProjB(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_b.weight")
+    }
+    public func qwenConv1D(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.conv1d.weight")
+    }
+    public func qwenALog(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.A_log")
+    }
+    public func qwenDtBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.dt_bias")
+    }
+    public func qwenDeltaNetNorm(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
+    }
+    public func qwenOutProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).linear_attn.out_proj.weight")
+    }
+
+    /// MoE router (`mlp.gate`, 8-bit slot), not to be confused with Gemma's
+    /// `router(layer:)` (`router.proj`) nor with `qwenSharedExpertGateScalar`.
+    public func qwenRouter(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+    }
+    public func qwenSharedExpertGate(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.gate_proj.weight")
+    }
+    public func qwenSharedExpertUp(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.up_proj.weight")
+    }
+    public func qwenSharedExpertDown(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.down_proj.weight")
+    }
+    /// The scalar shared-expert gate `mlp.shared_expert_gate` (1×hidden).
+    public func qwenSharedExpertGateScalar(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.shared_expert_gate.weight")
+    }
+
     static func validateQwenRuntimeSchema(residentIndex: ResidentIndex,
                                           layout: PackedExpertsLayout,
                                           manifest: Manifest,
