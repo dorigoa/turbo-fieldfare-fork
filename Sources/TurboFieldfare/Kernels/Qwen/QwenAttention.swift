@@ -31,12 +31,14 @@ final class QwenAttention {
     private let psoRope: MTLComputePipelineState
     private let psoKvWrite: MTLComputePipelineState
     private let psoAttention: MTLComputePipelineState
+    private let psoGate: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoSplitQG = try context.pipeline("qwen_split_qg")
         self.psoRope = try context.pipeline("qwen_rope_partial")
         self.psoKvWrite = try context.pipeline("qwen_kv_write")
         self.psoAttention = try context.pipeline("qwen_attention")
+        self.psoGate = try context.pipeline("qwen_attn_gate")
     }
 
     /// Separate query and gate of a `q_proj` output: `qg` FP16
@@ -202,6 +204,28 @@ final class QwenAttention {
         enc.dispatchThreadgroups(MTLSize(width: queryHeads, height: queryTokens, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 256,
                                                                 height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Output gate (plan 3.5): `out = attn * sigmoid(gate)` elementwise over
+    /// `count` FP16 elements; `gate` comes from encodeSplitQG, `attn` from
+    /// encodeAttention. FP32 sigmoid, one FP16 rounding.
+    func encodeGate(commandBuffer: MTLCommandBuffer,
+                    attn: MTLBuffer, attnOffset: Int = 0,
+                    gate: MTLBuffer, gateOffset: Int = 0,
+                    out: MTLBuffer, outOffset: Int = 0,
+                    count: Int) {
+        precondition(count > 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoGate)
+        enc.setBuffer(attn, offset: attnOffset, index: 0)
+        enc.setBuffer(gate, offset: gateOffset, index: 1)
+        enc.setBuffer(out,  offset: outOffset,  index: 2)
+        var n = UInt32(count)
+        enc.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 64,
+                                                           height: 1, depth: 1))
         enc.endEncoding()
     }
 }

@@ -138,4 +138,11 @@ public enum QwenAttentionRef {
         }
         return out
     }
+
+    /// Output gate (plan 3.5): `out[i] = attn[i] * sigmoid(gate[i])`,
+    /// elementwise with an FP32 sigmoid.
+    public static func gate(attn: [Float], gate: [Float]) -> [Float] {
+        precondition(attn.count == gate.count, "attn/gate must match")
+        return (0..<attn.count).map { attn[$0] / (1 + exp(-gate[$0])) }
+    }
 }

@@ -391,4 +391,49 @@ import TurboFieldfareValidationSupport
                               headDim: Self.headDim, queryTokens: 1, kvStart: 4096,
                               seed: 0xB47)
     }
+
+    // MARK: - Output gate
+
+    /// One gate run: GPU vs the FP32 CPU reference.
+    private static func runGate(rows: Int, heads: Int, headDim: Int,
+                                seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-gate-r\(rows)-h\(heads)-d\(headDim)")
+        let n = rows * heads * headDim
+        // attn: O(1) values like a softmax-weighted average; gate: the raw
+        // second half of q_proj, spread across the sigmoid's transition.
+        let attn = (0..<n).map { _ in Float16(rng.uniform(-4.0, 4.0)) }
+        let gate = (0..<n).map { _ in Float16(rng.uniform(-8.0, 8.0)) }
+
+        let ctx = try MetalContext()
+        let attnK = try QwenAttention(context: ctx)
+        guard let attnBuf = Fp16Buffer.make(ctx.device, halves: attn),
+              let gateBuf = Fp16Buffer.make(ctx.device, halves: gate),
+              let outBuf = Fp16Buffer.make(ctx.device, count: n) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attnK.encodeGate(commandBuffer: cb, attn: attnBuf, gate: gateBuf,
+                         out: outBuf, count: n)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.gate(attn: attn.map { Float($0) },
+                                        gate: gate.map { Float($0) })
+        let out = Fp16Buffer.read(outBuf, count: n)
+        let rel = RelError.compute(actual: out, reference: ref)
+        print("gate r\(rows) h\(heads) d\(headDim): relErr=\(rel)")
+        #expect(rel < Tolerance.fp16Reduction,
+                "gate r\(rows) h\(heads) d\(headDim): relErr=\(rel)")
+    }
+
+    @Test func gate_small() throws {
+        try Self.runGate(rows: 3, heads: 4, headDim: 128, seed: 0xB50)
+    }
+
+    @Test func gate_real() throws {
+        // Real geometry: 16 heads of 256, short prefill and a 300-token one.
+        try Self.runGate(rows: 7, heads: Self.queryHeads, headDim: Self.headDim,
+                         seed: 0xB51)
+        try Self.runGate(rows: 300, heads: Self.queryHeads,
+                         headDim: Self.headDim, seed: 0xB52)
+    }
 }

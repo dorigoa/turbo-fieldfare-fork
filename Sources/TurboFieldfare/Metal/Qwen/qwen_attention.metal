@@ -160,3 +160,20 @@ kernel void qwen_attention(
             = half(acc / sumRun);
     }
 }
+
+// Output gate (plan 3.5): out = attn * sigmoid(gate), elementwise over the
+// flattened [T][queryHeads*headDim] layout; `gate` is the second half of the
+// q_proj output recovered by qwen_split_qg. Sigmoid in FP32 with a single
+// FP16 rounding at the end. S15's qwen_sigmoid_f16 computes sigmoid(x)
+// alone, so it cannot be reused unmodified for the fused multiply.
+kernel void qwen_attn_gate(
+    device const half* attn [[buffer(0)]],
+    device const half* gate [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= n) return;
+    const float g = float(gate[gid]);
+    out[gid] = half(float(attn[gid]) * (1.0f / (1.0f + exp(-g))));
+}
