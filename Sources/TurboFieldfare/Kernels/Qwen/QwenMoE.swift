@@ -206,4 +206,59 @@ final class QwenMoE {
                                                            height: 1, depth: 1))
         enc.endEncoding()
     }
+
+    /// Prefill: the full MoE block for `tokens` tokens as a per-token loop
+    /// over the three kernels (correct before fast, plan S17). Token `t`
+    /// reads `x`/`residual` at byte offset `t * hidden * 2`, `routingW` at
+    /// `t * slots * 4` and `sg` at `t * 2`, and writes `y` at
+    /// `t * hidden * 2`. `acts`, `sharedActs`, `routedOut` and `sharedOut`
+    /// are single-token scratch reused every token — Metal serializes the
+    /// compute passes inside one command buffer, so each token's reads of
+    /// the scratch happen after its own writes.
+    func encodePrefill(commandBuffer: MTLCommandBuffer,
+                       routedArgBuffer: MTLBuffer, routedBlobs: [MTLBuffer],
+                       sharedArgBuffer: MTLBuffer, sharedBlob: MTLBuffer,
+                       offsets: ExpertOffsets,
+                       acts: MTLBuffer, sharedActs: MTLBuffer,
+                       routedOut: MTLBuffer, sharedOut: MTLBuffer,
+                       x: MTLBuffer,
+                       routingW: MTLBuffer, sg: MTLBuffer,
+                       residual: MTLBuffer, y: MTLBuffer,
+                       hidden: Int, inter: Int, slots: Int, tokens: Int) {
+        precondition(tokens >= 1)
+        precondition(slots >= 1 && slots <= Self.maxSlots
+                     && routedBlobs.count == slots)
+        for t in 0..<tokens {
+            let xOff = t * hidden * 2
+            encodeGateUpSilu(commandBuffer: commandBuffer,
+                             blobsArgBuffer: routedArgBuffer, blobs: routedBlobs,
+                             offsets: offsets,
+                             x: x, xOffset: xOff, acts: acts,
+                             hidden: hidden, inter: inter, slots: slots)
+            encodeDown(commandBuffer: commandBuffer,
+                       blobsArgBuffer: routedArgBuffer, blobs: routedBlobs,
+                       offsets: offsets,
+                       acts: acts, routedOut: routedOut,
+                       hidden: hidden, inter: inter, slots: slots)
+            encodeGateUpSilu(commandBuffer: commandBuffer,
+                             blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
+                             offsets: offsets,
+                             x: x, xOffset: xOff, acts: sharedActs,
+                             hidden: hidden, inter: inter, slots: 1)
+            encodeDown(commandBuffer: commandBuffer,
+                       blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
+                       offsets: offsets,
+                       acts: sharedActs, routedOut: sharedOut,
+                       hidden: hidden, inter: inter, slots: 1)
+            encodeResidual(commandBuffer: commandBuffer,
+                           residual: residual, residualOffset: xOff,
+                           routedOut: routedOut,
+                           sharedOut: sharedOut,
+                           routingW: routingW,
+                           routingWOffset: t * slots * MemoryLayout<Float>.stride,
+                           sg: sg, sgOffset: t * 2,
+                           y: y, yOffset: xOff,
+                           hidden: hidden, slots: slots)
+        }
+    }
 }

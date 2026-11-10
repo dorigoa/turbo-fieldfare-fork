@@ -399,6 +399,120 @@ import TurboFieldfareValidationSupport
                           seed: 0xA7, label: "block-real")
     }
 
+    // MARK: - Step 4: prefill (per-token loop over the block kernels)
+
+    /// `encodePrefill` runs the block for `tokens` tokens, one after the
+    /// other, with per-token `x`/`routingW`/`sg`/`residual`/`y` strides and
+    /// reused single-token scratch. Reference: the per-token CPU chain.
+    private static func runPrefill(hidden: Int, inter: Int, slots: Int, tokens: Int,
+                                   seed: UInt64, label: String) throws {
+        var rng = SeedTree(seed).key(label)
+        let offsets = QwenMoE.expertOffsets(hidden: hidden, inter: inter)
+        let ctx = try MetalContext()
+
+        var routedBlobs: [MTLBuffer] = []
+        var routedGate: [[Quantization.Int4AffineRow]] = []
+        var routedUp: [[Quantization.Int4AffineRow]] = []
+        var routedDown: [[Quantization.Int4AffineRow]] = []
+        for _ in 0..<slots {
+            let g = randomRows(inter, hidden, rng: &rng)
+            let u = randomRows(inter, hidden, rng: &rng)
+            let d = randomRows(hidden, inter, rng: &rng)
+            routedGate.append(g); routedUp.append(u); routedDown.append(d)
+            let blob = makeExpertBlob(gate: g, up: u, down: d,
+                                      hidden: hidden, inter: inter, offsets: offsets)
+            let buf = try alloc(ctx.device, blob.count)
+            buf.contents().copyMemory(from: blob, byteCount: blob.count)
+            routedBlobs.append(buf)
+        }
+        let shG = randomRows(inter, hidden, rng: &rng)
+        let shU = randomRows(inter, hidden, rng: &rng)
+        let shD = randomRows(hidden, inter, rng: &rng)
+        let sharedBlobRaw = makeExpertBlob(gate: shG, up: shU, down: shD,
+                                           hidden: hidden, inter: inter, offsets: offsets)
+        let sharedBlob = try alloc(ctx.device, sharedBlobRaw.count)
+        sharedBlob.contents().copyMemory(from: sharedBlobRaw,
+                                         byteCount: sharedBlobRaw.count)
+
+        let xHalves = (0..<(tokens * hidden)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let residualHalves = (0..<(tokens * hidden)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let logitHalves = (0..<tokens).map { _ in Float16(rng.uniform(-4.0, 4.0)) }
+        let routingW = (0..<(tokens * slots)).map { _ in rng.uniform(0.05, 1.0) }
+
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: xHalves),
+              let residualBuf = Fp16Buffer.make(ctx.device, halves: residualHalves),
+              let logitBuf = Fp16Buffer.make(ctx.device, halves: logitHalves),
+              let sgBuf = Fp16Buffer.make(ctx.device, count: tokens),
+              let yBuf = Fp16Buffer.make(ctx.device, count: tokens * hidden) else {
+            Issue.record("alloc failed"); throw BufferAllocFailure()
+        }
+        let actsBuf = try alloc(ctx.device, slots * inter * 2)
+        let sharedActsBuf = try alloc(ctx.device, inter * 2)
+        let routedOutBuf = try alloc(ctx.device, slots * hidden * 2)
+        let sharedOutBuf = try alloc(ctx.device, hidden * 2)
+        let routingWBuf = try alloc(ctx.device, tokens * slots * MemoryLayout<Float>.stride)
+        routingWBuf.contents().bindMemory(to: Float.self,
+                                          capacity: tokens * slots)
+            .update(from: routingW, count: tokens * slots)
+
+        let moe = try QwenMoE(context: ctx)
+        let router = try QwenRouter(context: ctx)
+        guard let routedArg = moe.makeBlobsArgumentBuffer(blobs: routedBlobs, slots: slots),
+              let sharedArg = moe.makeBlobsArgumentBuffer(blobs: [sharedBlob], slots: 1)
+        else {
+            Issue.record("arg buffer alloc failed"); throw BufferAllocFailure()
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        router.encodeSigmoid(commandBuffer: cb, x: logitBuf, out: sgBuf, count: tokens)
+        moe.encodePrefill(commandBuffer: cb,
+                          routedArgBuffer: routedArg, routedBlobs: routedBlobs,
+                          sharedArgBuffer: sharedArg, sharedBlob: sharedBlob,
+                          offsets: offsets,
+                          acts: actsBuf, sharedActs: sharedActsBuf,
+                          routedOut: routedOutBuf, sharedOut: sharedOutBuf,
+                          x: xBuf, routingW: routingWBuf, sg: sgBuf,
+                          residual: residualBuf, y: yBuf,
+                          hidden: hidden, inter: inter, slots: slots, tokens: tokens)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let actual = Fp16Buffer.read(yBuf, count: tokens * hidden)
+        let sgGPU = Fp16Buffer.readHalf(sgBuf, count: tokens)
+        var ref: [Float] = []
+        ref.reserveCapacity(tokens * hidden)
+        for t in 0..<tokens {
+            let xRef = Array(xHalves[(t * hidden)..<(t * hidden + hidden)]).map { Float($0) }
+            var routedRef: [[Float16]] = []
+            for k in 0..<slots {
+                let act = QwenMoERef.gateUpSilu(gate: routedGate[k], up: routedUp[k],
+                                                x: xRef, hidden: hidden)
+                routedRef.append(QwenMoERef.down(downRows: routedDown[k], act: act,
+                                                 inter: inter))
+            }
+            let sharedAct = QwenMoERef.gateUpSilu(gate: shG, up: shU, x: xRef,
+                                                  hidden: hidden)
+            let sharedRef = QwenMoERef.down(downRows: shD, act: sharedAct, inter: inter)
+            ref += QwenMoERef.residual(
+                residual: Array(residualHalves[(t * hidden)..<(t * hidden + hidden)]),
+                routed: routedRef, shared: sharedRef,
+                routingW: Array(routingW[(t * slots)..<(t * slots + slots)]),
+                sg: sgGPU[t]).map { Float($0) }
+        }
+        let rel = RelError.compute(actual: actual, reference: ref)
+        print("\(label): rel=\(rel) maxAbs=\(RelError.maxAbsDiff(actual, ref))")
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "\(label): rel=\(rel) maxAbs=\(RelError.maxAbsDiff(actual, ref))")
+    }
+
+    @Test func prefill_small() throws {
+        try Self.runPrefill(hidden: 128, inter: 64, slots: 8, tokens: 3,
+                            seed: 0xA8, label: "prefill-small")
+    }
+
+    @Test func prefill_real() throws {
+        try Self.runPrefill(hidden: 2048, inter: 512, slots: 8, tokens: 2,
+                            seed: 0xA9, label: "prefill-real")
+    }
+
     /// The C5 offsets must reproduce the byte sizes of contract 3.4 for the
     /// real shapes: 589.824 B per matrix, 1.769.472 B per expert blob.
     @Test func expertBlobLayout_matchesPlan34() {
