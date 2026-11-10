@@ -12,7 +12,9 @@ import TurboFieldfareValidationSupport
 ///
 /// The tie tests pin the documented selection rule: with exact FP16 ties the
 /// surviving order must be by ascending expert index, including right at the
-/// top-K boundary. Tolerances per contract C8.
+/// top-K boundary. The last tests cover the shared-expert scalar gate:
+/// `DequantInt8GEMV` at m = 1 (W_sg, 1 × 2048) plus `qwen_sigmoid_f16`,
+/// against `QwenHeadRef.sigmoid`. Tolerances per contract C8.
 @Suite struct QwenRouterTests {
 
     private struct BufferAllocFailure: Error {}
@@ -163,5 +165,86 @@ import TurboFieldfareValidationSupport
         let weights = Self.readFloat(wOut, topK)
         let rel = RelError.compute(actual: weights, reference: ref.weights)
         #expect(rel < Tolerance.fp16Reduction, "real weights: rel=\(rel)")
+    }
+
+    // MARK: - Shared-expert gate: W_sg GEMV (m = 1) + sigmoid
+
+    /// Elementwise coverage of `qwen_sigmoid_f16` across a range wide enough
+    /// to straddle the curve's knee and both saturation tails.
+    @Test func sigmoid_elementwise_range() throws {
+        let count = 33
+        let inputs = (0..<count).map {
+            Float16(-8.0 + 16.0 * Float($0) / Float(count - 1))
+        }
+        let ctx = try MetalContext()
+        let router = try QwenRouter(context: ctx)
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: inputs),
+              let yBuf = Fp16Buffer.make(ctx.device, count: count) else {
+            Issue.record("alloc failed")
+            throw BufferAllocFailure()
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        router.encodeSigmoid(commandBuffer: cb, x: xBuf, out: yBuf, count: count)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenHeadRef.sigmoid(inputs.map { Float($0) })
+        let actual = Fp16Buffer.read(yBuf, count: count)
+        let rel = RelError.compute(actual: actual, reference: ref)
+        let maxAbs = RelError.maxAbsDiff(actual, ref)
+        #expect(rel < Tolerance.fp16Reduction,
+                "sigmoid sweep: rel=\(rel) maxAbs=\(maxAbs)")
+    }
+
+    /// The production chain: one-row 8-bit projection `W_sg` (1 × 2048) on
+    /// the generic Int8 GEMV pipeline, then the FP16 sigmoid — exactly how
+    /// the runner will compute the scalar shared-expert gate sg (plan 3.5).
+    @Test func sharedExpertGate_real_m1_n2048() throws {
+        let n = 2048
+        var rng = SeedTree(0xF03).key("qwen-sgate-n\(n)")
+        // Weights small enough that W_sg * x lands in a moderate range:
+        // a far-tail sg would be indistinguishable from 0 or 1 in FP16.
+        let row = Quantization.quantizeInt8Affine(
+            (0..<n).map { _ in rng.uniform(-0.05, 0.05) })
+
+        let xFp16 = (0..<n).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let xRef  = xFp16.map { Float($0) }
+
+        let ctx = try MetalContext()
+        let gemv = try DequantInt8GEMV(context: ctx)   // (1, 2048): generic pso
+        let router = try QwenRouter(context: ctx)
+        let wBuf = try Self.alloc(ctx.device, row.packed.count)
+        let sBuf = try Self.alloc(ctx.device, row.scales.count * MemoryLayout<UInt16>.size)
+        let bBuf = try Self.alloc(ctx.device, row.biases.count * MemoryLayout<UInt16>.size)
+        row.packed.withUnsafeBytes { src in
+            wBuf.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
+        }
+        row.scales.withUnsafeBytes { src in
+            sBuf.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
+        }
+        row.biases.withUnsafeBytes { src in
+            bBuf.contents().copyMemory(from: src.baseAddress!, byteCount: src.count)
+        }
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: xFp16),
+              let yBuf = Fp16Buffer.make(ctx.device, count: 1),
+              let sgBuf = Fp16Buffer.make(ctx.device, count: 1) else {
+            Issue.record("alloc failed")
+            throw BufferAllocFailure()
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        gemv.encode(commandBuffer: cb,
+                    weights: wBuf, scales: sBuf, biases: bBuf,
+                    x: xBuf, y: yBuf,
+                    m: 1, n: UInt32(n))
+        router.encodeSigmoid(commandBuffer: cb, x: yBuf, out: sgBuf, count: 1)
+        cb.commit(); cb.waitUntilCompleted()
+
+        // Reference: dot product in FP32, the FP16 round-trip the GEMV emits,
+        // then the sigmoid in FP32.
+        let dot = DequantInt8GemvRef.apply(weightRows: [row], x: xRef, n: n)[0]
+        let ref = QwenHeadRef.sigmoid([Float(Float16(dot))])[0]
+        let sg = Fp16Buffer.read(sgBuf, count: 1)
+        let rel = RelError.compute(actual: sg, reference: [ref])
+        #expect(rel < Tolerance.fp16Reduction,
+                "sg gate: sg=\(sg) ref=\(ref) rel=\(rel)")
     }
 }
