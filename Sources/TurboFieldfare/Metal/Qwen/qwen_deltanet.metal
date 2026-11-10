@@ -129,3 +129,119 @@ void qwen_scale_f16(
     if (i >= n) { return; }
     out[i] = half(float(x[i]) * scale);
 }
+
+// ----------------------------------------------------------------------------
+// Recurrent Gated DeltaNet scan (S15, plan 3.5 "stato S_j").
+//
+// One SIMD group per (value head j, value column c): the 128 rows of the
+// FP32 state column S_j[:, c] live in registers (32 lanes x keyDim/32
+// rows, 4 at keyDim = 128) and the tokens are consumed in order, so the
+// SAME kernel serves decode (tokens = 1) and prefill (tokens > 1), and
+// decode continues a prefill exactly. Each (j, c) column is touched only
+// by its own SIMD group, so the state buffer is read and written in place
+// (D5 layout [value head][column c][row i], one column = keyDim floats).
+//
+// Per token t (plan 3.5, key head kh = j / (valueHeads / keyHeads)):
+//   S[i][c]      *= decay_j[t]
+//   kv_mem_c      = sum_i S[i][c] * k[t][kh][i]        (simd_sum)
+//   delta_c       = (v[t][j*valueDim + c] - kv_mem_c) * beta_j[t]
+//   S[i][c]      += k[t][kh][i] * delta_c
+//   o[t][j][c]    = sum_i S[i][c] * q[t][kh][i]        (simd_sum)
+//
+// State arithmetic is FP32 (C8 tracks its drift over 256 steps); q, k, v
+// arrive FP16 from the S12/S14 prep, beta/decay FP32 from the S14 gates.
+// kDim must be a multiple of 32 and <= 256 (8 register rows per lane).
+// ----------------------------------------------------------------------------
+#define QWEN_DN_MAX_ROWS_PER_LANE 8u
+
+[[kernel, max_total_threads_per_threadgroup(32)]]
+void qwen_deltanet_scan(
+    device const half*  q,           // [tokens][keyHeads*keyDim] FP16 (L2'd, scaled)
+    device const half*  k,           // [tokens][keyHeads*keyDim] FP16 (L2'd)
+    device const half*  v,           // [tokens][vRowStride] FP16, base at value head 0
+    device const float* beta,        // [tokens][valueHeads] FP32
+    device const float* decay,       // [tokens][valueHeads] FP32
+    device       float* state,       // [valueHeads][valueDim][keyDim] FP32 (D5), in place
+    device       half*  o,           // [tokens][valueHeads*valueDim] FP16
+    constant     uint&  tokens,      [[buffer(7)]],
+    constant     uint&  valueHeads,  [[buffer(8)]],
+    constant     uint&  keyHeads,    [[buffer(9)]],
+    constant     uint&  keyDim,      [[buffer(10)]],
+    constant     uint&  valueDim,    [[buffer(11)]],
+    constant     uint&  vRowStride,  [[buffer(12)]],
+    uint2 tg  [[threadgroup_position_in_grid]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    const uint j = tg.x;                     // value head
+    const uint c = tg.y;                     // value column
+    const uint kh = j / (valueHeads / keyHeads);
+    const uint rowsPerLane = keyDim / 32u;
+
+    float s[QWEN_DN_MAX_ROWS_PER_LANE];
+    const size_t colBase = (size_t(j) * valueDim + c) * keyDim;
+    #pragma unroll
+    for (uint r = 0; r < QWEN_DN_MAX_ROWS_PER_LANE; ++r) { s[r] = 0.0f; }
+    #pragma unroll
+    for (uint r = 0; r < QWEN_DN_MAX_ROWS_PER_LANE; ++r) {
+        if (r < rowsPerLane) { s[r] = state[colBase + lane * rowsPerLane + r]; }
+    }
+
+    const size_t qkRow = size_t(keyHeads) * keyDim;
+    const size_t oRow  = size_t(valueHeads) * valueDim;
+    const size_t vBase = size_t(j) * valueDim + c;
+    const size_t qkLane = size_t(kh) * keyDim + lane * rowsPerLane;
+
+    for (uint t = 0; t < tokens; ++t) {
+        const float dj = decay[t * valueHeads + j];
+        const float bj = beta[t * valueHeads + j];
+        device const half* kt = k + size_t(t) * qkRow + qkLane;
+        device const half* qt = q + size_t(t) * qkRow + qkLane;
+
+        float kr[QWEN_DN_MAX_ROWS_PER_LANE];
+        float qr[QWEN_DN_MAX_ROWS_PER_LANE];
+        float dotK = 0.0f, dotQ = 0.0f;
+        #pragma unroll
+        for (uint r = 0; r < QWEN_DN_MAX_ROWS_PER_LANE; ++r) {
+            if (r >= rowsPerLane) { kr[r] = 0.0f; qr[r] = 0.0f; continue; }
+            kr[r] = float(kt[r]);
+            qr[r] = float(qt[r]);
+            s[r] *= dj;
+            dotK = fma(s[r], kr[r], dotK);
+        }
+        const float kvMem = simd_sum(dotK);
+        const float vv = float(v[size_t(t) * vRowStride + vBase]);
+        const float delta = (vv - kvMem) * bj;
+
+        #pragma unroll
+        for (uint r = 0; r < QWEN_DN_MAX_ROWS_PER_LANE; ++r) {
+            if (r >= rowsPerLane) { continue; }
+            s[r] = fma(kr[r], delta, s[r]);
+            dotQ = fma(s[r], qr[r], dotQ);
+        }
+        if (lane == 0) {
+            o[size_t(t) * oRow + vBase] = half(simd_sum(dotQ));
+        }
+    }
+
+    #pragma unroll
+    for (uint r = 0; r < QWEN_DN_MAX_ROWS_PER_LANE; ++r) {
+        if (r < rowsPerLane) { state[colBase + lane * rowsPerLane + r] = s[r]; }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// FP16 elementwise add: out[i] = a[i] + b[i]. S15 uses it for the linear
+// layer's residual sum h += W_out * o (plan 3.5); out == a or out == b is
+// safe (elementwise).
+// ----------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void qwen_add_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device       half* out [[buffer(2)]],
+    constant     uint& n   [[buffer(3)]],
+    uint i          [[thread_position_in_grid]]
+) {
+    if (i >= n) { return; }
+    out[i] = half(float(a[i]) + float(b[i]));
+}
