@@ -163,12 +163,12 @@ void qwen_deltanet_scan(
     device const float* decay,       // [tokens][valueHeads] FP32
     device       float* state,       // [valueHeads][valueDim][keyDim] FP32 (D5), in place
     device       half*  o,           // [tokens][valueHeads*valueDim] FP16
-    constant     uint&  tokens,      [[buffer(7)]],
-    constant     uint&  valueHeads,  [[buffer(8)]],
-    constant     uint&  keyHeads,    [[buffer(9)]],
-    constant     uint&  keyDim,      [[buffer(10)]],
-    constant     uint&  valueDim,    [[buffer(11)]],
-    constant     uint&  vRowStride,  [[buffer(12)]],
+    constant     uint&  tokens       [[buffer(7)]],
+    constant     uint&  valueHeads   [[buffer(8)]],
+    constant     uint&  keyHeads     [[buffer(9)]],
+    constant     uint&  keyDim       [[buffer(10)]],
+    constant     uint&  valueDim     [[buffer(11)]],
+    constant     uint&  vRowStride   [[buffer(12)]],
     uint2 tg  [[threadgroup_position_in_grid]],
     uint  lane [[thread_index_in_simdgroup]]
 ) {
@@ -218,8 +218,10 @@ void qwen_deltanet_scan(
             s[r] = fma(kr[r], delta, s[r]);
             dotQ = fma(s[r], qr[r], dotQ);
         }
+        // simd_sum is collective: all 32 lanes must execute it.
+        const float oVal = simd_sum(dotQ);
         if (lane == 0) {
-            o[size_t(t) * oRow + vBase] = half(simd_sum(dotQ));
+            o[size_t(t) * oRow + vBase] = half(oVal);
         }
     }
 
