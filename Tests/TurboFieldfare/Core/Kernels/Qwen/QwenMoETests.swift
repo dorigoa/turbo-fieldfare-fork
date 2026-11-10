@@ -211,6 +211,71 @@ import TurboFieldfareValidationSupport
                          seed: 0xA4, label: "down-real")
     }
 
+    // MARK: - Step 2: shared expert (one-slot pass) + S13 scalar gate
+
+    /// The shared expert runs the same two kernels with `slots = 1` over one
+    /// resident blob; `sg = sigmoid(W_sg * x)` comes from the S13 router
+    /// chain (`QwenRouter.encodeSigmoid`, FP16 [1]). Checks the full
+    /// SwiGLU chain against the reference and the gate against a CPU
+    /// sigmoid.
+    @Test func sharedExpert_real() throws {
+        let hidden = 2048, inter = 512
+        var rng = SeedTree(0xA5).key("shared-real")
+        let offsets = QwenMoE.expertOffsets(hidden: hidden, inter: inter)
+
+        let g = Self.randomRows(inter, hidden, rng: &rng)
+        let u = Self.randomRows(inter, hidden, rng: &rng)
+        let d = Self.randomRows(hidden, inter, rng: &rng)
+        let ctx = try MetalContext()
+        let blob = Self.makeExpertBlob(gate: g, up: u, down: d,
+                                  hidden: hidden, inter: inter, offsets: offsets)
+        let blobBuf = try Self.alloc(ctx.device, blob.count)
+        blobBuf.contents().copyMemory(from: blob, byteCount: blob.count)
+
+        let xFp16 = (0..<hidden).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let xRef = xFp16.map { Float($0) }
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: xFp16) else {
+            Issue.record("alloc failed"); throw BufferAllocFailure()
+        }
+        let actsBuf = try Self.alloc(ctx.device, inter * 2)
+        let sharedOutBuf = try Self.alloc(ctx.device, hidden * 2)
+
+        // S13 scalar gate: one FP16 logit -> qwen_sigmoid_f16 -> sg.
+        let logit = Float16(rng.uniform(-4.0, 4.0))
+        guard let logitBuf = Fp16Buffer.make(ctx.device, halves: [logit]),
+              let sgBuf = Fp16Buffer.make(ctx.device, count: 1) else {
+            Issue.record("alloc failed"); throw BufferAllocFailure()
+        }
+
+        let moe = try QwenMoE(context: ctx)
+        let router = try QwenRouter(context: ctx)
+        guard let arg = moe.makeBlobsArgumentBuffer(blobs: [blobBuf], slots: 1) else {
+            Issue.record("arg buffer alloc failed"); throw BufferAllocFailure()
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        moe.encodeGateUpSilu(commandBuffer: cb, blobsArgBuffer: arg, blobs: [blobBuf],
+                             offsets: offsets, x: xBuf, acts: actsBuf,
+                             hidden: hidden, inter: inter, slots: 1)
+        moe.encodeDown(commandBuffer: cb, blobsArgBuffer: arg, blobs: [blobBuf],
+                       offsets: offsets, acts: actsBuf, routedOut: sharedOutBuf,
+                       hidden: hidden, inter: inter, slots: 1)
+        router.encodeSigmoid(commandBuffer: cb, x: logitBuf, out: sgBuf, count: 1)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let actual = Fp16Buffer.read(sharedOutBuf, count: hidden)
+        let act = QwenMoERef.gateUpSilu(gate: g, up: u, x: xRef, hidden: hidden)
+        let ref = QwenMoERef.down(downRows: d, act: act, inter: inter).map { Float($0) }
+        let rel = RelError.compute(actual: actual, reference: ref)
+        print("shared-real: rel=\(rel) maxAbs=\(RelError.maxAbsDiff(actual, ref))")
+        #expect(rel < Tolerance.fp16Reduction,
+                "shared-real: rel=\(rel) maxAbs=\(RelError.maxAbsDiff(actual, ref))")
+
+        let sgActual = Fp16Buffer.readHalf(sgBuf, count: 1)[0]
+        let sgRef = Float16(1.0 / (1.0 + exp(-Float(logit))))
+        #expect(abs(Float(sgActual) - Float(sgRef)) < 1e-3,
+                "sg kernel=\(sgActual) ref=\(sgRef) logit=\(logit)")
+    }
+
     /// The C5 offsets must reproduce the byte sizes of contract 3.4 for the
     /// real shapes: 589.824 B per matrix, 1.769.472 B per expert blob.
     @Test func expertBlobLayout_matchesPlan34() {
