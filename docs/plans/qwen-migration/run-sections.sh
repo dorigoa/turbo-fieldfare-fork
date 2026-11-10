@@ -7,9 +7,12 @@
 #   docs/plans/qwen-migration/run-sections.sh S9        # da S9 fino al prossimo ⛔
 #   docs/plans/qwen-migration/run-sections.sh S9 S12    # da S9 a S12
 #
-# Se una sezione si interrompe a metà, la riprende finché fa progressi.
+# Se una sezione si interrompe a metà, la riprende finché fa progressi. Se
+# Claude CLI finisce con un errore (per esempio del server del modello),
+# aspetta ERROR_PAUSE secondi prima di riprovare.
 # Si ferma quando:
-#   - una sezione è "Bloccata";
+#   - una sezione diventa "Bloccata" (un blocco già scritto nel report prima
+#     del tentativo, che l'agente non ha nemmeno toccato, non conta);
 #   - MAX_STALLS riprese di fila non producono nuovi commit, oppure la
 #     sezione supera MAX_ATTEMPTS tentativi in tutto;
 #   - finisce una sezione con il tuo controllo ⛔ (S1, S8, S19, S26; vedi 1.7);
@@ -17,8 +20,8 @@
 # Le sezioni già "Completata" vengono saltate.
 #
 # Variabili: QWEN_SETTINGS (default ~/.claude/strata.json), MAX_STALLS
-# (default 3), MAX_ATTEMPTS (default 12), QWEN_RUNNER_NOTIFY=0 per niente
-# notifiche di macOS.
+# (default 3), MAX_ATTEMPTS (default 12), ERROR_PAUSE (default 60),
+# QWEN_RUNNER_NOTIFY=0 per niente notifiche di macOS.
 # Log completi: scratch/logs/runner/ (un file .jsonl per tentativo).
 #
 # I comandi che l'agente può usare sono in ALLOW. Se un tentativo stampa
@@ -34,6 +37,7 @@ LOGDIR=scratch/logs/runner
 SETTINGS=${QWEN_SETTINGS:-$HOME/.claude/strata.json}
 MAX_STALLS=${MAX_STALLS:-${MAX_RESUMES:-3}}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-12}
+ERROR_PAUSE=${ERROR_PAUSE:-60}
 NOTIFY=${QWEN_RUNNER_NOTIFY:-1}
 CHECKPOINTS=" 1 8 19 26 "
 LAST_SECTION=26
@@ -107,7 +111,8 @@ def show(d, uses):
         print("   ⚠ permesso negato, %s: %s" % (d.get("tool_name"), short(cmd, 140)), flush=True)
     elif t == "result":
         mins = (d.get("duration_ms") or 0) / 60000
-        print("   ⏹ fine turno: %s, %s turni, %.0f min" % (d.get("subtype"), d.get("num_turns"), mins), flush=True)
+        how = "errore (%s)" % (d.get("terminal_reason") or d.get("subtype")) if d.get("is_error") else d.get("subtype")
+        print("   ⏹ fine turno: %s, %s turni, %.0f min" % (how, d.get("num_turns"), mins), flush=True)
         denials = d.get("permission_denials") or []
         if denials:
             print("   ⚠ permessi negati (se servono, aggiungili in ALLOW):", flush=True)
@@ -123,6 +128,29 @@ for line in sys.stdin:
             show(d, uses)
     except Exception as e:
         print("   (riga del log non riassunta: %s)" % short(e, 100), flush=True)
+PY
+)
+
+# Dal log di un tentativo: l'errore con cui Claude CLI è finito, o niente.
+LAST_ERROR=$(cat <<'PY'
+import json, sys
+last = None
+try:
+    for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "result":
+            last = d
+except OSError:
+    pass
+if last is None:
+    print("Claude CLI è uscito senza risultato (exit %s)" % sys.argv[2])
+elif last.get("is_error"):
+    why = last.get("terminal_reason") or last.get("subtype") or "errore"
+    text = " ".join(str(last.get("result") or "").split())
+    print(("%s: %s" % (why, text))[:300])
 PY
 )
 
@@ -230,12 +258,14 @@ run_claude() { # $1 = numero della sezione, $2 = prompt
     | tee "$log" | { python3 -I -X utf8 -u -c "$VIEWER"; cat >/dev/null; }
   rc=${PIPESTATUS[1]}
   say "S$1: Claude CLI terminato (exit $rc)"
+  CLI_ERROR=$(python3 -I -X utf8 -c "$LAST_ERROR" "$log" "$rc" 2>/dev/null)
+  [ -z "$CLI_ERROR" ] || say "S$1: il tentativo è finito con un errore: $CLI_ERROR"
 }
 
 # --- Controlli iniziali ---------------------------------------------------
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-  sed -n '2,23p' "$0"; exit 2
+  sed -n '2,26p' "$0"; exit 2
 fi
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || stop "non sono in un repository git"
 start=$(parse_section "$1") || exit 1
@@ -296,6 +326,7 @@ for n in $(seq "$start" "$end"); do
     attempt=$((attempt + 1))
     say "S$n: tentativo $attempt ($mode)"
     if [ "$mode" = run ]; then prompt=$(run_prompt "$n"); else prompt=$(resume_prompt "$n"); fi
+    st_before=$(status_of "$n")
     head_before=$(git rev-parse HEAD)
     run_claude "$n" "$prompt"
     if [ "$(git rev-parse HEAD)" = "$head_before" ]; then
@@ -309,17 +340,28 @@ for n in $(seq "$start" "$end"); do
         if synced; then finished=1; break; fi
         say "S$n: il report dice Completata, ma il branch non è pulito o non è pushato" ;;
       Bloccata*)
-        stop "S$n: $st. Leggi $REPORTS/S$n.md e la 1.6, poi rilancia da S$n" ;;
+        # Un blocco di un run precedente, rimasto identico e senza nuovi
+        # commit, vuol dire che l'agente non è arrivato a riprendere la sezione.
+        if [ "$stalls" -gt 0 ] && [ "$st" = "$st_before" ]; then
+          say "S$n: il report dice ancora Bloccata come prima del tentativo: l'agente non l'ha ripresa"
+        else
+          stop "S$n: $st. Leggi $REPORTS/S$n.md e la 1.6, poi rilancia da S$n"
+        fi ;;
       *)
         say "S$n non è finita (stato: ${st:-nessun report}; tentativi di fila senza commit: $stalls)" ;;
     esac
     [ "$stalls" -lt "$MAX_STALLS" ] || break
     [ "$attempt" -lt "$MAX_ATTEMPTS" ] || break
+    if [ -n "$CLI_ERROR" ]; then
+      say "S$n: riprovo fra $ERROR_PAUSE secondi"
+      sleep "$ERROR_PAUSE"
+    fi
     mode=resume
   done
   if [ "$finished" != 1 ]; then
     if [ "$stalls" -ge "$MAX_STALLS" ]; then why="$stalls tentativi di fila senza nuovi commit"
     else why="raggiunto il limite di $MAX_ATTEMPTS tentativi"; fi
+    [ -z "$CLI_ERROR" ] || why="$why; l'ultimo è finito con un errore: $CLI_ERROR"
     stop "S$n non completata ($why): leggi $REPORTS/S$n.md e i log in $LOGDIR"
   fi
 

@@ -157,10 +157,11 @@ docs/plans/qwen-migration/run-sections.sh S9 S11    # da S9 a S11
 
 Ogni sezione gira in una sessione nuova (contesto vuoto), con lo stesso prompt
 di questo passo 3. Se una sezione si interrompe a metà, lo script la riprende
-con il prompt di 1.4 finché fa progressi. Si ferma quando una sezione è
-`Bloccata`, dopo 3 riprese di fila senza nuovi commit (o 12 tentativi in
-tutto) e dopo ogni sezione ⛔. Le istruzioni complete sono in testa allo
-script.
+con il prompt di 1.4 finché fa progressi; se Claude CLI finisce con un errore
+(per esempio del server del modello), aspetta un minuto prima di riprovare. Si
+ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza nuovi
+commit (o 12 tentativi in tutto) e dopo ogni sezione ⛔. Le istruzioni complete
+sono in testa allo script.
 
 ## 1.4 Riprendere una sezione interrotta
 
