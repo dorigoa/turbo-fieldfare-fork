@@ -902,7 +902,8 @@ little-endian) oppure `"f16b64"` (float16, solo per i logit completi).
 
 - Kernel contro riferimento CPU: le `Tolerance` esistenti (`fp16Reduction`
   5e-3, `fp16ChainedReduction` 1e-2, `quantInt4` 1,5e-3).
-- Stato DeltaNet FP32: errore relativo ≤ 1e-4 dopo 256 passi.
+- Stato DeltaNet FP32, kernel contro riferimento CPU: errore relativo ≤ 1e-4
+  dopo 256 passi.
 - Modello contro i golden di `mlx-lm` (stessi pesi): coseno dei logit completi
   ≥ 0,999 sull'ultima posizione; top-1 uguale in almeno il 98% delle posizioni
   (teacher forcing); continuazione greedy identica per almeno 4 prompt su 6
@@ -1603,9 +1604,12 @@ toccano.
    preparazione, scansione con lo stato in `QwenHybridCache`, norma gated,
    proiezione d'uscita, residuo. Test sul layer 0 con i token di p0: `x_norm`,
    `qkv_raw`, `z`, `a`, `b`, `conv_out`, `q`, `k`, `v`, `beta`, `g`,
-   `core_out`, `gated_out`, `mixer_out` di `layer0_internals.json` (coseno ≥
-   0,995 per ciascuna, come i layer in C8) e `state_heads0to3` (errore
-   relativo ≤ 1e-4, C8). Leggi: la mappa; in 3.5 la parte DeltaNet.
+   `core_out`, `gated_out`, `mixer_out` e `state_heads0to3` di
+   `layer0_internals.json`: coseno ≥ 0,995 per ciascuna, come i layer in C8.
+   Per lo stato annota nel report anche l'errore relativo: la soglia 1e-4 di
+   C8 vale per il kernel contro il riferimento CPU (S15), non contro
+   `mlx-lm`, che arriva allo stato con un'aritmetica diversa. Leggi: la
+   mappa; in 3.5 la parte DeltaNet.
 4. MoE e layer 0 completo: norma prima del MoE, router top-8, expert
    instradati letti dal file del layer (C5), shared expert con il suo gate,
    somma e residuo. Test: `moe_x`, `router_top_ids` (uguali, salvo
