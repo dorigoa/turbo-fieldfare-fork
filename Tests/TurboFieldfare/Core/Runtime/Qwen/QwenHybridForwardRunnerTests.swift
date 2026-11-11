@@ -265,6 +265,166 @@ struct QwenHybridForwardRunnerTests {
                 "layer 0 state_heads0to3 cosine \(stateCosine) < 0.995 (C8)")
     }
 
+    /// S19 step 4: the MoE block after the layer-0 mixer must reproduce the
+    /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
+    /// (C8: cosine ≥ 0.995 per quantity; the top-8 ids equal per position,
+    /// a mismatch only as an annotated near-tie with its two weights) and
+    /// the hidden state after layer 0, `hidden_p0.json → layer0`
+    /// (cosine ≥ 0.995).
+    @Test("the layer-0 MoE block matches the mlx-lm golden")
+    func layer0MoEMatchesGolden() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let hiddenSize = env.model.config.hiddenSize
+        let vocabSize = env.model.config.vocabSize
+        let slots = env.model.config.topKExperts
+        let ids = try promptIDs("p0")
+        #expect(ids.count == 5)
+
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size, options: .storageModeShared))
+
+        // The work buffers hold one token's row, so re-running each prefix
+        // of p0 yields the tapped layer's quantities for the last token of
+        // the prefix (deterministic state: the rows equal the full run's).
+        struct RowSpec {
+            let byteOffset: Int
+            let count: Int
+            let isFP32: Bool
+            init(_ byteOffset: Int, _ count: Int, _ isFP32: Bool) {
+                self.byteOffset = byteOffset
+                self.count = count
+                self.isFP32 = isFP32
+            }
+        }
+        let specs: [String: RowSpec] = [
+            "moe_x": RowSpec(0, hiddenSize, false),
+            "router_top_weights": RowSpec(0, slots, true),
+            "routed_out": RowSpec(0, hiddenSize, false),
+            "shared_out": RowSpec(0, hiddenSize, false),
+            "layer_out": RowSpec(0, hiddenSize, false),
+        ]
+        let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+        var actual: [String: [[Float]]] = [:]
+        var actualTopIDs: [[Int]] = []
+        var hiddenRows: [[Float]] = []
+        for end in 0..<ids.count {
+            runner.reset()
+            runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                points: [.afterLayer(0)], rows: ids.count)
+            runner.debugInternalsLayer = 0
+            runner.debugStopAfterLayer = 0
+            for position in 0...end {
+                try await runner.produce(
+                    token: ids[position], position: position, into: logits)
+            }
+            let tapped = runner.tappedInternals
+            guard !tapped.isEmpty else {
+                Issue.record("no internals tapped after prefix \(end)"); return
+            }
+            for (key, spec) in specs {
+                guard let buffer = tapped[key] else {
+                    Issue.record("missing internal \(key)"); return
+                }
+                let row = spec.isFP32
+                    ? Self.readFP32(buffer, byteOffset: spec.byteOffset, count: spec.count)
+                    : Self.readFP16(buffer, byteOffset: spec.byteOffset, count: spec.count)
+                actual[key, default: []].append(row)
+            }
+            guard let idsBuffer = tapped["router_top_ids"] else {
+                Issue.record("missing router_top_ids"); return
+            }
+            let idsRaw = UnsafeRawBufferPointer(start: idsBuffer.contents(),
+                                                count: slots * MemoryLayout<UInt32>.size)
+            actualTopIDs.append((0..<slots).map {
+                Int(idsRaw.load(fromByteOffset: $0 * MemoryLayout<UInt32>.size,
+                                as: UInt32.self))
+            })
+            guard let tappedHidden = runner.tappedHidden else {
+                Issue.record("no hidden tapped after prefix \(end)"); return
+            }
+            let hiddenRaw = UnsafeRawBufferPointer(start: tappedHidden.contents(),
+                                                   count: (end + 1) * rowBytes)
+            hiddenRows.append((0..<hiddenSize).map {
+                Float(hiddenRaw.load(fromByteOffset: end * rowBytes
+                    + $0 * MemoryLayout<Float16>.size, as: Float16.self))
+            })
+        }
+
+        // C8: cosine ≥ 0.995 for every quantity, over all rows.
+        for key in specs.keys.sorted() {
+            let (shape, goldenRows) = try golden("layer0_internals", key)
+            let rows = try #require(actual[key])
+            #expect(rows.count == shape[0],
+                    "\(key): tapped \(rows.count) rows, golden \(shape[0])")
+            let rowElements = goldenRows.count / shape[0]
+            var minCosine = 2.0
+            for row in rows.indices {
+                let actualRow = rows[row]
+                #expect(actualRow.count == rowElements,
+                        "\(key) row \(row): \(actualRow.count) values, golden \(rowElements)")
+                let expected = Array(
+                    goldenRows[(row * rowElements)..<(row + 1) * rowElements])
+                minCosine = min(minCosine, cosine(actualRow, expected))
+            }
+            print("S19 step 4 layer 0 \(key): min cosine \(minCosine)")
+            #expect(minCosine >= 0.995,
+                    "layer 0 \(key) min cosine \(minCosine) < 0.995 (C8)")
+        }
+
+        // The top-8 ids: equal per position; a mismatch is a near-tie and
+        // the test shows the two weights in play (C8). The golden ids are a
+        // raw [5][8] int array (not a C7 object), in ascending weight order;
+        // the same set in another order (tied weights) passes.
+        let data = try Data(contentsOf: QwenTestResources.fixtures
+            .appendingPathComponent("model/layer0_internals.json"))
+        let internals = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let goldenIDs = try #require(internals["router_top_ids"] as? [[Int]])
+        let (goldenWShape, goldenW) = try golden("layer0_internals", "router_top_weights")
+        #expect(goldenWShape == [ids.count, slots])
+        let actualW = try #require(actual["router_top_weights"])
+        var equalPositions = 0
+        for row in 0..<ids.count where actualTopIDs[row] == goldenIDs[row] {
+            equalPositions += 1
+        }
+        print("S19 step 4 layer 0 router_top_ids: \(equalPositions)/\(ids.count) positions equal")
+        for row in 0..<ids.count {
+            let goldenRow = goldenIDs[row]
+            let actualRow = actualTopIDs[row]
+            guard actualRow != goldenRow else { continue }
+            print("S19 step 4 layer 0 position \(row): golden top-8 \(goldenRow), actual \(actualRow)")
+            let goldenSet = Set(goldenRow)
+            let actualSet = Set(actualRow)
+            let dropped = goldenRow.filter { !actualSet.contains($0) }
+            let gained = actualRow.filter { !goldenSet.contains($0) }
+            #expect(dropped.count == gained.count,
+                    "p0 position \(row): top-8 differs without 1:1 swaps (golden \(goldenRow), actual \(actualRow))")
+            var nearTie = true
+            for (index, droppedExpert) in dropped.enumerated() {
+                let gainedExpert = gained[index]
+                let wGolden = goldenW[row * slots + goldenRow.firstIndex(of: droppedExpert)!]
+                let wActual = actualW[row][actualRow.firstIndex(of: gainedExpert)!]
+                print("S19 step 4 layer 0 position \(row): near-tie? golden expert \(droppedExpert) weight \(wGolden) vs actual expert \(gainedExpert) weight \(wActual)")
+                if abs(wGolden - wActual) > 0.001 { nearTie = false }
+            }
+            #expect(nearTie,
+                    "p0 position \(row): top-8 mismatch is not a near-tie (golden \(goldenRow), actual \(actualRow))")
+        }
+
+        // The hidden state after layer 0 (mixer + MoE + residual).
+        let (layer0Shape, layer0Golden) = try golden("hidden_p0", "layer0")
+        #expect(layer0Shape == [ids.count, hiddenSize])
+        var minHiddenCosine = 2.0
+        for row in 0..<ids.count {
+            let expected = Array(
+                layer0Golden[(row * hiddenSize)..<(row + 1) * hiddenSize])
+            minHiddenCosine = min(minHiddenCosine, cosine(hiddenRows[row], expected))
+        }
+        print("S19 step 4 layer 0 hidden state: min cosine \(minHiddenCosine)")
+        #expect(minHiddenCosine >= 0.995,
+                "layer 0 hidden state min cosine \(minHiddenCosine) < 0.995 (C8)")
+    }
+
     private static func readFP16(_ buffer: MTLBuffer, byteOffset: Int, count: Int) -> [Float] {
         let raw = UnsafeRawBufferPointer(start: buffer.contents(), count: buffer.length)
         return (0..<count).map { i in

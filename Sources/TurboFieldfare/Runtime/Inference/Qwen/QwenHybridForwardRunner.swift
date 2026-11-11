@@ -3,15 +3,16 @@ import Metal
 
 /// Qwen 3.5-MoE token-at-a-time forward runner (S19).
 ///
-/// Step 3: `produce` runs the embedding, the linear (Gated DeltaNet) mixers
-/// of plan 3.5 for the layers whose `fullAttentionLayerMask` bit is 0, the
-/// final RMSNorm and the lm_head. The MoE block that follows every mixer
-/// (step 4) and the full-attention mixers (step 5) are still missing, so
-/// until step 6 the logits only probe the load path, the embedding table,
-/// the 4-bit GEMV and the linear mixers. Prefill v1 feeds one token at a
-/// time: the same `produce` serves prompt and decode, and there is
-/// deliberately no `ChunkedPrefillRunner` conformance (the generator then
-/// prefills token by token, RawCompletion.swift:172).
+/// Step 4: `produce` runs the embedding, the linear (Gated DeltaNet)
+/// mixers of plan 3.5 for the layers whose `fullAttentionLayerMask` bit is
+/// 0, each followed by its MoE block (routed and shared expert), the final
+/// RMSNorm and the lm_head. The full-attention mixers (step 5) are still
+/// missing, so until step 6 the logits only probe the load path, the
+/// embedding table, the 4-bit GEMV, the linear mixers and the MoE blocks.
+/// Prefill v1 feeds one token at a time: the same `produce` serves prompt
+/// and decode, and there is deliberately no `ChunkedPrefillRunner`
+/// conformance (the generator then prefills token by token,
+/// RawCompletion.swift:172).
 ///
 /// `@unchecked Sendable` like `RealForwardRunner`: the Metal objects are
 /// thread-safe for encoding and the debug taps are test-only single-thread
@@ -75,6 +76,13 @@ public final class QwenHybridForwardRunner: LogitProducer,
     private let routerTopWeightsBuffer: MTLBuffer // FP32 [topK] recalibrated top-k weights
     private let expertActsBuffer: MTLBuffer  // FP16 [topK·moeInter] routed gate·up·SiLU
     private let routedOutBuffer: MTLBuffer   // FP16 [topK·hiddenSize] routed down out
+    /// Weighted sum of the routed expert outputs, Σ w · down (the golden
+    /// `routed_out`; step 4).
+    private let routedSumBuffer: MTLBuffer   // FP16 [hiddenSize]
+    /// Zero-filled inputs so `encodeResidual` can compute a bare weighted
+    /// sum (step 4).
+    private let zeroHiddenBuffer: MTLBuffer  // FP16 [hiddenSize]
+    private let zeroScalarBuffer: MTLBuffer  // FP16 [1]
     /// C5 staging for the three resident shared-expert tensors (step 4).
     private let sharedBlobBuffer: MTLBuffer
     private let sharedActsBuffer: MTLBuffer  // FP16 [sharedInter] shared gate·up·SiLU
@@ -87,6 +95,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     private let attnVBuffer: MTLBuffer       // FP16 [kvDim] value
     private let attnOutBuffer: MTLBuffer     // FP16 [queryDim] attention out (pre-gate)
     private let gatedBuffer: MTLBuffer       // FP16 [queryDim] attention out · gate
+    /// The layer whose shared expert currently fills `sharedBlobBuffer`
+    /// (step 4); the blob is re-staged whenever the layer changes.
+    private var sharedBlobLayer: Int?
 
     // MARK: - Debug taps (test-only, S19 steps 2–7)
 
@@ -123,7 +134,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
 
     /// Recorded hidden rows of the current generation, layout as above.
     internal private(set) var tappedHidden: MTLBuffer?
-    /// Tokens recorded so far (per point).
+    /// Tokens recorded so far (one row per point each).
     internal private(set) var tappedHiddenCount = 0
     /// Recorded internals of `debugInternalsLayer`, keyed by C7 golden name.
     /// The values are the runner's own work buffers, so the tapped layer
@@ -131,10 +142,14 @@ public final class QwenHybridForwardRunner: LogitProducer,
     internal private(set) var tappedInternals: [String: MTLBuffer] = [:]
 
     /// Test-only (S19 steps 3–5): the layer code records its work buffers
-    /// under their C7 golden keys when it runs `debugInternalsLayer`.
+    /// under their C7 golden keys when it runs `debugInternalsLayer`. The
+    /// entries merge, so the mixer and the MoE block of the same layer
+    /// contribute their own keys.
     internal func recordInternals(layer: Int, _ entries: [String: MTLBuffer]) {
         guard layer == debugInternalsLayer else { return }
-        tappedInternals = entries
+        for (key, buffer) in entries {
+            tappedInternals[key] = buffer
+        }
     }
 
     // MARK: - Init
@@ -199,6 +214,17 @@ public final class QwenHybridForwardRunner: LogitProducer,
         self.routedOutBuffer = try makeWorkBuffer(
             device: context.device, elementCount: cfg.topKExperts * hiddenSize,
             element: Float16.self, name: "routedOut")
+        self.routedSumBuffer = try makeWorkBuffer(
+            device: context.device, elementCount: hiddenSize,
+            element: Float16.self, name: "routedSum")
+        self.zeroHiddenBuffer = try makeWorkBuffer(
+            device: context.device, elementCount: hiddenSize,
+            element: Float16.self, name: "zeroHidden")
+        self.zeroScalarBuffer = try makeWorkBuffer(
+            device: context.device, elementCount: 1,
+            element: Float16.self, name: "zeroScalar")
+        memset(self.zeroHiddenBuffer.contents(), 0, self.zeroHiddenBuffer.length)
+        memset(self.zeroScalarBuffer.contents(), 0, self.zeroScalarBuffer.length)
         self.sharedBlobBuffer = try makeWorkBuffer(
             device: context.device,
             elementCount: QwenMoE.expertBlobBytes(
@@ -243,9 +269,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
         precondition(token >= 0, "token ids are non-negative, got \(token)")
         precondition(logits.length >= vocabSize * MemoryLayout<Float16>.size,
                      "logits buffer holds \(logits.length) bytes, need \(vocabSize * MemoryLayout<Float16>.size)")
-        guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
-            throw QwenRunnerError.commandBufferFailed
-        }
+        var commandBuffer = try makeCommandBuffer()
         let hidden = hiddenBuffer
 
         // Embedding: 4-bit affine lookup of row `token` (3.5). Qwen applies
@@ -260,13 +284,15 @@ public final class QwenHybridForwardRunner: LogitProducer,
         recordHiddenTap(.afterEmbedding, in: commandBuffer)
 
         // Layers 0..<cfg.numLayers per cfg.fullAttentionLayerMask (3.5):
-        // linear (Gated DeltaNet) mixers run here (step 3); the MoE block
-        // that follows every mixer (step 4) and the full-attention mixers
-        // (step 5) are inserted at their mask positions in later steps. The
-        // residual stream stays in `hiddenBuffer` throughout.
+        // each linear (Gated DeltaNet) mixer (step 3) is followed by its
+        // MoE block (step 4); the full-attention mixers (step 5) are
+        // inserted at their mask positions in a later step, with their MoE
+        // in the same place. The residual stream stays in `hiddenBuffer`
+        // throughout.
         for L in 0..<cfg.numLayers {
             if cfg.fullAttentionLayerMask[L] == 0 {
                 try runLinearLayer(L, in: commandBuffer)
+                try await runMoELayer(L, in: &commandBuffer)
             }
             recordHiddenTap(.afterLayer(L), in: commandBuffer)
             if let stop = debugStopAfterLayer, L == stop {
@@ -274,6 +300,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
                 // the remaining layers, the final norm and the lm_head.
                 commandBuffer.commit()
                 await commandBuffer.completed()
+                finishHiddenTapRow()
                 cache.advance(by: 1)
                 return
             }
@@ -301,6 +328,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
 
         commandBuffer.commit()
         await commandBuffer.completed()
+        finishHiddenTapRow()
         cache.advance(by: 1)
     }
 
@@ -497,6 +525,232 @@ public final class QwenHybridForwardRunner: LogitProducer,
         }
     }
 
+    // MARK: - MoE block
+
+    /// One MoE block (plan 3.5 "Blocco MoE") following the mixer of layer
+    /// L, one token: the post-attention RMSNorm, the 8-bit router GEMV and
+    /// the top-8 selection, the routed experts streamed from the layer file
+    /// (C5), the shared expert with its scalar gate, and the residual sum.
+    ///
+    /// The top-8 ids live on the GPU after the router kernel, so the pass
+    /// commits and waits once to read them back, streams the expert blobs,
+    /// and continues on a fresh command buffer (`inout`).
+    private func runMoELayer(_ L: Int, in commandBuffer: inout MTLCommandBuffer) async throws {
+        let h = hiddenBuffer
+        let hidden = hiddenSize
+        let inter = cfg.moeIntermediateSize
+        let slots = cfg.topKExperts
+        let epsilon = Float(hybrid.rmsNormEps)
+
+        // x = RMSNorm(h; post_attention_layernorm), plain mode
+        // (normWeightsShifted); the golden `moe_x`.
+        let postNorm = try model.postAttnNorm(layer: L)
+        norms.encodeRow(
+            commandBuffer: commandBuffer,
+            x: h,
+            weight: postNorm.buffer, weightOffset: Int(postNorm.offset),
+            out: moeXBuffer,
+            d: UInt32(hidden), rows: 1, eps: epsilon, mode: .plain)
+
+        // Router: 8-bit GEMV over the 256 expert logits, then the kernel
+        // top-8 with renormalized weights.
+        let routerWeights = try model.qwenRouter(layer: L)
+        gemv8.encode(
+            commandBuffer: commandBuffer,
+            weights: routerWeights.buffer, weightsOffset: Int(routerWeights.offset),
+            scales: routerWeights.buffer, scalesOffset: Int(routerWeights.scaleOffset),
+            biases: routerWeights.buffer, biasesOffset: Int(routerWeights.biasOffset),
+            x: moeXBuffer, y: routerLogitsBuffer,
+            m: UInt32(cfg.numExperts), n: UInt32(hidden))
+        router.encodeTopK(
+            commandBuffer: commandBuffer,
+            logits: routerLogitsBuffer,
+            indices: routerTopIdsBuffer,
+            weights: routerTopWeightsBuffer,
+            experts: cfg.numExperts, topK: slots)
+
+        // The routed experts are read from the layer file (C5), so the ids
+        // must be on the CPU first: commit, read them back, stream the
+        // blobs. The golden (mlx-lm) lists the top-8 in ascending weight
+        // order with ties by ascending expert id, while the router kernel
+        // (S13) selects in descending order; the runner normalizes the
+        // pairs to the golden order here. The MoE sum is order-independent,
+        // so only the exposed ids/weights and the blob slot order change.
+        commandBuffer.commit()
+        await commandBuffer.completed()
+        let idsRaw = UnsafeMutableRawBufferPointer(
+            start: routerTopIdsBuffer.contents(),
+            count: slots * MemoryLayout<UInt32>.size)
+        let weightsRaw = UnsafeMutableRawBufferPointer(
+            start: routerTopWeightsBuffer.contents(),
+            count: slots * MemoryLayout<Float>.size)
+        var pairs: [(id: Int, weight: Float)] = []
+        for slot in 0..<slots {
+            let id = idsRaw.load(fromByteOffset: slot * MemoryLayout<UInt32>.size,
+                                 as: UInt32.self)
+            let weight = weightsRaw.load(fromByteOffset: slot * MemoryLayout<Float>.size,
+                                         as: Float.self)
+            pairs.append((min(Int(id), cfg.numExperts - 1), weight))
+        }
+        pairs.sort { ($0.weight, $0.id) < ($1.weight, $1.id) }
+        for (slot, pair) in pairs.enumerated() {
+            idsRaw.storeBytes(of: UInt32(pair.id),
+                              toByteOffset: slot * MemoryLayout<UInt32>.size,
+                              as: UInt32.self)
+            weightsRaw.storeBytes(of: pair.weight,
+                                  toByteOffset: slot * MemoryLayout<Float>.size,
+                                  as: Float.self)
+        }
+        let experts = pairs.map(\.id)
+        let blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+        guard let routedArgBuffer = moe.makeBlobsArgumentBuffer(
+            blobs: blobs.map(\.buffer), slots: slots)
+        else {
+            throw QwenRunnerError.argumentBufferFailed(name: "routedBlobs")
+        }
+        commandBuffer = try makeCommandBuffer()
+
+        // C5 intra-blob offsets (routed and shared experts share the
+        // layout); the routed slot buffers start at the blob beginning.
+        let offsets = QwenMoE.expertOffsets(hidden: hidden, inter: inter)
+
+        // Routed: silu(gate·x) ⊙ (up·x) per slot, then the down projection.
+        moe.encodeGateUpSilu(
+            commandBuffer: commandBuffer,
+            blobsArgBuffer: routedArgBuffer, blobs: blobs.map(\.buffer),
+            offsets: offsets,
+            x: moeXBuffer, acts: expertActsBuffer,
+            hidden: hidden, inter: inter, slots: slots)
+        moe.encodeDown(
+            commandBuffer: commandBuffer,
+            blobsArgBuffer: routedArgBuffer, blobs: blobs.map(\.buffer),
+            offsets: offsets,
+            acts: expertActsBuffer, routedOut: routedOutBuffer,
+            hidden: hidden, inter: inter, slots: slots)
+
+        // Shared expert: the same two kernels as a one-slot pass over the
+        // resident tensors staged into `sharedBlobBuffer` (per layer).
+        if sharedBlobLayer != L {
+            try stageSharedExpert(layer: L, in: commandBuffer)
+            sharedBlobLayer = L
+        }
+        guard let sharedArgBuffer = moe.makeBlobsArgumentBuffer(
+            blobs: [sharedBlobBuffer], slots: 1)
+        else {
+            throw QwenRunnerError.argumentBufferFailed(name: "sharedBlob")
+        }
+        moe.encodeGateUpSilu(
+            commandBuffer: commandBuffer,
+            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+            offsets: offsets,
+            x: moeXBuffer, acts: sharedActsBuffer,
+            hidden: hidden, inter: inter, slots: 1)
+        moe.encodeDown(
+            commandBuffer: commandBuffer,
+            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+            offsets: offsets,
+            acts: sharedActsBuffer, routedOut: sharedOutBuffer,
+            hidden: hidden, inter: inter, slots: 1)
+
+        // sg = sigmoid(W_sg · x): 8-bit GEMV (1×hidden) and the elementwise
+        // sigmoid, in place on the FP16 scalar.
+        let gateScalar = try model.qwenSharedExpertGateScalar(layer: L)
+        gemv8.encode(
+            commandBuffer: commandBuffer,
+            weights: gateScalar.buffer, weightsOffset: Int(gateScalar.offset),
+            scales: gateScalar.buffer, scalesOffset: Int(gateScalar.scaleOffset),
+            biases: gateScalar.buffer, biasesOffset: Int(gateScalar.biasOffset),
+            x: moeXBuffer, y: sharedGateBuffer,
+            m: 1, n: UInt32(hidden))
+        router.encodeSigmoid(
+            commandBuffer: commandBuffer,
+            x: sharedGateBuffer, out: sharedGateBuffer, count: 1)
+
+        // Test-only: the routed contribution alone (the golden
+        // `routed_out`): the residual kernel with zero residual and shared
+        // inputs reduces to the weighted sum Σ w · down.
+        if L == debugInternalsLayer {
+            moe.encodeResidual(
+                commandBuffer: commandBuffer,
+                residual: zeroHiddenBuffer,
+                routedOut: routedOutBuffer,
+                sharedOut: zeroHiddenBuffer,
+                routingW: routerTopWeightsBuffer,
+                sg: zeroScalarBuffer,
+                y: routedSumBuffer,
+                hidden: hidden, slots: slots)
+        }
+
+        // h += Σ w · routed + sg · shared (the golden `layer_out`).
+        moe.encodeResidual(
+            commandBuffer: commandBuffer,
+            residual: h,
+            routedOut: routedOutBuffer,
+            sharedOut: sharedOutBuffer,
+            routingW: routerTopWeightsBuffer,
+            sg: sharedGateBuffer,
+            y: h,
+            hidden: hidden, slots: slots)
+
+        // Test-only MoE internals of the tapped layer (C7 golden keys).
+        // `routed_out` is the weighted sum, not the per-slot projections;
+        // `shared_out` is the pre-gate shared projection: the golden row
+        // already carries the sg factor (a positive scalar, so the cosine
+        // is unaffected). `layer_out` is `hiddenBuffer` after the residual.
+        if L == debugInternalsLayer {
+            recordInternals(layer: L, [
+                "moe_x": moeXBuffer,
+                "router_top_ids": routerTopIdsBuffer,
+                "router_top_weights": routerTopWeightsBuffer,
+                "routed_out": routedSumBuffer,
+                "shared_out": sharedOutBuffer,
+                "layer_out": h,
+            ])
+        }
+    }
+
+    /// C5 staging of layer L's three resident shared-expert tensors (gate,
+    /// up, down; 4-bit affine) into `sharedBlobBuffer` at the blob's intra
+    /// offsets. The blits are encoded on the command buffer, so they are
+    /// ordered before the kernels that read the blob.
+    private func stageSharedExpert(layer L: Int, in commandBuffer: MTLCommandBuffer) throws {
+        let offsets = QwenMoE.expertOffsets(
+            hidden: hiddenSize, inter: cfg.moeIntermediateSize)
+        let gate = try model.qwenSharedExpertGate(layer: L)
+        let up = try model.qwenSharedExpertUp(layer: L)
+        let down = try model.qwenSharedExpertDown(layer: L)
+        let sections: [(view: TensorView, weight: UInt32,
+                        scales: UInt32, biases: UInt32)] = [
+            (gate, offsets.gateWOff, offsets.gateSOff, offsets.gateBOff),
+            (up, offsets.upWOff, offsets.upSOff, offsets.upBOff),
+            (down, offsets.downWOff, offsets.downSOff, offsets.downBOff),
+        ]
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        for section in sections {
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.offset),
+                      to: sharedBlobBuffer, destinationOffset: Int(section.weight),
+                      size: Int(section.view.length))
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.scaleOffset),
+                      to: sharedBlobBuffer, destinationOffset: Int(section.scales),
+                      size: Int(section.view.scaleLength))
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.biasOffset),
+                      to: sharedBlobBuffer, destinationOffset: Int(section.biases),
+                      size: Int(section.view.biasLength))
+        }
+        blit.endEncoding()
+    }
+
+    /// A fresh command buffer on the shared queue.
+    private func makeCommandBuffer() throws -> MTLCommandBuffer {
+        guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
+            throw QwenRunnerError.commandBufferFailed
+        }
+        return commandBuffer
+    }
+
     // MARK: - Taps
 
     /// GPU-side blit of the current row into the tap buffer so the recorded
@@ -529,6 +783,13 @@ public final class QwenHybridForwardRunner: LogitProducer,
                   to: destination, destinationOffset: offset,
                   size: rowBytes)
         blit.endEncoding()
+    }
+
+    /// Closes the current token's tap row: every point of this token wrote
+    /// row `tappedHiddenCount`, the next token writes the next row. Called
+    /// once per `produce`, so taps with several points stay aligned.
+    private func finishHiddenTapRow() {
+        guard let tap = debugHiddenTap, tappedHiddenCount < tap.rows else { return }
         tappedHiddenCount += 1
     }
 }
@@ -547,6 +808,7 @@ private func makeWorkBuffer<E>(device: MTLDevice, elementCount: Int,
 private enum QwenRunnerError: Error, CustomStringConvertible {
     case bufferAllocationFailed(name: String, bytes: Int)
     case commandBufferFailed
+    case argumentBufferFailed(name: String)
 
     var description: String {
         switch self {
@@ -554,6 +816,8 @@ private enum QwenRunnerError: Error, CustomStringConvertible {
             return "Qwen runner work buffer \(name) allocation failed (\(bytes) B)"
         case .commandBufferFailed:
             return "Qwen runner command buffer allocation failed"
+        case .argumentBufferFailed(let name):
+            return "Qwen runner \(name) argument buffer allocation failed"
         }
     }
 }
