@@ -51,6 +51,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     let attention: QwenAttention
     let router: QwenRouter
     let moe: QwenMoE
+    /// S20 chunked prefill: the 4-bit MPP GEMM over the chunk's rows (map
+    /// S20 "GEMM prefill"); the per-row GEMV is its fallback.
+    let mpp4: MPPPrefillInt4QMM
 
     /// S20 chunked prefill: dirty while a chunked prefill has advanced the
     /// cache without committing; `prefillChunked` rejects with the same
@@ -201,6 +204,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
         self.attention = try QwenAttention(context: context)
         self.router = try QwenRouter(context: context)
         self.moe = try QwenMoE(context: context)
+        // The `.control` variant serves the F16 GEMM path for every m (the
+        // Apple10 variants are Gemma/Vision-only); map S20.
+        self.mpp4 = MPPPrefillInt4QMM(context: context)
 
         // The work buffers are row-major with the largest prefill chunk
         // (S20): `produce` uses row 0, `prefillChunked` the first T rows.

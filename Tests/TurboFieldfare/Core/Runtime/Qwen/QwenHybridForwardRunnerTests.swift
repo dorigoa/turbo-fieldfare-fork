@@ -134,6 +134,10 @@ struct QwenHybridForwardRunnerTests {
             runner.reset()
             runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
                 points: [.afterEmbedding], rows: ids.count)
+            // Step 3: each span now runs the layer-0 mixer before
+            // stopping, so stop it there (the embedding tap is recorded
+            // before the layer and is unaffected).
+            runner.debugStopAfterLayer = 0
             var progress: [Int] = []
             let config = PrefillRuntimeConfig.defaultChunked
                 .replacingChunkTokens(chunkTokens)
@@ -184,6 +188,119 @@ struct QwenHybridForwardRunnerTests {
         #expect(empty.newPosition == 0)
         #expect(empty.seed == .logitsWritten)
         #expect(runner.continuationPosition == 0)
+    }
+
+    /// S20 step 3: the chunked prefill runs the layer-0 Gated DeltaNet
+    /// mixer over the chunk's rows. The `mixer_out` of every position of
+    /// p0, in chunks of 2 (spans 2+2+1, one call per span so the mixer
+    /// rows of each span can be read before the next span overwrites
+    /// them), must match `layer0_internals.json → mixer_out` (cosine
+    /// ≥ 0.995), and the DeltaNet and conv states at the end of the
+    /// prompt must match the token-at-a-time `produce` run of S19
+    /// (cosine ≥ 0.9999; the relative errors go to the report).
+    @Test("the chunked layer-0 DeltaNet mixer matches the golden and the decode states")
+    func chunkedLayer0DeltaNetMatchesGoldenAndDecodeStates() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let model = env.model
+        let hybrid = try #require(model.qwenHybridConfig)
+        let hiddenSize = model.config.hiddenSize
+        let vocabSize = model.config.vocabSize
+        let keyHeads = hybrid.linearNumKeyHeads
+        let keyDim = hybrid.linearKeyHeadDim
+        let valueHeads = hybrid.linearNumValueHeads
+        let valueDim = valueHeads * hybrid.linearValueHeadDim
+        let qkvChannels = 2 * keyHeads * keyDim + valueDim
+        let ids = try promptIDs("p0")
+        #expect(ids.count == 5)
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size, options: .storageModeShared))
+
+        // Reference: the S19 token-at-a-time `produce`, stopped after the
+        // layer-0 mixer (the layer-0 states are the same in the full run).
+        runner.reset()
+        runner.debugStopAfterLayer = 0
+        for (position, id) in ids.enumerated() {
+            try await runner.produce(token: id, position: position, into: logits)
+        }
+        #expect(runner.continuationPosition == ids.count)
+        guard let deltaOffset = runner.cache.deltaStateByteOffset(layer: 0),
+              let convOffset = runner.cache.convStateByteOffset(layer: 0) else {
+            Issue.record("no layer-0 state offsets"); return
+        }
+        // Per layer: [value head][column = value head dim][row = key dim].
+        let deltaStateCount = valueHeads * hybrid.linearValueHeadDim * keyDim
+        let decodeDelta = Self.readFP32(runner.cache.deltaStateBuffer, byteOffset: deltaOffset,
+                                        count: deltaStateCount)
+        let decodeConv = Self.readFP32(runner.cache.convStateBuffer, byteOffset: convOffset,
+                                       count: 3 * qkvChannels)
+
+        // Chunked: the same prompt in chunks of 2, one call per span
+        // (2, 2, 1); the layer-0 mixer is the last executed block of each
+        // call, so its rows survive in the work buffers to be read.
+        runner.reset()
+        runner.debugInternalsLayer = 0
+        runner.debugStopAfterLayer = 0
+        var progress: [Int] = []
+        let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(2)
+        let (shape, goldenMixer) = try golden("layer0_internals", "mixer_out")
+        #expect(shape == [ids.count, hiddenSize])
+        let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+        var minMixerCosine = 2.0
+        var tappedRows = 0
+        var chunkStart = 0
+        while chunkStart < ids.count {
+            let chunkEnd = min(chunkStart + 2, ids.count)
+            let result = try await runner.prefillChunked(
+                tokens: ids[chunkStart..<chunkEnd],
+                startPosition: chunkStart,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { progress.append($0) })
+            #expect(result.newPosition == chunkEnd)
+            #expect(result.seed == .logitsWritten)
+            #expect(runner.continuationPosition == chunkEnd)
+            guard let mixerBuffer = runner.tappedInternals["mixer_out"] else {
+                Issue.record("no mixer_out tapped after span \(chunkStart)..<\(chunkEnd)"); return
+            }
+            for t in 0..<(chunkEnd - chunkStart) {
+                let row = Self.readFP16(mixerBuffer, byteOffset: t * rowBytes,
+                                        count: hiddenSize)
+                let position = tappedRows + t
+                let expected = Array(
+                    goldenMixer[(position * hiddenSize)..<(position + 1) * hiddenSize])
+                minMixerCosine = min(minMixerCosine, cosine(row, expected))
+            }
+            tappedRows += chunkEnd - chunkStart
+            chunkStart = chunkEnd
+        }
+        #expect(tappedRows == ids.count)
+        // completedCount is per call (tokens done inside that call), so
+        // the three one-span calls report 2, 2, 1.
+        #expect(progress == [2, 2, 1])
+        #expect(!runner.chunkCommitState.isDirty)
+        print("S20 step 3 p0 chunked mixer_out minimum cosine: \(minMixerCosine)")
+        #expect(minMixerCosine >= 0.995,
+                "chunked layer 0 mixer_out minimum cosine \(minMixerCosine) < 0.995 (C8)")
+
+        // The layer-0 states at the end of the prompt (cache layout
+        // [head][column][row] for the DeltaNet, [tap][channel] for the
+        // conv) against the token-at-a-time decode.
+        let chunkedDelta = Self.readFP32(runner.cache.deltaStateBuffer, byteOffset: deltaOffset,
+                                         count: deltaStateCount)
+        let chunkedConv = Self.readFP32(runner.cache.convStateBuffer, byteOffset: convOffset,
+                                        count: 3 * qkvChannels)
+        let deltaCosine = cosine(decodeDelta, chunkedDelta)
+        let deltaRel = RelError.compute(actual: chunkedDelta, reference: decodeDelta)
+        let convCosine = cosine(decodeConv, chunkedConv)
+        let convRel = RelError.compute(actual: chunkedConv, reference: decodeConv)
+        print("S20 step 3 layer 0 DeltaNet state cosine \(deltaCosine), relative error \(deltaRel)")
+        print("S20 step 3 layer 0 conv state cosine \(convCosine), relative error \(convRel)")
+        #expect(deltaCosine >= 0.9999,
+                "layer 0 DeltaNet state cosine \(deltaCosine) < 0.9999")
+        #expect(convCosine >= 0.9999,
+                "layer 0 conv state cosine \(convCosine) < 0.9999")
     }
 
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
