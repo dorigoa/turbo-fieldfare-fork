@@ -1702,34 +1702,40 @@ toccano.
    `onProgress`, embedding di `T` token. Presa di debug (solo per i test) per
    lo stato nascosto di tutte le righe del blocco. Test con il modello:
    embedding di tutte le posizioni di p0 contro `hidden_p0.json` →
-   `embedding` (coseno ≥ 0,9999), con un blocco di 16 token, in modo che il
-   prompt occupi più blocchi e l'ultimo sia parziale. Leggi: la mappa.
+   `embedding` (coseno ≥ 0,9999), a blocchi di 2 token (2+2+1: più blocchi,
+   l'ultimo parziale) e in un blocco unico; `newPosition` = 5. Un blocco di
+   qualunque dimensione si ottiene con `replacingChunkTokens(_:)`. Leggi: la
+   mappa.
 3. Mixer DeltaNet su `T` righe: norma d'ingresso, proiezioni (GEMM o GEMV,
    come dice la mappa), conv con il suo stato, gate, scansione con
    `tokens: T`, norma gated, proiezione d'uscita, residuo. Test sul layer 0
-   con p0, a blocchi di 16: `mixer_out` di `layer0_internals.json` su tutte le
+   con p0, a blocchi di 2: `mixer_out` di `layer0_internals.json` su tutte le
    posizioni (coseno ≥ 0,995); stato DeltaNet e stato conv a fine prompt
    contro quelli del decode token per token del runner S19 (coseno ≥ 0,9999;
    annota l'errore relativo nel report). Leggi: la mappa; in 3.5 la parte
    DeltaNet.
 4. MoE su `T` righe: norma prima del MoE, router per `T` token con una sola
    lettura degli id sulla CPU per layer, expert dell'unione degli id letti una
-   volta per blocco (C5), `QwenMoE.encodePrefill`, shared expert, residuo.
-   Test: layer 0 completo contro `hidden_p0.json` → `layer0` su tutte le
+   volta per blocco a gruppi di al massimo 16, gli slot del layer (C5): ogni
+   gruppo si legge, si esegue e si attende prima di leggere il successivo.
+   Poi shared expert e residuo per token; `QwenMoE.encodePrefill` non si usa
+   (presume gli stessi 8 expert per tutti i token). Test a blocchi di 2:
+   layer 0 completo contro `hidden_p0.json` → `layer0` su tutte le
    posizioni (coseno ≥ 0,995, C8) e contro il decode token per token (coseno
    ≥ 0,9999). Leggi: la mappa; in 3.5 la parte MoE; C5.
 5. Attention su `T` righe (layer 3): norma, proiezioni di q, gate, k e v,
    norme per testa, RoPE con le posizioni `start…start+T−1`, scrittura di `T`
    righe nella cache KV, attention causale con `queryTokens: T`, gate,
    proiezione d'uscita, residuo, MoE del passo 4. Test: layer 0–3 a blocchi di
-   16, `hidden_p0.json` → `layer3` su tutte le posizioni (coseno ≥ 0,995) e
+   2, `hidden_p0.json` → `layer3` su tutte le posizioni (coseno ≥ 0,995) e
    contro il decode token per token (coseno ≥ 0,9999). Leggi: la mappa; in 3.5
    la parte attention.
 6. Modello completo ed equivalenza: i 40 layer secondo la maschera, norma
    finale e `lm_head` sull'ultima riga, `outputMode` (`PrefillSeed`),
-   `PrefillResult.newPosition`. Test per i 6 prompt, a blocchi di 16 e in un
-   blocco unico: stato dopo la norma finale su tutte le posizioni contro il
-   decode token per token (coseno ≥ 0,9999); logit dell'ultima posizione
+   `PrefillResult.newPosition`. Test per i 6 prompt (da 5 a 28 token), a
+   blocchi di 4, così ogni prompt occupa più blocchi, e in un blocco unico:
+   stato dopo la norma finale su tutte le posizioni contro il decode token per
+   token (coseno ≥ 0,9999); logit dell'ultima posizione
    contro il decode (coseno ≥ 0,9999, top-1 uguale) e, per p0 e p1, contro
    `logits_last.json` (coseno ≥ 0,998, la deviazione approvata in S19). I test
    di S19 restano verdi. Leggi: la mappa.
