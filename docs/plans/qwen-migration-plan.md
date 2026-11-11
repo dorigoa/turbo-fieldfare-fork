@@ -2018,8 +2018,9 @@ e si tokenizzano senza token speciali aggiunti.
   `state_heads0to3` [4,128,128] (stato finale delle teste 0–3, indici
   `[testa][riga i][colonna c]`).
 - `layer3_internals.json`: `x_norm`; `q_pre_norm`, `gate` [T,16,256];
-  `k_pre_norm`, `v` [T,2,256]; `q_rope` [T,16,256], `k_rope` [T,2,256] (dopo
-  norma e RoPE); `attn_out` [T,16,256] (prima del gate); `gated` [T,4096];
+  `k_pre_norm`, `v` [T,2,256] (`q_pre_norm` e `k_pre_norm`, nonostante il
+  nome, sono q e k dopo la norma per testa e prima del RoPE);
+  `q_rope` [T,16,256], `k_rope` [T,2,256] (dopo norma e RoPE); `attn_out` [T,16,256] (prima del gate); `gated` [T,4096];
   `mixer_out`, `layer_out` [T,2048].
 
 **Scheletro di `make_model_golden.py`** (da completare leggendo le classi del
