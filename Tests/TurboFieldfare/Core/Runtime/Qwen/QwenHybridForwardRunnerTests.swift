@@ -580,10 +580,11 @@ struct QwenHybridForwardRunnerTests {
                 // activations (S8: its own layer-0 reconstruction differs by
                 // 3e-3 relative from bf16 rounding alone), this runner with
                 // FP16, and the gap grows over 40 layers: p0 measures
-                // 0.9985, p1 0.9993. 0.998 is a provisional bound, a
-                // deviation for the user to accept at the S19 checkpoint.
+                // 0.9985, p1 0.9993. The bound against these bf16 goldens
+                // is 0.998, a deviation the user approved on 2026-11-11
+                // (S19 report).
                 #expect(lastCosine >= 0.998,
-                        "\(name) last-position logits cosine \(lastCosine) < 0.998 (C8 0.999, deviation)")
+                        "\(name) last-position logits cosine \(lastCosine) < 0.998 (C8 0.999, approved deviation)")
             }
             if name == "p0" {
                 let tapped = try #require(runner.tappedHidden)
