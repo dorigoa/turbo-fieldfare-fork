@@ -161,7 +161,8 @@ con il prompt di 1.4 finché fa progressi; se Claude CLI finisce con un errore
 (per esempio del server del modello), aspetta un minuto prima di riprovare. Si
 ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza nuovi
 commit (o 20 tentativi in tutto) e dopo ogni sezione ⛔. Se la scheda chiede
-una sessione per passo (S19), ogni passo è un tentativo con il contesto vuoto.
+una sessione per passo (S19, S20), ogni passo è un tentativo con il contesto
+vuoto.
 Le istruzioni complete sono in testa allo script.
 
 ## 1.4 Riprendere una sezione interrotta
@@ -1645,34 +1646,113 @@ confronto diverge, segui 2.5 (layer per layer, poi grandezze interne).
 **Obiettivo.** Prefill di più token per volta, continuazione e riuso del
 prefisso con gli snapshot.
 
-**Requisiti.** Modello reale: sì.
+**Requisiti.** Modello reale: sì (2.4), dal passo 2. Report da leggere: S19
+(solo "Note per le sezioni successive").
 
-**Leggi.** D5, D6; `ChunkedPrefillRunner` in `LogitProducer.swift`;
-`Runtime/Prefill/PrefillRuntimeConfig.swift` (con `grep -n`); in
-`RealForwardRunner.swift` **solo** le righe 455–500 e 572–640 (semantica di
-`reset`, `rewind`, `prepareForContinuation`, `prefillChunked`);
-`Kernels/TensorCore/MPPPrefillInt4QMM.swift` (per capire se il GEMM INT4 è
-generico).
+**Una sessione per passo.** Come S19: il prefill estende un runner di circa
+1000 righe, e il codice da conoscere non sta in un contesto. La mappa del
+passo 1 sostituisce la rilettura del codice. Dopo il commit e il push di ogni
+passo, aggiungi alla mappa ciò che il passo successivo deve sapere e chiudi la
+sessione con una riga di riepilogo: la sezione riprende dal passo successivo
+con il contesto vuoto. Dal passo 2 in poi leggi solo la scheda, il report, la
+mappa, `S19-map.md` e ciò che il passo elenca. Di
+`QwenHybridForwardRunner.swift` leggi solo gli intervalli di righe che la mappa
+indica; `RealForwardRunner.swift` mai, se non nel passo 1.
+
+**Leggi.** Ogni passo dice cosa leggere. Le grandezze dei golden sono in C7 e
+in Appendice D; le tolleranze in C8; i test con il modello seguono C9.
 
 **Puoi modificare.** I file Qwen di S12–S19; file nuovi in
-`Runtime/Prefill/Qwen/`; test in `Runtime/Qwen/` e `Kernels/Qwen/`.
+`Runtime/Inference/Qwen/` e `Runtime/Prefill/Qwen/`; test in
+`Tests/TurboFieldfare/Core/Runtime/Qwen/` e `Kernels/Qwen/`; la mappa
+`docs/plans/qwen-migration/reports/S20-map.md`. Un kernel Metal nuovo solo se
+quello esistente non accetta più righe (D4). Gemma, CLI, server e app non si
+toccano.
 
 **Passi.**
 
-1. `ChunkedPrefillRunner`: per un blocco di `T` token proiezioni come GEMM
-   (con il GEMM INT4 esistente se si può chiamare senza modifiche, altrimenti
-   GEMV per token), conv e scansione su `T`, attention prefill, MoE con ciclo
-   sui token.
-2. Equivalenza con il decode token per token: top-1 uguale su tutte le
-   posizioni, coseno ≥ 0,9999 sui logit dell'ultima.
-3. `continuationPosition`, `prepareForContinuation`, `rewind(to:)` secondo D6
-   (errore `rewindUnsupported` se non c'è uno snapshot utilizzabile);
-   snapshot a fine prefill (massimo 2).
-4. Test: un prompt che estende un prompt con snapshot dà gli stessi logit del
-   prefill completo.
-5. Nel report: token al secondo in prefill con 512 e 4096 token, e in decode.
+1. Mappa, senza codice Swift. Scrivi `reports/S20-map.md`, al massimo 150
+   righe:
+   - le firme esatte, con `file:riga`, di `ChunkedPrefillRunner`,
+     `PrefillOutputMode`, `PrefillSeed`, `PrefillResult` e
+     `PrefillRuntimeConfig` (dimensione del blocco);
+   - la semantica di `reset`, `rewind(to:)`, `continuationPosition`,
+     `prepareForContinuation` e `prefillChunked` in `RealForwardRunner.swift`,
+     di cui leggi **solo** le righe 455–500 e 572–640;
+   - per ogni kernel Qwen che il runner usa, il parametro del numero di righe
+     (`tokens`, `rows`, `queryTokens`) e il layout di `T` righe; come
+     `QwenMoE.encodePrefill` vuole il routing di `T` token (unione degli
+     expert, slot, pesi);
+   - se `MPPPrefillInt4QMM.encode` accetta i pesi Qwen così come sono (layout
+     di pesi, scale e bias; `k` multiplo di `tileK`; `m ≥ 64` per Apple10).
+     Scrivi la decisione: GEMM, oppure GEMV per token;
+   - i buffer di lavoro del runner S19 dimensionati per una riga, da portare
+     a `T` righe, e i punti in cui il runner aspetta la CPU, con gli
+     intervalli di righe di `QwenHybridForwardRunner.swift` da leggere nei
+     passi successivi.
 
-**Fatto quando.** Test verdi; tempi nel report.
+   Leggi: `S19-map.md`; D5, D6; `Runtime/Generation/LogitProducer.swift`;
+   `Runtime/Prefill/PrefillRuntimeConfig.swift` e
+   `Kernels/TensorCore/MPPPrefillInt4QMM.swift` (con `grep -n`); le firme dei
+   wrapper (`grep -n "func encode" Sources/TurboFieldfare/Kernels/Qwen/*.swift`);
+   `QwenHybridForwardRunner.swift` con `grep -n "func \|let .*Buffer\|var .*Buffer"`.
+2. Scheletro. Conformità a `ChunkedPrefillRunner` in un file nuovo, per
+   esempio `QwenHybridForwardRunner+Prefill.swift`: buffer di lavoro per `T`
+   righe (`T` = blocco di `PrefillRuntimeConfig`), ciclo sui blocchi con
+   `onProgress`, embedding di `T` token. Presa di debug (solo per i test) per
+   lo stato nascosto di tutte le righe del blocco. Test con il modello:
+   embedding di tutte le posizioni di p0 contro `hidden_p0.json` →
+   `embedding` (coseno ≥ 0,9999), con un blocco di 16 token, in modo che il
+   prompt occupi più blocchi e l'ultimo sia parziale. Leggi: la mappa.
+3. Mixer DeltaNet su `T` righe: norma d'ingresso, proiezioni (GEMM o GEMV,
+   come dice la mappa), conv con il suo stato, gate, scansione con
+   `tokens: T`, norma gated, proiezione d'uscita, residuo. Test sul layer 0
+   con p0, a blocchi di 16: `mixer_out` di `layer0_internals.json` su tutte le
+   posizioni (coseno ≥ 0,995); stato DeltaNet e stato conv a fine prompt
+   contro quelli del decode token per token del runner S19 (coseno ≥ 0,9999;
+   annota l'errore relativo nel report). Leggi: la mappa; in 3.5 la parte
+   DeltaNet.
+4. MoE su `T` righe: norma prima del MoE, router per `T` token con una sola
+   lettura degli id sulla CPU per layer, expert dell'unione degli id letti una
+   volta per blocco (C5), `QwenMoE.encodePrefill`, shared expert, residuo.
+   Test: layer 0 completo contro `hidden_p0.json` → `layer0` su tutte le
+   posizioni (coseno ≥ 0,995, C8) e contro il decode token per token (coseno
+   ≥ 0,9999). Leggi: la mappa; in 3.5 la parte MoE; C5.
+5. Attention su `T` righe (layer 3): norma, proiezioni di q, gate, k e v,
+   norme per testa, RoPE con le posizioni `start…start+T−1`, scrittura di `T`
+   righe nella cache KV, attention causale con `queryTokens: T`, gate,
+   proiezione d'uscita, residuo, MoE del passo 4. Test: layer 0–3 a blocchi di
+   16, `hidden_p0.json` → `layer3` su tutte le posizioni (coseno ≥ 0,995) e
+   contro il decode token per token (coseno ≥ 0,9999). Leggi: la mappa; in 3.5
+   la parte attention.
+6. Modello completo ed equivalenza: i 40 layer secondo la maschera, norma
+   finale e `lm_head` sull'ultima riga, `outputMode` (`PrefillSeed`),
+   `PrefillResult.newPosition`. Test per i 6 prompt, a blocchi di 16 e in un
+   blocco unico: stato dopo la norma finale su tutte le posizioni contro il
+   decode token per token (coseno ≥ 0,9999); logit dell'ultima posizione
+   contro il decode (coseno ≥ 0,9999, top-1 uguale) e, per p0 e p1, contro
+   `logits_last.json` (coseno ≥ 0,998, la deviazione approvata in S19). I test
+   di S19 restano verdi. Leggi: la mappa.
+7. Continuazione e snapshot secondo D6: `continuationPosition`,
+   `prepareForContinuation`, `rewind(to:)`; uno snapshot a fine prefill
+   (stato DeltaNet e conv, circa 63 MiB, al massimo 2: esce il più vecchio);
+   errore nuovo `rewindUnsupported` quando non c'è uno snapshot utilizzabile.
+   Test:
+   - il prefill di p0 seguito dal prefill in coda di altri token dà gli stessi
+     logit del prefill completo (coseno ≥ 0,9999);
+   - prefill di un prompt A, poi di un prompt B; `rewind` alla fine di A e
+     prefill della coda di A+X danno gli stessi logit del prefill completo di
+     A+X;
+   - `rewind` a una posizione senza snapshot lancia `rewindUnsupported`, e
+     dopo `reset` il runner funziona.
+
+   Leggi: la mappa; D6.
+8. Tempi e chiusura: token al secondo in prefill con 512 e 4096 token (blocco
+   di default di `PrefillRuntimeConfig`) e in decode, indicando il tipo di
+   build. Scrivili nel report, poi 2.9.
+
+**Fatto quando.** Test verdi, compresi quelli di S19; tempi nel report. Se un
+confronto diverge, segui 2.5 (layer per layer, poi grandezze interne).
 
 ### S21 — Generazione indipendente dal modello
 
