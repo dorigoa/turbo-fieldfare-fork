@@ -425,6 +425,99 @@ struct QwenHybridForwardRunnerTests {
                 "layer 0 hidden state min cosine \(minHiddenCosine) < 0.995 (C8)")
     }
 
+    /// S19 step 5: the full-attention mixer of layer 3 (after the linear
+    /// layers 0–2) must reproduce `layer3_internals.json` for all five
+    /// tokens of p0, and the hidden state after layer 3 must match
+    /// `hidden_p0.json → layer3` (C8: cosine ≥ 0.995 for each). The golden
+    /// `q_pre_norm` / `k_pre_norm` are q and k after the per-head norm and
+    /// before RoPE (make_model_golden.py), not before the norm.
+    @Test("the layer-3 attention matches the mlx-lm golden")
+    func layer3AttentionMatchesGolden() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let config = env.model.config
+        let hiddenSize = config.hiddenSize
+        let queryDim = config.numHeads * config.fullHeadDim
+        let kvDim = config.numKVHeads * config.fullHeadDim
+        let ids = try promptIDs("p0")
+        #expect(ids.count == 5)
+        #expect(config.fullAttentionLayerMask[3] == 1)
+
+        let logits = try #require(env.device.makeBuffer(
+            length: config.vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+
+        // FP16 row lengths of the tapped work buffers, by golden key.
+        let counts: [String: Int] = [
+            "x_norm": hiddenSize,
+            "q_pre_norm": queryDim,
+            "gate": queryDim,
+            "k_pre_norm": kvDim,
+            "v": kvDim,
+            "q_rope": queryDim,
+            "k_rope": kvDim,
+            "attn_out": queryDim,
+            "gated": queryDim,
+            "mixer_out": hiddenSize,
+            "layer_out": hiddenSize,
+        ]
+        let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+        var actual: [String: [[Float]]] = [:]
+        var hiddenRows: [[Float]] = []
+        // One prefix per token, as in steps 3–4: the work buffers hold the
+        // last token's row, and layer 3's attention reads the cache rows
+        // the earlier tokens of the prefix wrote.
+        for end in 0..<ids.count {
+            runner.reset()
+            runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                points: [.afterLayer(3)], rows: ids.count)
+            runner.debugInternalsLayer = 3
+            runner.debugStopAfterLayer = 3
+            for position in 0...end {
+                try await runner.produce(
+                    token: ids[position], position: position, into: logits)
+            }
+            let tapped = runner.tappedInternals
+            for (key, count) in counts {
+                guard let buffer = tapped[key] else {
+                    Issue.record("missing internal \(key) after prefix \(end)"); return
+                }
+                actual[key, default: []].append(
+                    Self.readFP16(buffer, byteOffset: 0, count: count))
+            }
+            let tappedHidden = try #require(runner.tappedHidden)
+            hiddenRows.append(Self.readFP16(tappedHidden, byteOffset: end * rowBytes,
+                                            count: hiddenSize))
+        }
+
+        for key in counts.keys.sorted() {
+            let (shape, goldenRows) = try golden("layer3_internals", key)
+            let rows = try #require(actual[key])
+            #expect(rows.count == shape[0], "\(key): tapped \(rows.count) rows, golden \(shape[0])")
+            let rowElements = goldenRows.count / shape[0]
+            var minCosine = 2.0
+            for row in rows.indices {
+                #expect(rows[row].count == rowElements,
+                        "\(key) row \(row): \(rows[row].count) values, golden \(rowElements)")
+                let expected = Array(goldenRows[(row * rowElements)..<(row + 1) * rowElements])
+                minCosine = min(minCosine, cosine(rows[row], expected))
+            }
+            print("S19 step 5 layer 3 \(key): min cosine \(minCosine)")
+            #expect(minCosine >= 0.995, "layer 3 \(key) min cosine \(minCosine) < 0.995 (C8)")
+        }
+
+        let (shape, layer3Golden) = try golden("hidden_p0", "layer3")
+        #expect(shape == [ids.count, hiddenSize])
+        var minHiddenCosine = 2.0
+        for row in 0..<ids.count {
+            let expected = Array(layer3Golden[(row * hiddenSize)..<(row + 1) * hiddenSize])
+            minHiddenCosine = min(minHiddenCosine, cosine(hiddenRows[row], expected))
+        }
+        print("S19 step 5 layer 3 hidden state: min cosine \(minHiddenCosine)")
+        #expect(minHiddenCosine >= 0.995,
+                "layer 3 hidden state min cosine \(minHiddenCosine) < 0.995 (C8)")
+    }
+
     private static func readFP16(_ buffer: MTLBuffer, byteOffset: Int, count: Int) -> [Float] {
         let raw = UnsafeRawBufferPointer(start: buffer.contents(), count: buffer.length)
         return (0..<count).map { i in

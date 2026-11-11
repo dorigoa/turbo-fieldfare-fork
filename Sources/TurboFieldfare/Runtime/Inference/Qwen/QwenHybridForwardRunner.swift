@@ -93,6 +93,15 @@ public final class QwenHybridForwardRunner: LogitProducer,
     private let gateBuffer: MTLBuffer        // FP16 [queryDim] attention output gate (split)
     private let attnKBuffer: MTLBuffer       // FP16 [kvDim] key (split, norm, RoPE in place)
     private let attnVBuffer: MTLBuffer       // FP16 [kvDim] value
+    /// q and k after the per-head RMSNorm, then RoPE in place (step 5), so
+    /// `qBuffer` / `attnKBuffer` keep the pre-norm values for the taps.
+    private let qNormedBuffer: MTLBuffer     // FP16 [queryDim]
+    private let kNormedBuffer: MTLBuffer     // FP16 [kvDim]
+    /// Test-only copies of q and k after the per-head norm and before RoPE:
+    /// the golden keys `q_pre_norm` / `k_pre_norm` hold exactly these
+    /// (make_model_golden.py records `q_norm(q)` / `k_norm(k)`).
+    private let qPreRopeTapBuffer: MTLBuffer // FP16 [queryDim]
+    private let kPreRopeTapBuffer: MTLBuffer // FP16 [kvDim]
     private let attnOutBuffer: MTLBuffer     // FP16 [queryDim] attention out (pre-gate)
     private let gatedBuffer: MTLBuffer       // FP16 [queryDim] attention out · gate
     /// The layer whose shared expert currently fills `sharedBlobBuffer`
@@ -238,6 +247,10 @@ public final class QwenHybridForwardRunner: LogitProducer,
         self.gateBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "gate")
         self.attnKBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "attnK")
         self.attnVBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "attnV")
+        self.qNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "qNormed")
+        self.kNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "kNormed")
+        self.qPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "qPreRopeTap")
+        self.kPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "kPreRopeTap")
         self.attnOutBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "attnOut")
         self.gatedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "gated")
     }
@@ -292,8 +305,10 @@ public final class QwenHybridForwardRunner: LogitProducer,
         for L in 0..<cfg.numLayers {
             if cfg.fullAttentionLayerMask[L] == 0 {
                 try runLinearLayer(L, in: commandBuffer)
-                try await runMoELayer(L, in: &commandBuffer)
+            } else {
+                try runAttentionLayer(L, position: position, in: commandBuffer)
             }
+            try await runMoELayer(L, in: &commandBuffer)
             recordHiddenTap(.afterLayer(L), in: commandBuffer)
             if let stop = debugStopAfterLayer, L == stop {
                 // Test-only: the tapped layer is the last executed, so skip
@@ -521,6 +536,169 @@ public final class QwenHybridForwardRunner: LogitProducer,
                 "gated_out": gatedOutBuffer,
                 "mixer_out": mixerBuffer,
                 "state_heads0to3": cache.deltaStateBuffer,
+            ])
+        }
+    }
+
+    /// One full-attention layer L of plan 3.5, token at `position`: input
+    /// RMSNorm, the 4-bit q (queries and output gate interleaved per head),
+    /// k and v projections, the split of queries and gate, the per-head
+    /// q/k RMSNorm, partial RoPE (first `partialRotaryFactor` of each head),
+    /// the K/V write at `position` in the hybrid cache, causal GQA attention
+    /// over positions [0, position], the sigmoid output gate, the 4-bit
+    /// o_proj and the residual add.
+    private func runAttentionLayer(_ L: Int, position: Int,
+                                   in commandBuffer: MTLCommandBuffer) throws {
+        let h = hiddenBuffer
+        let queryHeads = cfg.numHeads
+        let kvHeads = cfg.numKVHeads
+        let headDim = cfg.fullHeadDim
+        let epsilon = Float(hybrid.rmsNormEps)
+        let rotatedPairs = Int((Double(headDim) * cfg.partialRotaryFactor).rounded()) / 2
+
+        // x = RMSNorm(h; input_layernorm), plain mode (normWeightsShifted).
+        let inputNorm = try model.inputNorm(layer: L)
+        norms.encodeRow(
+            commandBuffer: commandBuffer,
+            x: h,
+            weight: inputNorm.buffer, weightOffset: Int(inputNorm.offset),
+            out: xNormBuffer,
+            d: UInt32(hiddenSize), rows: 1, eps: epsilon, mode: .plain)
+
+        // q_proj (queries + gate), k_proj, v_proj.
+        let qProj = try model.qProj(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: qProj.buffer, weightsOffset: Int(qProj.offset),
+            scales: qProj.buffer, scalesOffset: Int(qProj.scaleOffset),
+            biases: qProj.buffer, biasesOffset: Int(qProj.biasOffset),
+            x: xNormBuffer, y: qgBuffer,
+            m: UInt32(qgRows), n: UInt32(hiddenSize))
+        let kProj = try model.kProj(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: kProj.buffer, weightsOffset: Int(kProj.offset),
+            scales: kProj.buffer, scalesOffset: Int(kProj.scaleOffset),
+            biases: kProj.buffer, biasesOffset: Int(kProj.biasOffset),
+            x: xNormBuffer, y: attnKBuffer,
+            m: UInt32(kvDim), n: UInt32(hiddenSize))
+        let vProj = try model.vProj(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: vProj.buffer, weightsOffset: Int(vProj.offset),
+            scales: vProj.buffer, scalesOffset: Int(vProj.scaleOffset),
+            biases: vProj.buffer, biasesOffset: Int(vProj.biasOffset),
+            x: xNormBuffer, y: attnVBuffer,
+            m: UInt32(kvDim), n: UInt32(hiddenSize))
+
+        // Per head, q_proj rows are [query 256][gate 256]: split them.
+        attention.encodeSplitQG(
+            commandBuffer: commandBuffer,
+            qg: qgBuffer, q: qBuffer, gate: gateBuffer,
+            queryHeads: queryHeads, headDim: headDim, rows: 1)
+
+        // Per-head RMSNorm of q and k (plain mode: the weights carry the +1).
+        let qNorm = try model.qNorm(layer: L)
+        norms.encodePerHead(
+            commandBuffer: commandBuffer,
+            x: qBuffer,
+            weight: qNorm.buffer, weightOffset: Int(qNorm.offset),
+            out: qNormedBuffer,
+            headDim: UInt32(headDim), numHeads: queryHeads, rows: 1,
+            eps: epsilon, mode: .plain)
+        let kNorm = try model.kNorm(layer: L)
+        norms.encodePerHead(
+            commandBuffer: commandBuffer,
+            x: attnKBuffer,
+            weight: kNorm.buffer, weightOffset: Int(kNorm.offset),
+            out: kNormedBuffer,
+            headDim: UInt32(headDim), numHeads: kvHeads, rows: 1,
+            eps: epsilon, mode: .plain)
+
+        // Test-only: keep the normalized, not yet rotated q and k (golden
+        // `q_pre_norm` / `k_pre_norm`) before RoPE rewrites them in place.
+        if L == debugInternalsLayer, let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(from: qNormedBuffer, sourceOffset: 0,
+                      to: qPreRopeTapBuffer, destinationOffset: 0,
+                      size: qPreRopeTapBuffer.length)
+            blit.copy(from: kNormedBuffer, sourceOffset: 0,
+                      to: kPreRopeTapBuffer, destinationOffset: 0,
+                      size: kPreRopeTapBuffer.length)
+            blit.endEncoding()
+        }
+
+        // Partial RoPE in place, token at `position`.
+        attention.encodeRopePartial(
+            commandBuffer: commandBuffer,
+            data: qNormedBuffer, positionBase: UInt32(position),
+            headDim: headDim, numHeads: queryHeads, rows: 1,
+            rotatedPairs: rotatedPairs, theta: Float(cfg.ropeTheta))
+        attention.encodeRopePartial(
+            commandBuffer: commandBuffer,
+            data: kNormedBuffer, positionBase: UInt32(position),
+            headDim: headDim, numHeads: kvHeads, rows: 1,
+            rotatedPairs: rotatedPairs, theta: Float(cfg.ropeTheta))
+
+        // K/V into this layer's cache slice at `position`, then causal GQA
+        // attention over [0, position]. Strides in elements (D5 layout
+        // [position][kv head][headDim]).
+        guard let layerKV = cache.kvByteOffset(layer: L, position: 0) else {
+            preconditionFailure("attention layer \(L) has no KV slot")
+        }
+        let headStride = headDim
+        let posStride = kvHeads * headDim
+        attention.encodeKVWrite(
+            commandBuffer: commandBuffer,
+            k: kNormedBuffer, v: attnVBuffer,
+            kvK: cache.kBuffer, kvKOffset: layerKV,
+            kvV: cache.vBuffer, kvVOffset: layerKV,
+            rows: 1, kvHeads: kvHeads, headDim: headDim,
+            kvStart: UInt32(position),
+            posStride: posStride, headStride: headStride)
+        attention.encodeAttention(
+            commandBuffer: commandBuffer,
+            q: qNormedBuffer,
+            kvK: cache.kBuffer, kvKOffset: layerKV,
+            kvV: cache.vBuffer, kvVOffset: layerKV,
+            out: attnOutBuffer,
+            queryHeads: queryHeads, kvHeads: kvHeads, headDim: headDim,
+            queryTokens: 1, kvStart: UInt32(position),
+            posStride: posStride, headStride: headStride,
+            scale: 1.0 / sqrt(Float(headDim)))
+
+        // Output gate: attn · sigmoid(gate), then o_proj and the residual.
+        attention.encodeGate(
+            commandBuffer: commandBuffer,
+            attn: attnOutBuffer, gate: gateBuffer, out: gatedBuffer,
+            count: queryDim)
+        let oProj = try model.oProj(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: oProj.buffer, weightsOffset: Int(oProj.offset),
+            scales: oProj.buffer, scalesOffset: Int(oProj.scaleOffset),
+            biases: oProj.buffer, biasesOffset: Int(oProj.biasOffset),
+            x: gatedBuffer, y: mixerBuffer,
+            m: UInt32(hiddenSize), n: UInt32(queryDim))
+        deltaScan.encodeAdd(
+            commandBuffer: commandBuffer,
+            a: h, b: mixerBuffer, out: h, n: hiddenSize)
+
+        // Test-only internals of this layer under the C7 golden keys
+        // (layer3_internals.json); `layer_out` comes from the MoE block.
+        // `q_pre_norm` / `k_pre_norm` are the golden's names for q and k
+        // after the per-head norm and before RoPE.
+        if L == debugInternalsLayer {
+            recordInternals(layer: L, [
+                "x_norm": xNormBuffer,
+                "q_pre_norm": qPreRopeTapBuffer,
+                "gate": gateBuffer,
+                "k_pre_norm": kPreRopeTapBuffer,
+                "v": attnVBuffer,
+                "q_rope": qNormedBuffer,
+                "k_rope": kNormedBuffer,
+                "attn_out": attnOutBuffer,
+                "gated": gatedBuffer,
+                "mixer_out": mixerBuffer,
             ])
         }
     }
