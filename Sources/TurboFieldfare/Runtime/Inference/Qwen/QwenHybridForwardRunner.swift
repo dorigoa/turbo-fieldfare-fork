@@ -54,6 +54,10 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// S20 chunked prefill: the 4-bit MPP GEMM over the chunk's rows (map
     /// S20 "GEMM prefill"); the per-row GEMV is its fallback.
     let mpp4: MPPPrefillInt4QMM
+    /// S20 chunked prefill: the 8-bit MPP GEMM for the router over the
+    /// chunk's rows (map S20 "GEMM prefill"); the per-row GEMV is its
+    /// fallback (e.g. when the weight offset breaks the 4-byte alignment).
+    let mpp8: MPPPrefillInt8QMM
 
     /// S20 chunked prefill: dirty while a chunked prefill has advanced the
     /// cache without committing; `prefillChunked` rejects with the same
@@ -96,7 +100,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
     let sharedBlobBuffer: MTLBuffer
     let sharedActsBuffer: MTLBuffer  // FP16 [sharedInter] shared gate·up·SiLU
     let sharedOutBuffer: MTLBuffer   // FP16 [hiddenSize] shared down out
-    let sharedGateBuffer: MTLBuffer  // FP16 [1] shared-expert gate scalar
+    let sharedGateBuffer: MTLBuffer  // FP16 [maxT] shared-expert gate scalar (one per row)
     let qgBuffer: MTLBuffer          // FP16 [qgRows] q_proj out (queries + gate)
     let qBuffer: MTLBuffer           // FP16 [queryDim] query (split, norm, RoPE in place)
     let gateBuffer: MTLBuffer        // FP16 [queryDim] attention output gate (split)
@@ -207,6 +211,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
         // The `.control` variant serves the F16 GEMM path for every m (the
         // Apple10 variants are Gemma/Vision-only); map S20.
         self.mpp4 = MPPPrefillInt4QMM(context: context)
+        // The 8-bit GEMM has a single F16 threadgroup path (no Apple10
+        // variant); map S20 "GEMM prefill".
+        self.mpp8 = MPPPrefillInt8QMM(context: context)
 
         // The work buffers are row-major with the largest prefill chunk
         // (S20): `produce` uses row 0, `prefillChunked` the first T rows.
@@ -258,7 +265,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
             element: UInt8.self, name: "sharedBlob")
         self.sharedActsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.intermediateSize * maxT, element: Float16.self, name: "sharedActs")
         self.sharedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "sharedOut")
-        self.sharedGateBuffer = try makeWorkBuffer(device: context.device, elementCount: 1, element: Float16.self, name: "sharedGate")
+        self.sharedGateBuffer = try makeWorkBuffer(device: context.device, elementCount: maxT, element: Float16.self, name: "sharedGate")
         self.qgBuffer = try makeWorkBuffer(device: context.device, elementCount: qgRows * maxT, element: Float16.self, name: "qg")
         self.qBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "q")
         self.gateBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "gate")
@@ -906,7 +913,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// up, down; 4-bit affine) into `sharedBlobBuffer` at the blob's intra
     /// offsets. The blits are encoded on the command buffer, so they are
     /// ordered before the kernels that read the blob.
-    private func stageSharedExpert(layer L: Int, in commandBuffer: MTLCommandBuffer) throws {
+    /// Internal (not private) so the S20 chunked-prefill extension in
+    /// `QwenHybridForwardRunner+Prefill.swift` reuses the C5 staging.
+    internal func stageSharedExpert(layer L: Int, in commandBuffer: MTLCommandBuffer) throws {
         let offsets = QwenMoE.expertOffsets(
             hidden: hiddenSize, inter: cfg.moeIntermediateSize)
         let gate = try model.qwenSharedExpertGate(layer: L)
@@ -1003,8 +1012,9 @@ private func makeWorkBuffer<E>(device: MTLDevice, elementCount: Int,
 }
 
 /// Internal failures of the runner that the public error enums do not
-/// express.
-private enum QwenRunnerError: Error, CustomStringConvertible {
+/// express. Internal (not private) so the S20 chunked-prefill extension in
+/// `QwenHybridForwardRunner+Prefill.swift` can throw the same cases.
+enum QwenRunnerError: Error, CustomStringConvertible {
     case bufferAllocationFailed(name: String, bytes: Int)
     case commandBufferFailed
     case argumentBufferFailed(name: String)
