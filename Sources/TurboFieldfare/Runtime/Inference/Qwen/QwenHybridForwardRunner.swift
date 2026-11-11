@@ -3,13 +3,15 @@ import Metal
 
 /// Qwen 3.5-MoE token-at-a-time forward runner (S19).
 ///
-/// Step-2 skeleton: `produce` runs embedding → final RMSNorm → lm_head with
-/// no layers in between, so the logits probe the load path, the embedding
-/// table and the 4-bit GEMV rather than the model. Steps 3–6 insert the 40
-/// layers of plan 3.5 between the embedding and the final norm. Prefill v1
-/// feeds one token at a time: the same `produce` serves prompt and decode,
-/// and there is deliberately no `ChunkedPrefillRunner` conformance (the
-/// generator then prefills token by token, RawCompletion.swift:172).
+/// Step 3: `produce` runs the embedding, the linear (Gated DeltaNet) mixers
+/// of plan 3.5 for the layers whose `fullAttentionLayerMask` bit is 0, the
+/// final RMSNorm and the lm_head. The MoE block that follows every mixer
+/// (step 4) and the full-attention mixers (step 5) are still missing, so
+/// until step 6 the logits only probe the load path, the embedding table,
+/// the 4-bit GEMV and the linear mixers. Prefill v1 feeds one token at a
+/// time: the same `produce` serves prompt and decode, and there is
+/// deliberately no `ChunkedPrefillRunner` conformance (the generator then
+/// prefills token by token, RawCompletion.swift:172).
 ///
 /// `@unchecked Sendable` like `RealForwardRunner`: the Metal objects are
 /// thread-safe for encoding and the debug taps are test-only single-thread
@@ -22,7 +24,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
 
     private let model: Model
     private let ctx: MetalContext
-    private let cache: QwenHybridCache
+    /// Internal (not public) so the S19 tests can resolve the DeltaNet and
+    /// conv state byte offsets of the tapped layer.
+    internal let cache: QwenHybridCache
     private let cfg: ArchConfig
     private let hybrid: QwenHybridConfig
     public let maxContext: Int
@@ -57,7 +61,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     private let zBuffer: MTLBuffer           // FP16 [valueDim] in_proj_z out (DeltaNet)
     private let aBuffer: MTLBuffer           // FP16 [Hv] in_proj_a out (DeltaNet)
     private let bBuffer: MTLBuffer           // FP16 [Hv] in_proj_b out (DeltaNet)
-    private let convOutBuffer: MTLBuffer     // FP16 [qkvRows] conv+SiLU out; q/k/v split in place
+    private let convOutBuffer: MTLBuffer     // FP16 [qkvRows] conv+SiLU out (raw, pre-L2)
+    private let dnQBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd, scaled q (DeltaNet)
+    private let dnKBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd k (DeltaNet)
     private let betaBuffer: MTLBuffer        // FP32 [Hv] gates out
     private let decayBuffer: MTLBuffer       // FP32 [Hv] gates out
     private let coreOutBuffer: MTLBuffer     // FP16 [valueDim] DeltaNet scan out
@@ -108,6 +114,12 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// The layer whose internal quantities (C7 golden keys) the layer code
     /// records while it runs; `nil` in production.
     internal var debugInternalsLayer: Int?
+
+    /// Test-only (S19 steps 3–5): when set, the layer loop stops right after
+    /// this layer, before the remaining layers, the final norm and the
+    /// lm_head, so the tapped layer's work buffers survive for
+    /// `tappedInternals`. `produce` still advances the cache.
+    internal var debugStopAfterLayer: Int?
 
     /// Recorded hidden rows of the current generation, layout as above.
     internal private(set) var tappedHidden: MTLBuffer?
@@ -168,6 +180,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
         self.aBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float16.self, name: "a")
         self.bBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float16.self, name: "b")
         self.convOutBuffer = try makeWorkBuffer(device: context.device, elementCount: qkvRows, element: Float16.self, name: "convOut")
+        let dnQKDim = hybrid.linearNumKeyHeads * hybrid.linearKeyHeadDim
+        self.dnQBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim, element: Float16.self, name: "dnQ")
+        self.dnKBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim, element: Float16.self, name: "dnK")
         self.betaBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float32.self, name: "beta")
         self.decayBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float32.self, name: "decay")
         self.coreOutBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim, element: Float16.self, name: "coreOut")
@@ -244,9 +259,25 @@ public final class QwenHybridForwardRunner: LogitProducer,
             tokenId: UInt32(token), d: UInt32(hiddenSize), outScale: 1.0)
         recordHiddenTap(.afterEmbedding, in: commandBuffer)
 
-        // Steps 3–6: layers 0..<cfg.numLayers, linear (DeltaNet) or full
-        // attention per cfg.fullAttentionLayerMask, each followed by the
-        // MoE block; the residual stream stays in `hiddenBuffer`.
+        // Layers 0..<cfg.numLayers per cfg.fullAttentionLayerMask (3.5):
+        // linear (Gated DeltaNet) mixers run here (step 3); the MoE block
+        // that follows every mixer (step 4) and the full-attention mixers
+        // (step 5) are inserted at their mask positions in later steps. The
+        // residual stream stays in `hiddenBuffer` throughout.
+        for L in 0..<cfg.numLayers {
+            if cfg.fullAttentionLayerMask[L] == 0 {
+                try runLinearLayer(L, in: commandBuffer)
+            }
+            recordHiddenTap(.afterLayer(L), in: commandBuffer)
+            if let stop = debugStopAfterLayer, L == stop {
+                // Test-only: the tapped layer is the last executed, so skip
+                // the remaining layers, the final norm and the lm_head.
+                commandBuffer.commit()
+                await commandBuffer.completed()
+                cache.advance(by: 1)
+                return
+            }
+        }
 
         // Final RMSNorm; the checkpoint weights already carry the +1
         // (normWeightsShifted), so the plain `x̂ · w` mode (3.5).
@@ -283,6 +314,186 @@ public final class QwenHybridForwardRunner: LogitProducer,
         guard expectedPosition == cache.position else {
             throw PrefillError.prefillCursorMismatch(
                 "Qwen continuation expects position \(expectedPosition), the cache is at \(cache.position)")
+        }
+    }
+
+    // MARK: - Layers
+
+    /// One Gated DeltaNet (linear) layer L of plan 3.5: input RMSNorm, the
+    /// 4-bit qkv/z/a/b projections, causal conv + SiLU with the 3-tap FP32
+    /// state in the hybrid cache, per-head L2 on q and k, the 1/sqrt(keyDim)
+    /// scale on q, the per-value-head beta/decay gates, the in-place FP32
+    /// state scan, the gated per-head RMSNorm with silu(z), the 4-bit out
+    /// projection and the residual add. One token per call (T = 1 decode;
+    /// prefill v1 reuses the same path).
+    private func runLinearLayer(_ L: Int, in commandBuffer: MTLCommandBuffer) throws {
+        let h = hiddenBuffer
+        let keyHeads = hybrid.linearNumKeyHeads
+        let keyDim = hybrid.linearKeyHeadDim
+        let valueHeads = hybrid.linearNumValueHeads
+        let valueDim = valueHeads * hybrid.linearValueHeadDim
+        let qkvChannels = 2 * keyHeads * keyDim + valueDim
+        // Byte offsets of the q / k / v slices of the conv output (2 B each).
+        let qkBytes = keyHeads * keyDim * MemoryLayout<Float16>.size
+        let epsilon = Float(hybrid.rmsNormEps)
+
+        // x = RMSNorm(h; input_layernorm); the checkpoint weights already
+        // carry the +1 (normWeightsShifted), so the plain mode (3.5).
+        let inputNorm = try model.inputNorm(layer: L)
+        norms.encodeRow(
+            commandBuffer: commandBuffer,
+            x: h,
+            weight: inputNorm.buffer, weightOffset: Int(inputNorm.offset),
+            out: xNormBuffer,
+            d: UInt32(hiddenSize), rows: 1, eps: epsilon, mode: .plain)
+
+        // qkv / z / a / b projections (4-bit GEMV over the normalized row).
+        let inProjQKV = try model.qwenInProjQKV(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: inProjQKV.buffer, weightsOffset: Int(inProjQKV.offset),
+            scales: inProjQKV.buffer, scalesOffset: Int(inProjQKV.scaleOffset),
+            biases: inProjQKV.buffer, biasesOffset: Int(inProjQKV.biasOffset),
+            x: xNormBuffer, y: qkvBuffer,
+            m: UInt32(qkvChannels), n: UInt32(hiddenSize))
+        let inProjZ = try model.qwenInProjZ(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: inProjZ.buffer, weightsOffset: Int(inProjZ.offset),
+            scales: inProjZ.buffer, scalesOffset: Int(inProjZ.scaleOffset),
+            biases: inProjZ.buffer, biasesOffset: Int(inProjZ.biasOffset),
+            x: xNormBuffer, y: zBuffer,
+            m: UInt32(valueDim), n: UInt32(hiddenSize))
+        let inProjA = try model.qwenInProjA(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: inProjA.buffer, weightsOffset: Int(inProjA.offset),
+            scales: inProjA.buffer, scalesOffset: Int(inProjA.scaleOffset),
+            biases: inProjA.buffer, biasesOffset: Int(inProjA.biasOffset),
+            x: xNormBuffer, y: aBuffer,
+            m: UInt32(valueHeads), n: UInt32(hiddenSize))
+        let inProjB = try model.qwenInProjB(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: inProjB.buffer, weightsOffset: Int(inProjB.offset),
+            scales: inProjB.buffer, scalesOffset: Int(inProjB.scaleOffset),
+            biases: inProjB.buffer, biasesOffset: Int(inProjB.biasOffset),
+            x: xNormBuffer, y: bBuffer,
+            m: UInt32(valueHeads), n: UInt32(hiddenSize))
+
+        // Causal depthwise conv (width 4) + SiLU over the qkv channels; the
+        // 3-tap FP32 state lives in the hybrid cache and updates in place.
+        let conv = try model.qwenConv1D(layer: L)
+        guard let convOffset = cache.convStateByteOffset(layer: L) else {
+            preconditionFailure("linear layer \(L) has no conv state slot")
+        }
+        deltaPrep.encodeConvSilu(
+            commandBuffer: commandBuffer,
+            qkv: qkvBuffer,
+            convWeight: conv.buffer, weightOffset: Int(conv.offset),
+            stateIn: cache.convStateBuffer, stateInOffset: convOffset,
+            y: convOutBuffer,
+            stateOut: cache.convStateBuffer, stateOutOffset: convOffset,
+            channels: UInt32(qkvChannels), tokens: 1)
+
+        // Per-head L2 on q and k (into dedicated buffers, so `convOutBuffer`
+        // stays the raw conv+SiLU output for the `conv_out` tap), then the
+        // 1/sqrt(keyDim) scale folded into q only (3.5).
+        norms.encodeL2PerHead(
+            commandBuffer: commandBuffer,
+            x: convOutBuffer, xOffset: 0,
+            out: dnQBuffer, outOffset: 0,
+            headDim: UInt32(keyDim), numHeads: keyHeads, rows: 1, eps: epsilon)
+        norms.encodeL2PerHead(
+            commandBuffer: commandBuffer,
+            x: convOutBuffer, xOffset: qkBytes,
+            out: dnKBuffer, outOffset: 0,
+            headDim: UInt32(keyDim), numHeads: keyHeads, rows: 1, eps: epsilon)
+        deltaPrep.encodeScale(
+            commandBuffer: commandBuffer,
+            x: dnQBuffer, xOffset: 0, out: dnQBuffer, outOffset: 0,
+            scale: 1.0 / sqrt(Float(keyDim)),
+            n: keyHeads * keyDim)
+
+        // Per-value-head gates: beta = sigmoid(b), decay = exp(g) with
+        // g = -exp(A_log) * softplus(a + dt_bias).
+        let aLog = try model.qwenALog(layer: L)
+        let dtBias = try model.qwenDtBias(layer: L)
+        deltaPrep.encodeGates(
+            commandBuffer: commandBuffer,
+            a: aBuffer, b: bBuffer,
+            aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+            dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+            betaOut: betaBuffer, decayOut: decayBuffer,
+            heads: UInt32(valueHeads), tokens: 1)
+
+        // The recurrence: the FP32 [valueHeads][valueDim][keyDim] state of
+        // this layer updates in place; value head j reads key head j / 2.
+        guard let deltaOffset = cache.deltaStateByteOffset(layer: L) else {
+            preconditionFailure("linear layer \(L) has no DeltaNet state slot")
+        }
+        deltaScan.encodeScan(
+            commandBuffer: commandBuffer,
+            q: dnQBuffer, qOffset: 0,
+            k: dnKBuffer, kOffset: 0,
+            v: convOutBuffer, vOffset: 2 * qkBytes,
+            beta: betaBuffer, decay: decayBuffer,
+            state: cache.deltaStateBuffer, stateOffset: deltaOffset,
+            o: coreOutBuffer,
+            tokens: 1,
+            valueHeads: valueHeads, keyHeads: keyHeads,
+            keyDim: keyDim, valueDim: hybrid.linearValueHeadDim,
+            vRowStride: qkvChannels)
+
+        // Gated per-head RMSNorm: RMSNorm(o; linear_attn.norm, plain w) *
+        // silu(z), the shared weight across value heads (3.5).
+        let deltaNorm = try model.qwenDeltaNetNorm(layer: L)
+        norms.encodeGatedPerHead(
+            commandBuffer: commandBuffer,
+            o: coreOutBuffer, z: zBuffer,
+            weight: deltaNorm.buffer, weightOffset: Int(deltaNorm.offset),
+            out: gatedOutBuffer,
+            headDim: UInt32(hybrid.linearValueHeadDim),
+            numHeads: valueHeads, rows: 1, eps: epsilon)
+
+        // Out projection + residual.
+        let outProj = try model.qwenOutProj(layer: L)
+        gemv4.encode(
+            commandBuffer: commandBuffer,
+            weights: outProj.buffer, weightsOffset: Int(outProj.offset),
+            scales: outProj.buffer, scalesOffset: Int(outProj.scaleOffset),
+            biases: outProj.buffer, biasesOffset: Int(outProj.biasOffset),
+            x: gatedOutBuffer, y: mixerBuffer,
+            m: UInt32(hiddenSize), n: UInt32(valueDim))
+        deltaScan.encodeAdd(
+            commandBuffer: commandBuffer,
+            a: h, b: mixerBuffer, out: h, n: hiddenSize)
+
+        // Test-only internals of this layer under the C7 golden keys. `v` is
+        // a slice of the raw `convOutBuffer` (2 B/element) at 2*qkBytes; the
+        // test applies that offset itself. `q` and `k` are the L2'd
+        // (and, for q, scaled) values in their own buffers. `g` is not
+        // produced by the gates kernel: the test recomputes it from the
+        // tapped `a` and the A_log / dt_bias tensors (3.5). The state entry
+        // is the whole cache buffer; the test applies the layer's byte
+        // offset and transposes the [head][column][row] layout.
+        if L == debugInternalsLayer {
+            recordInternals(layer: L, [
+                "x_norm": xNormBuffer,
+                "qkv_raw": qkvBuffer,
+                "z": zBuffer,
+                "a": aBuffer,
+                "b": bBuffer,
+                "conv_out": convOutBuffer,
+                "q": dnQBuffer,
+                "k": dnKBuffer,
+                "v": convOutBuffer,
+                "beta": betaBuffer,
+                "core_out": coreOutBuffer,
+                "gated_out": gatedOutBuffer,
+                "mixer_out": mixerBuffer,
+                "state_heads0to3": cache.deltaStateBuffer,
+            ])
         }
     }
 
