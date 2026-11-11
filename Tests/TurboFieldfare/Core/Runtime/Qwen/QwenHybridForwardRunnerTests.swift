@@ -114,6 +114,78 @@ struct QwenHybridForwardRunnerTests {
         #expect(runner.tappedHiddenCount == 0)
     }
 
+    /// S20 step 2: the chunked prefill skeleton embeds all positions of p0
+    /// into the first rows of `hiddenBuffer`; the tapped embeddings must
+    /// match `hidden_p0.json → embedding` (cosine ≥ 0.9999) both in chunks
+    /// of 2 (2+2+1 spans, the last partial) and in a single chunk, with
+    /// `newPosition = 5` and the progress per completed span.
+    @Test("the chunked p0 prefill embeddings match the golden")
+    func p0ChunkedPrefillEmbeddingsMatchGolden() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let hiddenSize = env.model.config.hiddenSize
+        let vocabSize = env.model.config.vocabSize
+        let ids = try promptIDs("p0")
+        #expect(ids.count == 5)
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size, options: .storageModeShared))
+
+        for chunkTokens in [2, 5] {
+            runner.reset()
+            runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                points: [.afterEmbedding], rows: ids.count)
+            var progress: [Int] = []
+            let config = PrefillRuntimeConfig.defaultChunked
+                .replacingChunkTokens(chunkTokens)
+            let result = try await runner.prefillChunked(
+                tokens: ids[...],
+                startPosition: 0,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { progress.append($0) })
+            #expect(result.newPosition == ids.count)
+            #expect(result.seed == .logitsWritten)
+            #expect(progress == (chunkTokens == 2 ? [2, 4, 5] : [5]))
+            #expect(runner.continuationPosition == ids.count)
+            #expect(!runner.chunkCommitState.isDirty)
+
+            let tapped = try #require(runner.tappedHidden)
+            #expect(runner.tappedHiddenCount == ids.count)
+            let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+            let raw = UnsafeRawBufferPointer(start: tapped.contents(),
+                                             count: ids.count * rowBytes)
+            let (shape, goldenRows) = try golden("hidden_p0", "embedding")
+            #expect(shape == [ids.count, hiddenSize])
+
+            var minimumCosine = 2.0
+            for row in 0..<ids.count {
+                let actual = (0..<hiddenSize).map {
+                    Float(raw.load(fromByteOffset: row * rowBytes + $0 * MemoryLayout<Float16>.size,
+                                   as: Float16.self))
+                }
+                let expected = Array(
+                    goldenRows[(row * hiddenSize)..<(row + 1) * hiddenSize])
+                minimumCosine = min(minimumCosine, cosine(actual, expected))
+            }
+            print("S20 step 2 p0 chunked embedding (chunk \(chunkTokens)) minimum cosine: \(minimumCosine)")
+            #expect(minimumCosine >= 0.9999)
+        }
+
+        // An empty slice returns the start position without touching the
+        // cache.
+        runner.reset()
+        let empty = try await runner.prefillChunked(
+            tokens: ids[..<0],
+            startPosition: 0,
+            outputMode: .logits,
+            config: PrefillRuntimeConfig.defaultChunked,
+            into: logits) { _ in }
+        #expect(empty.newPosition == 0)
+        #expect(empty.seed == .logitsWritten)
+        #expect(runner.continuationPosition == 0)
+    }
+
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
     /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
     /// (C8: cosine ≥ 0.995 per internal quantity; the DeltaNet state uses

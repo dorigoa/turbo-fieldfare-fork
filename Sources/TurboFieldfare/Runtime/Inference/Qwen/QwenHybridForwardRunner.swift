@@ -1,16 +1,16 @@
 import Foundation
 import Metal
 
-/// Qwen 3.5-MoE token-at-a-time forward runner (S19).
+/// Qwen 3.5-MoE forward runner: token-at-a-time `produce` (S19) and
+/// chunked prefill (S20).
 ///
 /// `produce` runs the embedding, then each of the 40 layers of plan 3.5 —
 /// a Gated DeltaNet mixer where the `fullAttentionLayerMask` bit is 0, a
 /// gated full-attention mixer where it is 1, each followed by its MoE block
 /// (routed and shared expert) — then the final RMSNorm and the lm_head.
-/// Prefill v1 feeds one token at a time: the same `produce` serves prompt
-/// and decode, and there is deliberately no `ChunkedPrefillRunner`
-/// conformance (the generator then prefills token by token,
-/// RawCompletion.swift:172).
+/// `prefillChunked` (S20, QwenHybridForwardRunner+Prefill.swift) runs the
+/// same passes over `T` rows at a time, in the `PrefillRuntimeConfig`
+/// chunk size, and the work buffers below are row-major for that.
 ///
 /// `@unchecked Sendable` like `RealForwardRunner`: the Metal objects are
 /// thread-safe for encoding and the debug taps are test-only single-thread
@@ -21,90 +21,98 @@ public final class QwenHybridForwardRunner: LogitProducer,
 
     // MARK: - State
 
-    private let model: Model
-    private let ctx: MetalContext
+    /// Internal (not public) so the S20 prefill extension and the S19 tests
+    /// can drive the runner.
+    let model: Model
+    let ctx: MetalContext
     /// Internal (not public) so the S19 tests can resolve the DeltaNet and
     /// conv state byte offsets of the tapped layer.
     internal let cache: QwenHybridCache
-    private let cfg: ArchConfig
-    private let hybrid: QwenHybridConfig
+    let cfg: ArchConfig
+    let hybrid: QwenHybridConfig
     public let maxContext: Int
 
-    // Derived geometry (T = 1 work buffers below).
-    private let hiddenSize: Int
-    private let vocabSize: Int
-    private let valueDim: Int
-    private let qkvRows: Int
-    private let queryDim: Int
-    private let qgRows: Int
-    private let kvDim: Int
+    // Derived geometry (per row of the work buffers below).
+    let hiddenSize: Int
+    let vocabSize: Int
+    let valueDim: Int
+    let qkvRows: Int
+    let queryDim: Int
+    let qgRows: Int
+    let kvDim: Int
 
     // Kernels (D4 module list).
-    private let embedding: EmbedLookupInt4
-    private let gemv4: DequantInt4GEMV
-    private let gemv8: DequantInt8GEMV
-    private let norms: QwenNorms
-    private let deltaPrep: QwenDeltaNetPrep
-    private let deltaScan: QwenDeltaNetScan
-    private let attention: QwenAttention
-    private let router: QwenRouter
-    private let moe: QwenMoE
+    let embedding: EmbedLookupInt4
+    let gemv4: DequantInt4GEMV
+    let gemv8: DequantInt8GEMV
+    let norms: QwenNorms
+    let deltaPrep: QwenDeltaNetPrep
+    let deltaScan: QwenDeltaNetScan
+    let attention: QwenAttention
+    let router: QwenRouter
+    let moe: QwenMoE
 
-    // MARK: - Work buffers (one token, T = 1; map S19)
+    /// S20 chunked prefill: dirty while a chunked prefill has advanced the
+    /// cache without committing; `prefillChunked` rejects with the same
+    /// message as Gemma's `RealForwardRunner` until `reset()`.
+    var chunkCommitState = PrefillChunkCommitState()
+
+    // MARK: - Work buffers (row-major, maxT = PrefillRuntimeConfig.maxChunkTokens
+    // rows; `produce` uses row 0, chunked prefill the first T; map S19/S20)
 
     /// Residual stream row; holds the embedding output in step 2.
-    private let hiddenBuffer: MTLBuffer      // FP16 [hiddenSize]
-    private let normedBuffer: MTLBuffer      // FP16 [hiddenSize] final RMSNorm out
-    private let xNormBuffer: MTLBuffer       // FP16 [hiddenSize] per-layer input norm out
-    private let qkvBuffer: MTLBuffer         // FP16 [qkvRows] in_proj_qkv out (DeltaNet)
-    private let zBuffer: MTLBuffer           // FP16 [valueDim] in_proj_z out (DeltaNet)
-    private let aBuffer: MTLBuffer           // FP16 [Hv] in_proj_a out (DeltaNet)
-    private let bBuffer: MTLBuffer           // FP16 [Hv] in_proj_b out (DeltaNet)
-    private let convOutBuffer: MTLBuffer     // FP16 [qkvRows] conv+SiLU out (raw, pre-L2)
-    private let dnQBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd, scaled q (DeltaNet)
-    private let dnKBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd k (DeltaNet)
-    private let betaBuffer: MTLBuffer        // FP32 [Hv] gates out
-    private let decayBuffer: MTLBuffer       // FP32 [Hv] gates out
-    private let coreOutBuffer: MTLBuffer     // FP16 [valueDim] DeltaNet scan out
-    private let gatedOutBuffer: MTLBuffer    // FP16 [valueDim] DeltaNet gated norm out
-    private let mixerBuffer: MTLBuffer       // FP16 [hiddenSize] out_proj/o_proj out (pre-residual)
-    private let moeXBuffer: MTLBuffer        // FP16 [hiddenSize] post-attention norm out
-    private let routerLogitsBuffer: MTLBuffer // FP16 [numExperts] router GEMV out
-    private let routerTopIdsBuffer: MTLBuffer // UInt32 [topK] top-k ids
-    private let routerTopWeightsBuffer: MTLBuffer // FP32 [topK] recalibrated top-k weights
-    private let expertActsBuffer: MTLBuffer  // FP16 [topK·moeInter] routed gate·up·SiLU
-    private let routedOutBuffer: MTLBuffer   // FP16 [topK·hiddenSize] routed down out
+    let hiddenBuffer: MTLBuffer      // FP16 [hiddenSize]
+    let normedBuffer: MTLBuffer      // FP16 [hiddenSize] final RMSNorm out
+    let xNormBuffer: MTLBuffer       // FP16 [hiddenSize] per-layer input norm out
+    let qkvBuffer: MTLBuffer         // FP16 [qkvRows] in_proj_qkv out (DeltaNet)
+    let zBuffer: MTLBuffer           // FP16 [valueDim] in_proj_z out (DeltaNet)
+    let aBuffer: MTLBuffer           // FP16 [Hv] in_proj_a out (DeltaNet)
+    let bBuffer: MTLBuffer           // FP16 [Hv] in_proj_b out (DeltaNet)
+    let convOutBuffer: MTLBuffer     // FP16 [qkvRows] conv+SiLU out (raw, pre-L2)
+    let dnQBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd, scaled q (DeltaNet)
+    let dnKBuffer: MTLBuffer         // FP16 [Hk·dk] L2'd k (DeltaNet)
+    let betaBuffer: MTLBuffer        // FP32 [Hv] gates out
+    let decayBuffer: MTLBuffer       // FP32 [Hv] gates out
+    let coreOutBuffer: MTLBuffer     // FP16 [valueDim] DeltaNet scan out
+    let gatedOutBuffer: MTLBuffer    // FP16 [valueDim] DeltaNet gated norm out
+    let mixerBuffer: MTLBuffer       // FP16 [hiddenSize] out_proj/o_proj out (pre-residual)
+    let moeXBuffer: MTLBuffer        // FP16 [hiddenSize] post-attention norm out
+    let routerLogitsBuffer: MTLBuffer // FP16 [numExperts] router GEMV out
+    let routerTopIdsBuffer: MTLBuffer // UInt32 [topK] top-k ids
+    let routerTopWeightsBuffer: MTLBuffer // FP32 [topK] recalibrated top-k weights
+    let expertActsBuffer: MTLBuffer  // FP16 [topK·moeInter] routed gate·up·SiLU
+    let routedOutBuffer: MTLBuffer   // FP16 [topK·hiddenSize] routed down out
     /// Weighted sum of the routed expert outputs, Σ w · down (the golden
     /// `routed_out`; step 4).
-    private let routedSumBuffer: MTLBuffer   // FP16 [hiddenSize]
+    let routedSumBuffer: MTLBuffer   // FP16 [hiddenSize]
     /// Zero-filled inputs so `encodeResidual` can compute a bare weighted
     /// sum (step 4).
-    private let zeroHiddenBuffer: MTLBuffer  // FP16 [hiddenSize]
-    private let zeroScalarBuffer: MTLBuffer  // FP16 [1]
+    let zeroHiddenBuffer: MTLBuffer  // FP16 [hiddenSize]
+    let zeroScalarBuffer: MTLBuffer  // FP16 [1]
     /// C5 staging for the three resident shared-expert tensors (step 4).
-    private let sharedBlobBuffer: MTLBuffer
-    private let sharedActsBuffer: MTLBuffer  // FP16 [sharedInter] shared gate·up·SiLU
-    private let sharedOutBuffer: MTLBuffer   // FP16 [hiddenSize] shared down out
-    private let sharedGateBuffer: MTLBuffer  // FP16 [1] shared-expert gate scalar
-    private let qgBuffer: MTLBuffer          // FP16 [qgRows] q_proj out (queries + gate)
-    private let qBuffer: MTLBuffer           // FP16 [queryDim] query (split, norm, RoPE in place)
-    private let gateBuffer: MTLBuffer        // FP16 [queryDim] attention output gate (split)
-    private let attnKBuffer: MTLBuffer       // FP16 [kvDim] key (split, norm, RoPE in place)
-    private let attnVBuffer: MTLBuffer       // FP16 [kvDim] value
+    let sharedBlobBuffer: MTLBuffer
+    let sharedActsBuffer: MTLBuffer  // FP16 [sharedInter] shared gate·up·SiLU
+    let sharedOutBuffer: MTLBuffer   // FP16 [hiddenSize] shared down out
+    let sharedGateBuffer: MTLBuffer  // FP16 [1] shared-expert gate scalar
+    let qgBuffer: MTLBuffer          // FP16 [qgRows] q_proj out (queries + gate)
+    let qBuffer: MTLBuffer           // FP16 [queryDim] query (split, norm, RoPE in place)
+    let gateBuffer: MTLBuffer        // FP16 [queryDim] attention output gate (split)
+    let attnKBuffer: MTLBuffer       // FP16 [kvDim] key (split, norm, RoPE in place)
+    let attnVBuffer: MTLBuffer       // FP16 [kvDim] value
     /// q and k after the per-head RMSNorm, then RoPE in place (step 5), so
     /// `qBuffer` / `attnKBuffer` keep the pre-norm values for the taps.
-    private let qNormedBuffer: MTLBuffer     // FP16 [queryDim]
-    private let kNormedBuffer: MTLBuffer     // FP16 [kvDim]
+    let qNormedBuffer: MTLBuffer     // FP16 [queryDim]
+    let kNormedBuffer: MTLBuffer     // FP16 [kvDim]
     /// Test-only copies of q and k after the per-head norm and before RoPE:
     /// the golden keys `q_pre_norm` / `k_pre_norm` hold exactly these
     /// (make_model_golden.py records `q_norm(q)` / `k_norm(k)`).
-    private let qPreRopeTapBuffer: MTLBuffer // FP16 [queryDim]
-    private let kPreRopeTapBuffer: MTLBuffer // FP16 [kvDim]
-    private let attnOutBuffer: MTLBuffer     // FP16 [queryDim] attention out (pre-gate)
-    private let gatedBuffer: MTLBuffer       // FP16 [queryDim] attention out · gate
+    let qPreRopeTapBuffer: MTLBuffer // FP16 [queryDim]
+    let kPreRopeTapBuffer: MTLBuffer // FP16 [kvDim]
+    let attnOutBuffer: MTLBuffer     // FP16 [queryDim] attention out (pre-gate)
+    let gatedBuffer: MTLBuffer       // FP16 [queryDim] attention out · gate
     /// The layer whose shared expert currently fills `sharedBlobBuffer`
     /// (step 4); the blob is re-staged whenever the layer changes.
-    private var sharedBlobLayer: Int?
+    var sharedBlobLayer: Int?
 
     // MARK: - Debug taps (test-only, S19 steps 2–7)
 
@@ -194,69 +202,75 @@ public final class QwenHybridForwardRunner: LogitProducer,
         self.router = try QwenRouter(context: context)
         self.moe = try QwenMoE(context: context)
 
-        self.hiddenBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "hidden")
-        self.normedBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "normed")
-        self.xNormBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "xNorm")
-        self.qkvBuffer = try makeWorkBuffer(device: context.device, elementCount: qkvRows, element: Float16.self, name: "qkv")
-        self.zBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim, element: Float16.self, name: "z")
-        self.aBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float16.self, name: "a")
-        self.bBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float16.self, name: "b")
-        self.convOutBuffer = try makeWorkBuffer(device: context.device, elementCount: qkvRows, element: Float16.self, name: "convOut")
+        // The work buffers are row-major with the largest prefill chunk
+        // (S20): `produce` uses row 0, `prefillChunked` the first T rows.
+        let maxT = PrefillRuntimeConfig.maxChunkTokens
+        self.hiddenBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "hidden")
+        self.normedBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "normed")
+        self.xNormBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "xNorm")
+        self.qkvBuffer = try makeWorkBuffer(device: context.device, elementCount: qkvRows * maxT, element: Float16.self, name: "qkv")
+        self.zBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim * maxT, element: Float16.self, name: "z")
+        self.aBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads * maxT, element: Float16.self, name: "a")
+        self.bBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads * maxT, element: Float16.self, name: "b")
+        self.convOutBuffer = try makeWorkBuffer(device: context.device, elementCount: qkvRows * maxT, element: Float16.self, name: "convOut")
         let dnQKDim = hybrid.linearNumKeyHeads * hybrid.linearKeyHeadDim
-        self.dnQBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim, element: Float16.self, name: "dnQ")
-        self.dnKBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim, element: Float16.self, name: "dnK")
-        self.betaBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float32.self, name: "beta")
-        self.decayBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads, element: Float32.self, name: "decay")
-        self.coreOutBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim, element: Float16.self, name: "coreOut")
-        self.gatedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim, element: Float16.self, name: "gatedOut")
-        self.mixerBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "mixer")
-        self.moeXBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "moeX")
-        self.routerLogitsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.numExperts, element: Float16.self, name: "routerLogits")
-        self.routerTopIdsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.topKExperts,
+        self.dnQBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim * maxT, element: Float16.self, name: "dnQ")
+        self.dnKBuffer = try makeWorkBuffer(device: context.device, elementCount: dnQKDim * maxT, element: Float16.self, name: "dnK")
+        self.betaBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads * maxT, element: Float32.self, name: "beta")
+        self.decayBuffer = try makeWorkBuffer(device: context.device, elementCount: hybrid.linearNumValueHeads * maxT, element: Float32.self, name: "decay")
+        self.coreOutBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim * maxT, element: Float16.self, name: "coreOut")
+        self.gatedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: valueDim * maxT, element: Float16.self, name: "gatedOut")
+        self.mixerBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "mixer")
+        self.moeXBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "moeX")
+        self.routerLogitsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.numExperts * maxT, element: Float16.self, name: "routerLogits")
+        self.routerTopIdsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.topKExperts * maxT,
             element: UInt32.self, name: "routerTopIds")
-        self.routerTopWeightsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.topKExperts, element: Float32.self, name: "routerTopWeights")
+        self.routerTopWeightsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.topKExperts * maxT, element: Float32.self, name: "routerTopWeights")
         self.expertActsBuffer = try makeWorkBuffer(
-            device: context.device, elementCount: cfg.topKExperts * cfg.moeIntermediateSize,
+            device: context.device, elementCount: cfg.topKExperts * cfg.moeIntermediateSize * maxT,
             element: Float16.self, name: "expertActs")
         self.routedOutBuffer = try makeWorkBuffer(
-            device: context.device, elementCount: cfg.topKExperts * hiddenSize,
+            device: context.device, elementCount: cfg.topKExperts * hiddenSize * maxT,
             element: Float16.self, name: "routedOut")
         self.routedSumBuffer = try makeWorkBuffer(
-            device: context.device, elementCount: hiddenSize,
+            device: context.device, elementCount: hiddenSize * maxT,
             element: Float16.self, name: "routedSum")
         self.zeroHiddenBuffer = try makeWorkBuffer(
-            device: context.device, elementCount: hiddenSize,
+            device: context.device, elementCount: hiddenSize * maxT,
             element: Float16.self, name: "zeroHidden")
         self.zeroScalarBuffer = try makeWorkBuffer(
             device: context.device, elementCount: 1,
             element: Float16.self, name: "zeroScalar")
         memset(self.zeroHiddenBuffer.contents(), 0, self.zeroHiddenBuffer.length)
         memset(self.zeroScalarBuffer.contents(), 0, self.zeroScalarBuffer.length)
+        // The shared-expert weight blob is not per-token: one blob serves
+        // every row of the chunk.
         self.sharedBlobBuffer = try makeWorkBuffer(
             device: context.device,
             elementCount: QwenMoE.expertBlobBytes(
                 hidden: hiddenSize, inter: cfg.intermediateSize),
             element: UInt8.self, name: "sharedBlob")
-        self.sharedActsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.intermediateSize, element: Float16.self, name: "sharedActs")
-        self.sharedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize, element: Float16.self, name: "sharedOut")
+        self.sharedActsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.intermediateSize * maxT, element: Float16.self, name: "sharedActs")
+        self.sharedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "sharedOut")
         self.sharedGateBuffer = try makeWorkBuffer(device: context.device, elementCount: 1, element: Float16.self, name: "sharedGate")
-        self.qgBuffer = try makeWorkBuffer(device: context.device, elementCount: qgRows, element: Float16.self, name: "qg")
-        self.qBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "q")
-        self.gateBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "gate")
-        self.attnKBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "attnK")
-        self.attnVBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "attnV")
-        self.qNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "qNormed")
-        self.kNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "kNormed")
-        self.qPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "qPreRopeTap")
-        self.kPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim, element: Float16.self, name: "kPreRopeTap")
-        self.attnOutBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "attnOut")
-        self.gatedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim, element: Float16.self, name: "gated")
+        self.qgBuffer = try makeWorkBuffer(device: context.device, elementCount: qgRows * maxT, element: Float16.self, name: "qg")
+        self.qBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "q")
+        self.gateBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "gate")
+        self.attnKBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim * maxT, element: Float16.self, name: "attnK")
+        self.attnVBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim * maxT, element: Float16.self, name: "attnV")
+        self.qNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "qNormed")
+        self.kNormedBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim * maxT, element: Float16.self, name: "kNormed")
+        self.qPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "qPreRopeTap")
+        self.kPreRopeTapBuffer = try makeWorkBuffer(device: context.device, elementCount: kvDim * maxT, element: Float16.self, name: "kPreRopeTap")
+        self.attnOutBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "attnOut")
+        self.gatedBuffer = try makeWorkBuffer(device: context.device, elementCount: queryDim * maxT, element: Float16.self, name: "gated")
     }
 
     // MARK: - LogitProducer
 
     public func reset() {
         cache.reset()
+        chunkCommitState.reset()
         tappedHidden = nil
         tappedHiddenCount = 0
         tappedInternals = [:]
@@ -917,7 +931,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
     }
 
     /// A fresh command buffer on the shared queue.
-    private func makeCommandBuffer() throws -> MTLCommandBuffer {
+    func makeCommandBuffer() throws -> MTLCommandBuffer {
         guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
             throw QwenRunnerError.commandBufferFailed
         }
@@ -930,10 +944,14 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// state is the one at `point`, whatever the later layers do to the work
     /// buffers. Runs while encoding; the test reads `tappedHidden` after the
     /// command buffer completes.
-    private func recordHiddenTap(_ point: HiddenTapPoint, in commandBuffer: MTLCommandBuffer) {
+    /// `rows` consecutive rows (a `produce` token or a prefill chunk) are
+    /// blit from the head of the source buffer, whose first `rows` rows hold
+    /// them row-major.
+    func recordHiddenTap(_ point: HiddenTapPoint, rows: Int = 1,
+                         in commandBuffer: MTLCommandBuffer) {
         guard let tap = debugHiddenTap,
               let pointIndex = tap.points.firstIndex(of: point),
-              tappedHiddenCount < tap.rows else { return }
+              tappedHiddenCount + rows <= tap.rows else { return }
         let rowBytes = hiddenSize * MemoryLayout<Float16>.size
         let source: MTLBuffer
         switch point {
@@ -954,16 +972,18 @@ public final class QwenHybridForwardRunner: LogitProducer,
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
         blit.copy(from: source, sourceOffset: 0,
                   to: destination, destinationOffset: offset,
-                  size: rowBytes)
+                  size: rows * rowBytes)
         blit.endEncoding()
     }
 
-    /// Closes the current token's tap row: every point of this token wrote
-    /// row `tappedHiddenCount`, the next token writes the next row. Called
-    /// once per `produce`, so taps with several points stay aligned.
-    private func finishHiddenTapRow() {
-        guard let tap = debugHiddenTap, tappedHiddenCount < tap.rows else { return }
-        tappedHiddenCount += 1
+    /// Closes the current rows' tap rows: every point wrote rows from
+    /// `tappedHiddenCount`, the next call writes the following rows. Called
+    /// once per `produce` (one row) and once per prefill span (`rows`), so
+    /// taps with several points stay aligned.
+    func finishHiddenTapRow(count: Int = 1) {
+        guard let tap = debugHiddenTap,
+              tappedHiddenCount + count <= tap.rows else { return }
+        tappedHiddenCount += count
     }
 }
 
