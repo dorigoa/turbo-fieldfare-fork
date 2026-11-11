@@ -3,12 +3,10 @@ import Metal
 
 /// Qwen 3.5-MoE token-at-a-time forward runner (S19).
 ///
-/// Step 4: `produce` runs the embedding, the linear (Gated DeltaNet)
-/// mixers of plan 3.5 for the layers whose `fullAttentionLayerMask` bit is
-/// 0, each followed by its MoE block (routed and shared expert), the final
-/// RMSNorm and the lm_head. The full-attention mixers (step 5) are still
-/// missing, so until step 6 the logits only probe the load path, the
-/// embedding table, the 4-bit GEMV, the linear mixers and the MoE blocks.
+/// `produce` runs the embedding, then each of the 40 layers of plan 3.5 —
+/// a Gated DeltaNet mixer where the `fullAttentionLayerMask` bit is 0, a
+/// gated full-attention mixer where it is 1, each followed by its MoE block
+/// (routed and shared expert) — then the final RMSNorm and the lm_head.
 /// Prefill v1 feeds one token at a time: the same `produce` serves prompt
 /// and decode, and there is deliberately no `ChunkedPrefillRunner`
 /// conformance (the generator then prefills token by token,
@@ -264,8 +262,8 @@ public final class QwenHybridForwardRunner: LogitProducer,
         tappedInternals = [:]
     }
 
-    /// Runs one token at `position`: embedding → (steps 3–6: layers 0..39
-    /// per `fullAttentionLayerMask`) → final RMSNorm → lm_head GEMV, leaving
+    /// Runs one token at `position`: embedding → layers 0..39 per
+    /// `fullAttentionLayerMask` → final RMSNorm → lm_head GEMV, leaving
     /// FP16 logits in `logits`. One token per call is also prefill v1.
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
         guard position >= 0 else {
@@ -297,11 +295,8 @@ public final class QwenHybridForwardRunner: LogitProducer,
         recordHiddenTap(.afterEmbedding, in: commandBuffer)
 
         // Layers 0..<cfg.numLayers per cfg.fullAttentionLayerMask (3.5):
-        // each linear (Gated DeltaNet) mixer (step 3) is followed by its
-        // MoE block (step 4); the full-attention mixers (step 5) are
-        // inserted at their mask positions in a later step, with their MoE
-        // in the same place. The residual stream stays in `hiddenBuffer`
-        // throughout.
+        // a linear (Gated DeltaNet) or full-attention mixer, then the MoE
+        // block. The residual stream stays in `hiddenBuffer` throughout.
         for L in 0..<cfg.numLayers {
             if cfg.fullAttentionLayerMask[L] == 0 {
                 try runLinearLayer(L, in: commandBuffer)
