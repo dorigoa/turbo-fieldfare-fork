@@ -1,6 +1,15 @@
 import Foundation
 import Metal
 
+/// Errors for the Qwen prefix reuse (D6). `PrefillError` is Gemma's and is
+/// not modified, so the runner throws its own type instead.
+public enum QwenRewindError: Error, Equatable, Sendable {
+    /// No prefill snapshot at the requested position (D6): the DeltaNet
+    /// state cannot be rewound anywhere else, so the caller re-prefills
+    /// from position 0.
+    case rewindUnsupported(position: Int)
+}
+
 /// Qwen 3.5-MoE forward runner: token-at-a-time `produce` (S19) and
 /// chunked prefill (S20).
 ///
@@ -63,6 +72,13 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// cache without committing; `prefillChunked` rejects with the same
     /// message as Gemma's `RealForwardRunner` until `reset()`.
     var chunkCommitState = PrefillChunkCommitState()
+
+    /// D6 prefix reuse: the DeltaNet + conv state snapshots taken at the
+    /// end of chunked prefills, oldest first, at most two (the oldest is
+    /// evicted). A snapshot only addresses KV that stays intact until a
+    /// prefill overwrites it, so `reset()` — which restarts the KV at
+    /// position 0 — clears the list.
+    var prefixSnapshots: [QwenHybridCache.Snapshot] = []
 
     // MARK: - Work buffers (row-major, maxT = PrefillRuntimeConfig.maxChunkTokens
     // rows; `produce` uses row 0, chunked prefill the first T; map S19/S20)
@@ -284,6 +300,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     public func reset() {
         cache.reset()
         chunkCommitState.reset()
+        // The KV is back at position 0, so a prefill from 0 will overwrite
+        // the ranges the snapshots address (D6).
+        prefixSnapshots = []
         tappedHidden = nil
         tappedHiddenCount = 0
         tappedInternals = [:]
@@ -379,6 +398,35 @@ public final class QwenHybridForwardRunner: LogitProducer,
         guard expectedPosition == cache.position else {
             throw PrefillError.prefillCursorMismatch(
                 "Qwen continuation expects position \(expectedPosition), the cache is at \(cache.position)")
+        }
+    }
+
+    /// D6 prefix reuse: restore the runner to the end of a previously
+    /// prefilled prompt. Each finished `prefillChunked` saves one snapshot
+    /// of the DeltaNet + conv state at its end (at most two, the oldest
+    /// evicted). Rewinding to one of those positions puts the state back and
+    /// truncates the KV tail there, so the caller can continue from it; any
+    /// other target throws `QwenRewindError.rewindUnsupported` and the
+    /// caller re-prefills from position 0.
+    public func rewind(to position: Int) throws {
+        guard let snapshot = prefixSnapshots.first(where: { $0.position == position }) else {
+            throw QwenRewindError.rewindUnsupported(position: position)
+        }
+        try cache.restore(snapshot)
+        // Legal after `restore`: the state position equals the target.
+        try cache.truncate(to: position)
+        // Snapshots ahead of the new tail address KV the truncation dropped,
+        // so they are unusable until prefilled again.
+        prefixSnapshots.removeAll { $0.position > position }
+    }
+
+    /// D6: copy the DeltaNet + conv state (~63 MiB) at the end of a chunked
+    /// prefill. The KV is never copied; the snapshot addresses it in place
+    /// and stays valid until that range is overwritten.
+    func savePrefixSnapshot() {
+        prefixSnapshots.append(cache.snapshot())
+        if prefixSnapshots.count > 2 {
+            prefixSnapshots.removeFirst(prefixSnapshots.count - 2)
         }
     }
 

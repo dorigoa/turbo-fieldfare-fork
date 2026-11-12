@@ -696,6 +696,155 @@ struct QwenHybridForwardRunnerTests {
         }
     }
 
+    /// S20 step 7 (D6): a chunked prefill can continue at its tail.
+    /// Prefilling the first two tokens of p0 and then the rest must give
+    /// the same last-position logits as the full chunked prefill of p0
+    /// (chunks of 4, so the full prefill spans two chunks; cosine ≥ 0.9999,
+    /// chunked-vs-chunked, where the GEMM/GEMV gap of step 6 does not
+    /// apply).
+    @Test("the chunked p0 prefill continuation matches the full prefill")
+    func chunkedPrefillContinuationMatchesFullPrefill() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let vocabSize = env.model.config.vocabSize
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+        let ids = try promptIDs("p0")
+        let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(4)
+        func prefill(_ tokens: ArraySlice<Int32>, _ startPosition: Int) async throws -> PrefillResult {
+            try await runner.prefillChunked(
+                tokens: tokens,
+                startPosition: startPosition,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { _ in })
+        }
+
+        // Reference: the full chunked prefill of p0.
+        runner.reset()
+        let full = try await prefill(ids[...], 0)
+        let fullLogits = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+        #expect(full.newPosition == ids.count)
+
+        // Head prefill, then the tail continuation at its end (D6).
+        runner.reset()
+        let head = try await prefill(ids[0..<2], 0)
+        #expect(head.newPosition == 2)
+        #expect(runner.continuationPosition == 2)
+        try runner.prepareForContinuation(expectedPosition: 2)
+        let tail = try await prefill(ids[2...], 2)
+        #expect(tail.newPosition == ids.count)
+        #expect(!runner.chunkCommitState.isDirty)
+        let tailLogits = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+        let cosine = cosine(tailLogits, fullLogits)
+        print("S20 step 7 p0 continuation vs full prefill last-logits cosine: \(cosine)")
+        #expect(cosine >= 0.9999,
+                "p0 continuation last-logits cosine \(cosine) < 0.9999")
+    }
+
+    /// S20 step 7 (D6): prefix reuse through a snapshot. Prefill prompt A
+    /// (p0), then prompt B's tokens (p1) at the tail: the runner now holds
+    /// a snapshot at the end of each. Rewinding to the end of A and
+    /// prefilling B again at the tail must give the same last-position
+    /// logits as the full chunked prefill of A+B from a clean cache
+    /// (chunks of 4; cosine ≥ 0.9999, chunked-vs-chunked).
+    @Test("the chunked prefill rewinds to a prompt snapshot and reuses the prefix")
+    func chunkedPrefillRewindReusesPrefix() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let vocabSize = env.model.config.vocabSize
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+        let a = try promptIDs("p0")
+        let b = try promptIDs("p1")
+        let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(4)
+        func prefill(_ tokens: ArraySlice<Int32>, _ startPosition: Int) async throws -> PrefillResult {
+            try await runner.prefillChunked(
+                tokens: tokens,
+                startPosition: startPosition,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { _ in })
+        }
+
+        // Prefill A, then B at the tail: the snapshot list holds the end
+        // of each (D6, at most two).
+        runner.reset()
+        let endA = try await prefill(a[...], 0)
+        #expect(endA.newPosition == a.count)
+        let endB = try await prefill(b[...], a.count)
+        #expect(endB.newPosition == a.count + b.count)
+
+        // Rewind to the end of A and re-prefill B at the tail.
+        try runner.rewind(to: a.count)
+        #expect(runner.continuationPosition == a.count)
+        try runner.prepareForContinuation(expectedPosition: a.count)
+        let reused = try await prefill(b[...], a.count)
+        #expect(reused.newPosition == a.count + b.count)
+        let reusedLogits = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+
+        // Reference: the full chunked prefill of A+B from a clean cache.
+        runner.reset()
+        let full = try await prefill((a + b)[...], 0)
+        #expect(full.newPosition == a.count + b.count)
+        let fullLogits = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+        let cosine = cosine(reusedLogits, fullLogits)
+        print("S20 step 7 A+B rewind reuse vs full A+B prefill last-logits cosine: \(cosine)")
+        #expect(cosine >= 0.9999,
+                "A+B rewind reuse last-logits cosine \(cosine) < 0.9999")
+    }
+
+    /// S20 step 7 (D6): the DeltaNet state cannot be rewound to a position
+    /// without a prefill snapshot, so `rewind` throws `rewindUnsupported`.
+    /// The saved snapshot position is still supported, and after `reset`
+    /// the snapshot is gone and the runner works from position 0 again.
+    @Test("the chunked prefill rejects an unsupported rewind and resets")
+    func chunkedPrefillRewindUnsupportedAndReset() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let vocabSize = env.model.config.vocabSize
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+        let ids = try promptIDs("p0")
+        let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(4)
+        func prefill(_ tokens: ArraySlice<Int32>, _ startPosition: Int) async throws -> PrefillResult {
+            try await runner.prefillChunked(
+                tokens: tokens,
+                startPosition: startPosition,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { _ in })
+        }
+
+        runner.reset()
+        let end = try await prefill(ids[...], 0)
+        #expect(end.newPosition == ids.count)
+
+        // Only the end of the prompt has a snapshot: position 2 does not.
+        do {
+            try runner.rewind(to: 2)
+            Issue.record("rewind(to: 2) must throw rewindUnsupported")
+        } catch let error as QwenRewindError {
+            #expect(error == .rewindUnsupported(position: 2))
+        }
+
+        // The saved snapshot position is supported; `reset` clears it and
+        // the runner works from position 0 again.
+        try runner.rewind(to: ids.count)
+        #expect(runner.continuationPosition == ids.count)
+        runner.reset()
+        #expect(runner.continuationPosition == 0)
+        let again = try await prefill(ids[...], 0)
+        #expect(again.newPosition == ids.count)
+        #expect(!runner.chunkCommitState.isDirty)
+    }
+
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
     /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
     /// (C8: cosine ≥ 0.995 per internal quantity; the DeltaNet state uses

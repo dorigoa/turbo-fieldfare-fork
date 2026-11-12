@@ -61,6 +61,10 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                                       into: logits)
             onProgress(span.completedCount)
         }
+        // D6: every finished prompt prefill leaves one snapshot of the
+        // DeltaNet + conv state at its end, so an exact extension of it can
+        // rewind there and continue instead of re-prefilling.
+        savePrefixSnapshot()
         chunkCommitState.markCommitted()
         return PrefillResult(newPosition: startPosition + tokens.count,
                              seed: .logitsWritten)
