@@ -845,6 +845,71 @@ struct QwenHybridForwardRunnerTests {
         #expect(!runner.chunkCommitState.isDirty)
     }
 
+    /// S20 step 8: prefill throughput with the default chunk (128 tokens:
+    /// 4 and 32 spans) on 512 and 4096 tokens, and token-at-a-time decode
+    /// after the 4096-token prefill. The runner uses `maxContext: 4224` so
+    /// the 4096-token prefill fits. The rates go to the report (2.9); they
+    /// are measurements, not golden bounds.
+    @Test("the prefill and decode throughput are measured for the report")
+    func prefillAndDecodeThroughputAreMeasured() async throws {
+        let env = try makeEnvironment(maxContext: 4224)
+        let runner = env.runner
+        let vocabSize = env.model.config.vocabSize
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+        let config = PrefillRuntimeConfig.defaultChunked
+        #expect(config.chunkTokens == 128)
+        func prefill(_ count: Int) async throws -> (tokens: Int, duration: Duration) {
+            let tokens = Array(0..<count).map { Int32($0) }
+            let clock = ContinuousClock()
+            let start = clock.now
+            let result = try await runner.prefillChunked(
+                tokens: tokens[...],
+                startPosition: 0,
+                outputMode: .logits,
+                config: config,
+                into: logits,
+                onProgress: { _ in })
+            let duration = clock.now - start
+            #expect(result.newPosition == count)
+            return (count, duration)
+        }
+
+        // Warm-up (one default span) before the timed runs.
+        runner.reset()
+        let warmup = try await prefill(128)
+        print("S20 step 8 warm-up prefill \(warmup.tokens) tokens: \(warmup.duration)")
+
+        for count in [512, 4096] {
+            runner.reset()
+            let run = try await prefill(count)
+            let seconds = Double(run.duration / .seconds(1))
+            let rate = Double(run.tokens) / seconds
+            print("S20 step 8 prefill \(run.tokens) tokens "
+                + "(chunk \(config.chunkTokens), \(run.tokens / config.chunkTokens) spans): "
+                + "\(seconds)s = \(rate) tokens/s")
+            #expect(rate > 0)
+        }
+
+        // Decode token per token after the 4096-token prefill.
+        let decodeCount = 128
+        let clock = ContinuousClock()
+        let decodeStart = clock.now
+        for offset in 0..<decodeCount {
+            let id = Int32(4096 + offset)
+            try await runner.produce(
+                token: id, position: 4096 + offset, into: logits)
+        }
+        let decodeDuration = clock.now - decodeStart
+        let decodeSeconds = Double(decodeDuration / .seconds(1))
+        let decodeRate = Double(decodeCount) / decodeSeconds
+        #expect(runner.continuationPosition == 4096 + decodeCount)
+        print("S20 step 8 decode \(decodeCount) tokens after the 4096-token prefill: "
+            + "\(decodeSeconds)s = \(decodeRate) tokens/s")
+        #expect(decodeRate > 0)
+    }
+
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
     /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
     /// (C8: cosine ≥ 0.995 per internal quantity; the DeltaNet state uses
