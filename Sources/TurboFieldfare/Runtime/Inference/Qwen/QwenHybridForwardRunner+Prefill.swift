@@ -4,10 +4,10 @@ import Metal
 /// S20: chunked prefill for the Qwen hybrid runner.
 ///
 /// `prefillChunked` runs the forward pass over `T` rows at a time, in the
-/// `PrefillRuntimeConfig` chunk size: the embedding of the chunk's tokens
-/// (this step) and, per `fullAttentionLayerMask`, the Gated DeltaNet mixer
-/// or the gated full-attention mixer, each followed by its MoE block, then
-/// the final RMSNorm and the lm_head of the last row (later steps). The
+/// `PrefillRuntimeConfig` chunk size: the embedding of the chunk's tokens,
+/// then, per `fullAttentionLayerMask`, the Gated DeltaNet mixer or the
+/// gated full-attention mixer, each followed by its MoE block, then the
+/// final RMSNorm and the lm_head of the last row. The
 /// work buffers are row-major with `PrefillRuntimeConfig.maxChunkTokens`
 /// rows; the first `T` rows carry the chunk. `produce` keeps using row 0,
 /// so prompt and decode share the buffers.
@@ -71,7 +71,7 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
     /// the Gated DeltaNet mixer on those rows (step 3) or the gated
     /// full-attention mixer (step 5), each followed by the MoE block
     /// (step 4), and the final RMSNorm with the lm_head of the last row
-    /// into `logits` when `writeFinalHead` (step 6).
+    /// into `logits` when `writeFinalHead`.
     private func runPrefillChunk(_ tokens: ArraySlice<Int32>,
                                  span: PrefillChunkSpan,
                                  writeFinalHead: Bool,
@@ -119,7 +119,35 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 return
             }
         }
-        preconditionFailure("Qwen chunked prefill final norm and lm_head land in S20 step 6")
+        // Final RMSNorm over the rows; the checkpoint weights already
+        // carry the +1 (normWeightsShifted), so the plain `x̂ · w` mode
+        // (3.5).
+        norms.encodeRow(
+            commandBuffer: commandBuffer,
+            x: hiddenBuffer,
+            weight: model.finalNorm.buffer, weightOffset: Int(model.finalNorm.offset),
+            out: normedBuffer,
+            d: UInt32(hiddenSize), rows: rows,
+            eps: Float(hybrid.rmsNormEps), mode: .plain)
+        recordHiddenTap(.afterFinalNorm, rows: rows, in: commandBuffer)
+
+        // lm_head on the last row only, in the final span (as in `produce`
+        // and the Gemma runner): FP16 logits into the caller's buffer, no
+        // softcap. Qwen never fuses greedy into prefill, so the result
+        // seed stays `.logitsWritten` whatever `outputMode` asked.
+        if writeFinalHead {
+            gemv4.encode(
+                commandBuffer: commandBuffer,
+                weights: model.qwenLMHead.buffer, weightsOffset: Int(model.qwenLMHead.offset),
+                scales: model.qwenLMHead.buffer, scalesOffset: Int(model.qwenLMHead.scaleOffset),
+                biases: model.qwenLMHead.buffer, biasesOffset: Int(model.qwenLMHead.biasOffset),
+                x: normedBuffer, xOffset: (rows - 1) * rowBytes, y: logits,
+                m: UInt32(vocabSize), n: UInt32(hiddenSize))
+        }
+        commandBuffer.commit()
+        await commandBuffer.completed()
+        finishHiddenTapRow(count: rows)
+        cache.advance(by: rows)
     }
 
     /// One Gated DeltaNet (linear) layer L over the first `rows` rows of

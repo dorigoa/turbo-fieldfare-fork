@@ -584,6 +584,114 @@ struct QwenHybridForwardRunnerTests {
         }
     }
 
+    /// S20 step 6: the whole model through the chunked prefill. All six
+    /// prompts, in chunks of 4 (so every prompt spans several chunks) and
+    /// in a single chunk: the hidden state after the final norm of every
+    /// position must match the S19 token-at-a-time `produce` run (cosine
+    /// ≥ 0.9999), and the last-position logits must match the same
+    /// `produce` run (cosine ≥ 0.9999, top-1 equal) and, for p0 and p1,
+    /// the `logits_last.json` golden (cosine ≥ 0.998, the deviation
+    /// approved in S19). The single-chunk run also asks for
+    /// `outputMode = .greedyIfAvailable`: Qwen never fuses greedy into
+    /// prefill, so the seed stays `.logitsWritten`.
+    @Test("the chunked six-prompt prefill matches the decode states and logits")
+    func chunkedSixPromptPrefillMatchesDecodeAndGolden() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let config = env.model.config
+        let hiddenSize = config.hiddenSize
+        let vocabSize = config.vocabSize
+        let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+
+        let lastData = try Data(contentsOf: QwenTestResources.fixtures
+            .appendingPathComponent("model/logits_last.json"))
+        let lastGolden = try JSONSerialization.jsonObject(with: lastData) as! [String: Any]
+
+        for name in ["p0", "p1", "p2", "p3", "p4", "p5"] {
+            let ids = try promptIDs(name)
+
+            // Reference: the S19 token-at-a-time `produce` over the whole
+            // prompt, tapped after the final norm at every position.
+            runner.reset()
+            runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                points: [.afterFinalNorm], rows: ids.count)
+            for (position, id) in ids.enumerated() {
+                try await runner.produce(token: id, position: position, into: logits)
+            }
+            guard let decodeTapped = runner.tappedHidden else {
+                Issue.record("no decode hidden tap for \(name)"); return
+            }
+            let decodeFinalNorm = (0..<ids.count).map {
+                Self.readFP16(decodeTapped, byteOffset: $0 * rowBytes, count: hiddenSize)
+            }
+            let decodeLogits = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+
+            for chunkTokens in [4, ids.count] {
+                runner.reset()
+                runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                    points: [.afterFinalNorm], rows: ids.count)
+                let prefillConfig = PrefillRuntimeConfig.defaultChunked
+                    .replacingChunkTokens(chunkTokens)
+                // The single-chunk run asks for the fused greedy head,
+                // which Qwen does not have (S19): the seed must still be
+                // `.logitsWritten`.
+                let outputMode: PrefillOutputMode = (chunkTokens == ids.count
+                                                     ? .greedyIfAvailable : .logits)
+                let result = try await runner.prefillChunked(
+                    tokens: ids[...],
+                    startPosition: 0,
+                    outputMode: outputMode,
+                    config: prefillConfig,
+                    into: logits,
+                    onProgress: { _ in })
+                #expect(result.newPosition == ids.count)
+                #expect(result.seed == .logitsWritten)
+                #expect(runner.continuationPosition == ids.count)
+                #expect(!runner.chunkCommitState.isDirty)
+
+                guard let tapped = runner.tappedHidden else {
+                    Issue.record("no hidden tap for \(name) chunk \(chunkTokens)"); return
+                }
+                #expect(runner.tappedHiddenCount == ids.count)
+                var minNormCosine = 2.0
+                for position in 0..<ids.count {
+                    let row = Self.readFP16(tapped, byteOffset: position * rowBytes,
+                                            count: hiddenSize)
+                    minNormCosine = min(minNormCosine,
+                                        cosine(row, decodeFinalNorm[position]))
+                }
+                let logitsRow = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+                let logitsCosine = cosine(logitsRow, decodeLogits)
+                let top1Equal = Self.topIndices(logitsRow, count: 1)[0]
+                    == Self.topIndices(decodeLogits, count: 1)[0]
+                var goldenCosine: Double?
+                if let lastEntry = lastGolden[name] as? [String: Any],
+                   let logitsEntry = lastEntry["logits"] as? [String: Any] {
+                    let expected = try Self.decodeF16(logitsEntry)
+                    goldenCosine = cosine(logitsRow, expected)
+                }
+                print("S20 step 6 \(name) chunked (chunk \(chunkTokens)) final-norm min cosine: \(minNormCosine)")
+                print("S20 step 6 \(name) chunked (chunk \(chunkTokens)) last logits vs decode cosine: \(logitsCosine), top-1 equal: \(top1Equal)")
+                if let goldenCosine {
+                    print("S20 step 6 \(name) chunked (chunk \(chunkTokens)) last logits vs golden cosine: \(goldenCosine)")
+                }
+                #expect(minNormCosine >= 0.9999,
+                        "\(name) chunk \(chunkTokens) final-norm min cosine \(minNormCosine) < 0.9999")
+                #expect(logitsCosine >= 0.9999,
+                        "\(name) chunk \(chunkTokens) last logits cosine \(logitsCosine) < 0.9999")
+                #expect(top1Equal,
+                        "\(name) chunk \(chunkTokens) last logits top-1 differs from the decode")
+                if let goldenCosine {
+                    #expect(goldenCosine >= 0.998,
+                            "\(name) chunk \(chunkTokens) last logits golden cosine \(goldenCosine) < 0.998 (C8 0.999, approved deviation)")
+                }
+            }
+        }
+    }
+
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
     /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
     /// (C8: cosine ≥ 0.995 per internal quantity; the DeltaNet state uses
