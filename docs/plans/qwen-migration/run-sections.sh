@@ -15,7 +15,7 @@
 #     del tentativo, che l'agente non ha nemmeno toccato, non conta);
 #   - MAX_STALLS riprese di fila non producono nuovi commit, oppure la
 #     sezione supera MAX_ATTEMPTS tentativi in tutto;
-#   - finisce una sezione con il tuo controllo ⛔ (S1, S8, S19, S26; vedi 1.7);
+#   - finisce una sezione con il tuo controllo ⛔ (S1, S8, S19, S27; vedi 1.7);
 #   - un controllo iniziale fallisce (branch, working tree, server, altra sessione).
 # Le sezioni già "Completata" vengono saltate.
 #
@@ -39,7 +39,7 @@ MAX_STALLS=${MAX_STALLS:-${MAX_RESUMES:-3}}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-20}
 ERROR_PAUSE=${ERROR_PAUSE:-60}
 NOTIFY=${QWEN_RUNNER_NOTIFY:-1}
-CHECKPOINTS=" 1 8 19 26 "
+CHECKPOINTS=" 1 8 19 27 "
 LAST_SECTION=26
 
 ALLOW=(

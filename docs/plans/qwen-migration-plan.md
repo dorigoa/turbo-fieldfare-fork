@@ -26,7 +26,7 @@ Qwen3.6 differisce da Gemma in tre punti, ed è lì che sta il lavoro:
 3. **MoE diverso**: 256 expert piccoli (8 attivi, attivazione SiLU) più uno
    shared expert con un gate sigmoide.
 
-Il lavoro è diviso in **26 sezioni piccole (S1–S26)**, da eseguire in ordine,
+Il lavoro è diviso in **27 sezioni piccole (S1–S27)**, da eseguire in ordine,
 una per sessione di Claude CLI. Ogni sezione finisce con report, commit e push
 su `qwen-support`: la sezione successiva può partire su qualunque Mac.
 
@@ -35,7 +35,7 @@ su `qwen-support`: la sezione successiva può partire su qualunque Mac.
 - Parte 1 — Per te: come usare il piano
 - Parte 2 — Regole per l'agente
 - Parte 3 — Riferimento tecnico
-- Parte 4 — Le sezioni S1–S26
+- Parte 4 — Le sezioni S1–S27
 - Appendici A–D
 
 ## Glossario minimo
@@ -82,12 +82,13 @@ su `qwen-support`: la sezione successiva può partire su qualunque Mac.
 | S23 | Server OpenAI-compatibile con Qwen | sì (prova breve) | — | |
 | S24 | Mac app 1: catalogo, installazione, memoria | no | — | |
 | S25 | Mac app 2: conversazione e ragionamento | no | — | |
-| S26 | Validazione finale, misure, benchmark, documentazione | sì | — | ⛔ |
+| S26 | Prestazioni di Qwen: prefill più veloce | sì | — | |
+| S27 | Validazione finale, misure, benchmark, documentazione | sì | — | ⛔ |
 
 "Modello reale: sì" vuol dire che su quel Mac deve esserci
 `scratch/qwen36.gturbo` installato (S7). S8 richiede invece il checkpoint MLX
-e un Mac con almeno 32 GB di RAM. Consiglio: esegui S7, S8, S18–S23 e S26 sullo
-stesso Mac, quello con più memoria.
+e un Mac con almeno 32 GB di RAM. Consiglio: esegui S7, S8, S18–S23, S26 e S27
+sullo stesso Mac, quello con più memoria.
 
 ## 1.2 Preparazione (una volta sola)
 
@@ -161,8 +162,8 @@ con il prompt di 1.4 finché fa progressi; se Claude CLI finisce con un errore
 (per esempio del server del modello), aspetta un minuto prima di riprovare. Si
 ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza nuovi
 commit (o 20 tentativi in tutto) e dopo ogni sezione ⛔. Se la scheda chiede
-una sessione per passo (S19, S20), ogni passo è un tentativo con il contesto
-vuoto.
+una sessione per passo (S19, S20, S26), ogni passo è un tentativo con il
+contesto vuoto.
 Le istruzioni complete sono in testa allo script.
 
 ## 1.4 Riprendere una sezione interrotta
@@ -189,8 +190,8 @@ Non viaggia (sta in `scratch/`, che git ignora):
 
 | Cosa | Serve in | Come averlo su un altro Mac |
 | --- | --- | --- |
-| `scratch/qwen36.gturbo` (~20 GB) | S18–S23, S26 | reinstallalo (comando sotto), copialo tu da un altro Mac, oppure crea un link a dove già si trova |
-| `scratch/gemma4.gturbo` | S26 (regressione di Gemma) | come oggi per Gemma |
+| `scratch/qwen36.gturbo` (~20 GB) | S18–S23, S26, S27 | reinstallalo (comando sotto), copialo tu da un altro Mac, oppure crea un link a dove già si trova |
+| `scratch/gemma4.gturbo` | S27 (regressione di Gemma) | come oggi per Gemma |
 | `scratch/qwen36-tokenizer/`, `scratch/qwen36-venv/` | S2, S8, S9 | li ricrea l'agente (piccoli) |
 | checkpoint MLX nella cache di Hugging Face | solo S8 | — |
 
@@ -219,7 +220,7 @@ solo, salvo in S7.
 | S1 | Nella tabella dei fatti del report ogni riga è "confermato". Se qualcosa differisce, il report è "Bloccata": fai correggere la Parte 3 prima di S2 |
 | S8 | I golden sono in `Tests/QwenFixtures/model/` e il report dice se le formule della Parte 3.5 sono confermate. Se riporta "Correzioni al piano: sì", fai aggiornare la 3.5 prima di S12 |
 | S19 | Il testo generato nel report è sensato e i confronti con i golden rispettano le tolleranze (C8) |
-| S26 | Benchmark, regressione di Gemma, prova dell'app con l'elenco del report; poi decidi tu il merge in `main` |
+| S27 | Benchmark, regressione di Gemma, prova dell'app con l'elenco del report; poi decidi tu il merge in `main` |
 
 ## 1.8 Decisioni già prese
 
@@ -229,7 +230,7 @@ solo, salvo in S7.
 | U2 | Solo testo e solo 4 bit. Esclusi: immagini e video con Qwen, MTP e decodifica speculativa, Qwen a 8 bit, contesto oltre 262.144 token |
 | U3 | Ragionamento (`<think>`) attivo per default, come nel template; disattivabile in CLI, server e app |
 | U4 | Sampling di default per Qwen da `generation_config.json`: temperature 1.0, top-k 20, top-p 0.95. Gemma resta 0.2 / 64 / 0.95 |
-| U5 | Un solo branch, `qwen-support`; commit e push dopo ogni passo e alla fine di ogni sezione; merge in `main` solo su tua decisione dopo S26 |
+| U5 | Un solo branch, `qwen-support`; commit e push dopo ogni passo e alla fine di ogni sezione; merge in `main` solo su tua decisione dopo S27 |
 | U6 | Esecutore: Claude CLI su macOS con il modello locale Qwen3.8-Flash-Next (256K) |
 
 U1–U4 vengono dal piano precedente (confermate il 2026-11-08); U5 e U6 da
@@ -309,7 +310,8 @@ ogni sessione.
   ```
 
 - API pubbliche: si aggiunge, non si rinomina e non si rimuove.
-- Niente ottimizzazioni non richieste: prima corretto, poi veloce (S26 misura).
+- Niente ottimizzazioni non richieste: prima corretto, poi veloce (S26
+  velocizza il prefill, S27 misura).
 - **Non inventare API.** Prima di usare un tipo o una funzione esistente,
   trovane la firma:
   `grep -rn "func nome\|struct Nome\|class Nome\|enum Nome\|protocol Nome" Sources`.
@@ -397,7 +399,7 @@ pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|Tu
 - Se manca il modello: fermati e indica all'utente le opzioni della Parte 1.5.
   Non installarlo, salvo in S7.
 - AGENTS.md nomina solo i modelli Gemma: per Qwen il modello richiesto è
-  `scratch/qwen36.gturbo` (deviazione prevista dal piano; S26 aggiorna
+  `scratch/qwen36.gturbo` (deviazione prevista dal piano; S27 aggiorna
   AGENTS.md).
 - Annota nel report il comando esatto, l'exit code e i tempi.
 
@@ -1918,7 +1920,7 @@ delle impostazioni (`grep -rln "variant" Sources/TurboFieldfareApp/MacPresentati
    installazione e cartella `qwen36.gturbo`; download con l'installer
    esistente.
 2. `ContextAdmission` per famiglia. Qwen: KV 20.480 B per token, stato DeltaNet
-   e conv 64 MiB, non-KV **provvisorio** 2,5 GiB, riserva 3 GiB (S26 misura).
+   e conv 64 MiB, non-KV **provvisorio** 2,5 GiB, riserva 3 GiB (S27 misura).
    Test a 4K, 32K, 128K e 262.144.
 3. Default di sampling per famiglia (U4): se l'utente non ha cambiato i valori
    si usano quelli della famiglia; se li ha cambiati restano i suoi. Descrivi
@@ -1966,7 +1968,109 @@ test in `Tests/TurboFieldfareApp/`, `Tests/TurboFieldfareDecodeService/`,
 
 **Fatto quando.** Test verdi; app costruita; elenco delle prove nel report.
 
-### S26 — Validazione finale, misure, benchmark, documentazione ⛔
+### S26 — Prestazioni di Qwen: prefill più veloce
+
+**Obiettivo.** Il prefill di Qwen diventa più veloce senza cambiare i
+risultati. S20 misura 51 tok/s a 4096 token (release, Mac16,9), circa 4 volte
+il decode. Il decode non peggiora.
+
+**Requisiti.** Modello reale: sì (2.4), dal passo 1. Tutta la sezione gira
+sullo stesso Mac, perché i passi 2–4 confrontano i logit bit per bit con quelli
+del passo 1. Report da leggere: S20 (solo "Valori misurati o fissati" e "Note
+per le sezioni successive").
+
+**Una sessione per passo.** Come S19 e S20: la mappa
+`reports/S26-map.md` del passo 1 sostituisce la rilettura del codice. Dopo il
+commit e il push di ogni passo, aggiungi alla mappa ciò che il passo
+successivo deve sapere e chiudi la sessione con una riga di riepilogo. Di
+`QwenHybridForwardRunner.swift` e `QwenHybridForwardRunner+Prefill.swift` leggi
+solo gli intervalli di righe che la mappa indica.
+
+**Leggi.** Ogni passo dice cosa leggere. Le misure seguono AGENTS.md: build
+release (`Scripts/test.sh -c release --filter …`), niente controlli
+sperimentali, niente Instruments, e la variante (Qwen3.6 4-bit) nominata in
+ogni risultato.
+
+**Puoi modificare.** I file Qwen di S12–S20: runner, kernel in `Kernels/Qwen/`
+e `Metal/Qwen/` (D4), test Qwen; la mappa
+`docs/plans/qwen-migration/reports/S26-map.md`. Gemma, `ModelExpertIO.swift`,
+`PreadExpertStreamer.swift`, CLI, server e app non si toccano. I default di
+runtime (dimensione del blocco, slot degli expert) non cambiano: se una misura
+suggerisce un default diverso, scrivilo nel report come proposta.
+
+**Regola dei risultati.** I passi 2–4 non cambiano l'aritmetica: gli hash dei
+logit salvati al passo 1 devono restare identici. Il passo 5 cambia
+l'aritmetica e segue le soglie di S20: C8 contro i golden, e contro il decode
+le soglie approvate nel passo 6 di S20.
+
+**Passi.**
+
+1. Mappa e misure di partenza, senza ottimizzare.
+   - Scrivi `reports/S26-map.md`, al massimo 120 righe. Per ogni costo del
+     prefill indica dove nasce, con `file:riga`: lettura degli expert a gruppi
+     e attesa; un `makeBlobsArgumentBuffer` per ogni coppia (token, slot); le
+     chiamate `rows: 1` dei kernel per testa (S20, passo 3); lo staging dello
+     shared expert; le attese della GPU per layer. Aggiungi le firme esatte di
+     `planRoutedExperts(layer:experts:avoidingSlots:)`,
+     `fetchRoutedExperts(plan:)`, `adviseRoutedExperts(plan:)` e
+     `routedExpertCacheSlotCount(layer:)` di `ModelExpertIO`, e scrivi se
+     `MPPPrefillInt4QMM` può leggere gate, up e down dal blob C5 (offset di
+     `QwenMoE.expertOffsets`).
+   - Test di misura: estendi `prefillAndDecodeThroughputAreMeasured` di S20.
+     Oltre ai tok/s, ripartisce il tempo di un blocco: lettura degli expert,
+     tempo GPU dei command buffer (`gpuStartTime`/`gpuEndTime`), tempo CPU di
+     codifica, e per layer il numero di gruppi, di expert letti e di dispatch.
+     I contatori vivono nel runner solo per i test, come le prese di debug.
+     Misura il prefill di 512 e 4096 token a blocchi di 128 e di 256, e il
+     decode di 128 token.
+   - Hash di riferimento: SHA-256 dei logit FP16 dell'ultima posizione dei 6
+     prompt, a blocchi di 4 e di 128, e dei logit di 8 passi di decode greedy
+     dopo p0. Salvali in `scratch/S26/baseline.json` e nel report, con il
+     modello di Mac.
+
+   Nel report: la tabella delle misure e le tre voci più costose. Leggi: il
+   report di S20; `S20-map.md` (MoE e test); `ModelExpertIO.swift` con
+   `grep -n "func "`.
+2. Meno allocazioni e meno dispatch.
+   - Un argument buffer per expert del gruppo (al massimo 16), riusato da tutti
+     i token che lo usano, al posto di uno per coppia (token, slot); uno per
+     layer per lo shared expert.
+   - I kernel per testa che oggi girano con `rows: 1` per riga accettano un
+     passo di riga, così una sola chiamata copre le `T` righe. Il default
+     resta quello di oggi, quindi il decode non cambia.
+
+   Test: hash identici al passo 1; test di S19, S20 e dei kernel Qwen verdi;
+   misura come al passo 1. Leggi: la mappa.
+3. Shared expert pronto per tutti i layer: lo staging nel blob C5 (S19) si fa
+   una volta, all'inizializzazione, in 40 blob (circa 71 MB), invece che a ogni
+   cambio di layer. Vale per decode e prefill; annota la memoria in più nel
+   report per S27. Test e misura come al passo 2. Leggi: la mappa.
+4. Lettura e calcolo in parallelo: mentre la GPU esegue un gruppo di expert,
+   la CPU legge il gruppo successivo in slot diversi, con
+   `planRoutedExperts(…avoidingSlots:)` e `fetchRoutedExperts(plan:)` (per
+   esempio due metà da 8 slot che si alternano). Mai leggere in uno slot che la
+   GPU sta ancora usando. Se la mappa lo indica utile, chiedi in anticipo il
+   gruppo successivo con `adviseRoutedExperts(plan:)`. Test e misura come al
+   passo 2. Leggi: la mappa.
+5. Expert per colonne, solo se le misure dei passi 1–4 dicono che il calcolo
+   GPU del MoE domina. Per ogni expert del gruppo: le righe dei token che lo
+   usano in un buffer contiguo; gate e up con `MPPPrefillInt4QMM` (`m` = quei
+   token); SiLU·mul; down; somma pesata in `routedOut[t][j]` nello stesso
+   ordine di S19. I kernel piccoli che servono sono nuovi, in `Metal/Qwen/`
+   (D4). Test: le soglie di S20 contro golden e decode, e top-1 uguale al
+   decode in 12 casi su 12. Se le misure dicono che non conviene, salta il
+   passo e scrivi perché nel report. Leggi: la mappa; C5.
+6. Misure finali e chiusura: la tabella del passo 1 prima e dopo (prefill di
+   512 e 4096 token a blocchi di 128 e 256, decode); nel report una proposta
+   motivata sul blocco di default per Qwen, senza cambiarlo. Poi 2.9.
+
+**Fatto quando.** Hash identici dopo i passi 2–4; test di S19 e S20 verdi;
+tabella prima e dopo nel report. Obiettivo indicativo: prefill a 4096 token
+almeno il doppio di S20 (≥ 100 tok/s) e decode non sotto 12,5 tok/s. Se
+l'obiettivo non si raggiunge, la sezione si chiude comunque, con le misure e
+le cause rimaste nel report: non è un motivo per `Bloccata`.
+
+### S27 — Validazione finale, misure, benchmark, documentazione ⛔
 
 **Obiettivo.** Correttezza finale, Gemma senza regressioni, memoria misurata,
 benchmark e documentazione.
@@ -1974,7 +2078,7 @@ benchmark e documentazione.
 **Requisiti.** Modello reale: sì, Qwen e Gemma 4-bit (`scratch/gemma4.gturbo`)
 sullo stesso Mac.
 
-**Leggi.** C8; `docs/COMMUNITY_BENCHMARKS.md`; i report S19–S25.
+**Leggi.** C8; `docs/COMMUNITY_BENCHMARKS.md`; i report S19–S26.
 
 **Puoi modificare.** `ContextAdmission.swift` e i suoi test (valori misurati
 per Qwen); `README.md`, `AGENTS.md`, `docs/BENCHMARKS.md`,
