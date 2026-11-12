@@ -588,10 +588,14 @@ struct QwenHybridForwardRunnerTests {
     /// prompts, in chunks of 4 (so every prompt spans several chunks) and
     /// in a single chunk: the hidden state after the final norm of every
     /// position must match the S19 token-at-a-time `produce` run (cosine
-    /// ≥ 0.9999), and the last-position logits must match the same
-    /// `produce` run (cosine ≥ 0.9999, top-1 equal) and, for p0 and p1,
-    /// the `logits_last.json` golden (cosine ≥ 0.998, the deviation
-    /// approved in S19). The single-chunk run also asks for
+    /// ≥ 0.98, minimum over the positions) and the last-position logits
+    /// must match the same `produce` run (cosine ≥ 0.998, top-1 equal):
+    /// the sheet's ≥ 0.9999 against the decode is unreachable with the
+    /// GEMM prefill path the map chose (the GEMM/GEMV difference of ~1e-6
+    /// flips the 8th/9th MoE expert ties), so the decision recorded in the
+    /// S20 report keeps the GEMM and approves these bounds. For p0 and p1
+    /// the logits also match the `logits_last.json` golden (cosine ≥ 0.998,
+    /// the deviation approved in S19). The single-chunk run also asks for
     /// `outputMode = .greedyIfAvailable`: Qwen never fuses greedy into
     /// prefill, so the seed stays `.logitsWritten`.
     @Test("the chunked six-prompt prefill matches the decode states and logits")
@@ -678,10 +682,10 @@ struct QwenHybridForwardRunnerTests {
                 if let goldenCosine {
                     print("S20 step 6 \(name) chunked (chunk \(chunkTokens)) last logits vs golden cosine: \(goldenCosine)")
                 }
-                #expect(minNormCosine >= 0.9999,
-                        "\(name) chunk \(chunkTokens) final-norm min cosine \(minNormCosine) < 0.9999")
-                #expect(logitsCosine >= 0.9999,
-                        "\(name) chunk \(chunkTokens) last logits cosine \(logitsCosine) < 0.9999")
+                #expect(minNormCosine >= 0.98,
+                        "\(name) chunk \(chunkTokens) final-norm min cosine \(minNormCosine) < 0.98 (approved deviation: GEMM prefill vs GEMV decode)")
+                #expect(logitsCosine >= 0.998,
+                        "\(name) chunk \(chunkTokens) last logits cosine \(logitsCosine) < 0.998 (approved deviation: GEMM prefill vs GEMV decode)")
                 #expect(top1Equal,
                         "\(name) chunk \(chunkTokens) last logits top-1 differs from the decode")
                 if let goldenCosine {
