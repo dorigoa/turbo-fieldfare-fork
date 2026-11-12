@@ -443,6 +443,147 @@ struct QwenHybridForwardRunnerTests {
         }
     }
 
+    /// S20 step 5: the chunked prefill runs the gated full-attention layer
+    /// (layer 3) over the chunk's rows: layers 0–3 of p0 in chunks of 2
+    /// (one call per span, 2+2+1, so each span's rows survive in the work
+    /// buffers) and in a single chunk. The hidden state after the full
+    /// layer 3 (attention + MoE + residual) of every position must match
+    /// `hidden_p0.json → layer3` (cosine ≥ 0.995, C8); the chunks-of-2
+    /// rows must also match the token-at-a-time `produce` run (cosine
+    /// ≥ 0.9999) and the tapped layer-3 internals must match
+    /// `layer3_internals.json` per position (cosine ≥ 0.995).
+    @Test("the chunked layer-3 attention block matches the golden and the decode")
+    func chunkedLayer3AttentionMatchesGoldenAndDecode() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let config = env.model.config
+        let hiddenSize = config.hiddenSize
+        let queryDim = config.numHeads * config.fullHeadDim
+        let kvDim = config.numKVHeads * config.fullHeadDim
+        let ids = try promptIDs("p0")
+        #expect(ids.count == 5)
+        #expect(config.fullAttentionLayerMask[3] == 1)
+        let logits = try #require(env.device.makeBuffer(
+            length: config.vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared))
+        let rowBytes = hiddenSize * MemoryLayout<Float16>.size
+
+        // Reference: the S19 token-at-a-time `produce`, stopped after the
+        // full layer 3 (in `produce` the stop is after the MoE and the
+        // tap).
+        runner.reset()
+        runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+            points: [.afterLayer(3)], rows: ids.count)
+        runner.debugStopAfterLayer = 3
+        for (position, id) in ids.enumerated() {
+            try await runner.produce(token: id, position: position, into: logits)
+        }
+        #expect(runner.continuationPosition == ids.count)
+        guard let decodeTapped = runner.tappedHidden else {
+            Issue.record("no decode hidden tap"); return
+        }
+        let decodeRows = (0..<ids.count).map {
+            Self.readFP16(decodeTapped, byteOffset: $0 * rowBytes, count: hiddenSize)
+        }
+
+        let (layer3Shape, layer3Golden) = try golden("hidden_p0", "layer3")
+        #expect(layer3Shape == [ids.count, hiddenSize])
+
+        // FP16 row lengths of the tapped layer-3 work buffers, by golden
+        // key (the same counts as the S19 step-5 test).
+        let counts: [String: Int] = [
+            "x_norm": hiddenSize,
+            "q_pre_norm": queryDim,
+            "gate": queryDim,
+            "k_pre_norm": kvDim,
+            "v": kvDim,
+            "q_rope": queryDim,
+            "k_rope": kvDim,
+            "attn_out": queryDim,
+            "gated": queryDim,
+            "mixer_out": hiddenSize,
+            "layer_out": hiddenSize,
+        ]
+
+        for chunkTokens in [2, 5] {
+            runner.reset()
+            runner.debugHiddenTap = QwenHybridForwardRunner.HiddenTap(
+                points: [.afterLayer(3)], rows: ids.count)
+            runner.debugInternalsLayer = 3
+            runner.debugStopAfterLayer = 3
+            var progress: [Int] = []
+            let prefillConfig = PrefillRuntimeConfig.defaultChunked
+                .replacingChunkTokens(chunkTokens)
+            var minHiddenCosine = 2.0
+            var minDecodeCosine = 2.0
+            var minInternalCosine = 2.0
+            var tappedRows = 0
+            var chunkStart = 0
+            while chunkStart < ids.count {
+                let chunkEnd = min(chunkStart + chunkTokens, ids.count)
+                let result = try await runner.prefillChunked(
+                    tokens: ids[chunkStart..<chunkEnd],
+                    startPosition: chunkStart,
+                    outputMode: .logits,
+                    config: prefillConfig,
+                    into: logits,
+                    onProgress: { progress.append($0) })
+                #expect(result.newPosition == chunkEnd)
+                #expect(result.seed == .logitsWritten)
+                #expect(runner.continuationPosition == chunkEnd)
+                guard let tapped = runner.tappedHidden else {
+                    Issue.record("no hidden tap after span \(chunkStart)..<\(chunkEnd)"); return
+                }
+                for t in 0..<(chunkEnd - chunkStart) {
+                    let position = tappedRows + t
+                    let row = Self.readFP16(tapped, byteOffset: position * rowBytes,
+                                            count: hiddenSize)
+                    let expected = Array(
+                        layer3Golden[(position * hiddenSize)..<(position + 1) * hiddenSize])
+                    minHiddenCosine = min(minHiddenCosine, cosine(row, expected))
+                    if chunkTokens == 2 {
+                        minDecodeCosine = min(minDecodeCosine,
+                                              cosine(row, decodeRows[position]))
+                        for (key, count) in counts {
+                            guard let buffer = runner.tappedInternals[key] else {
+                                Issue.record("no \(key) tapped after span \(chunkStart)..<\(chunkEnd)"); return
+                            }
+                            let rowBytes = count * MemoryLayout<Float16>.size
+                            let internalRow = Self.readFP16(
+                                buffer, byteOffset: t * rowBytes, count: count)
+                            let (shape, goldenRows) = try golden("layer3_internals", key)
+                            let rowElements = goldenRows.count / shape[0]
+                            #expect(rowElements == count,
+                                    "\(key): tapped \(count) values per row, golden \(rowElements)")
+                            let expectedInternal = Array(goldenRows[
+                                (position * rowElements)..<(position + 1) * rowElements])
+                            minInternalCosine = min(minInternalCosine,
+                                                    cosine(internalRow, expectedInternal))
+                        }
+                    }
+                }
+                tappedRows += chunkEnd - chunkStart
+                chunkStart = chunkEnd
+            }
+            #expect(tappedRows == ids.count)
+            // completedCount is per call (tokens done inside that call),
+            // so the one-span-per-call runs report 2, 2, 1.
+            #expect(progress == (chunkTokens == 2 ? [2, 2, 1] : [5]))
+            #expect(!runner.chunkCommitState.isDirty)
+            print("S20 step 5 p0 chunked layer 3 hidden (chunk \(chunkTokens)) minimum cosine: \(minHiddenCosine)")
+            #expect(minHiddenCosine >= 0.995,
+                    "chunked layer 3 hidden minimum cosine \(minHiddenCosine) < 0.995 (C8)")
+            if chunkTokens == 2 {
+                print("S20 step 5 p0 chunked layer 3 hidden vs decode minimum cosine: \(minDecodeCosine)")
+                #expect(minDecodeCosine >= 0.9999,
+                        "chunked layer 3 hidden vs decode minimum cosine \(minDecodeCosine) < 0.9999")
+                print("S20 step 5 p0 chunked layer 3 internals minimum cosine: \(minInternalCosine)")
+                #expect(minInternalCosine >= 0.995,
+                        "chunked layer 3 internals minimum cosine \(minInternalCosine) < 0.995 (C8)")
+            }
+        }
+    }
+
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the
     /// mlx-lm golden `layer0_internals.json` for all five tokens of p0
     /// (C8: cosine ≥ 0.995 per internal quantity; the DeltaNet state uses

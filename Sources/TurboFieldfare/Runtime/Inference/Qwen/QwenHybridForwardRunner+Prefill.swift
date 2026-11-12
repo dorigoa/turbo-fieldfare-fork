@@ -103,7 +103,8 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             if cfg.fullAttentionLayerMask[L] == 0 {
                 try runPrefillLinearLayer(L, in: commandBuffer, rows: rows)
             } else {
-                preconditionFailure("Qwen chunked prefill attention layers land in S20 step 5")
+                try runPrefillAttentionLayer(L, position: span.startPosition,
+                                             in: commandBuffer, rows: rows)
             }
             try await runPrefillMoELayer(L, in: &commandBuffer, rows: rows)
             recordHiddenTap(.afterLayer(L), rows: rows, in: commandBuffer)
@@ -284,6 +285,168 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 "gated_out": gatedOutBuffer,
                 "mixer_out": mixerBuffer,
                 "state_heads0to3": cache.deltaStateBuffer,
+            ])
+        }
+    }
+
+    /// One gated full-attention layer L (3.5) over the first `rows` rows of
+    /// the work buffers, the chunk's tokens at positions `position ..<
+    /// position + rows`: input RMSNorm, the 4-bit q (queries and output
+    /// gate interleaved per head), k and v projections as MPP GEMMs over
+    /// the rows, the split of queries and gate, the per-head q/k RMSNorm,
+    /// the partial RoPE with the chunk's positions, the K/V write of the
+    /// rows at `position` in this layer's cache slice, the causal GQA
+    /// attention (row t over [0, position + t]), the sigmoid output gate,
+    /// the 4-bit o projection and the residual add. Like the S19 layer it
+    /// has no CPU wait, so it stays in the chunk's command buffer.
+    private func runPrefillAttentionLayer(_ L: Int, position: Int,
+                                          in commandBuffer: MTLCommandBuffer,
+                                          rows: Int) throws {
+        let queryHeads = cfg.numHeads
+        let kvHeads = cfg.numKVHeads
+        let headDim = cfg.fullHeadDim
+        let epsilon = Float(hybrid.rmsNormEps)
+        let rotatedPairs = Int((Double(headDim) * cfg.partialRotaryFactor).rounded()) / 2
+
+        // x = RMSNorm(h; input_layernorm) over the rows; the checkpoint
+        // weights already carry the +1 (normWeightsShifted), so the plain
+        // mode (3.5).
+        let inputNorm = try model.inputNorm(layer: L)
+        norms.encodeRow(
+            commandBuffer: commandBuffer,
+            x: hiddenBuffer,
+            weight: inputNorm.buffer, weightOffset: Int(inputNorm.offset),
+            out: xNormBuffer,
+            d: UInt32(hiddenSize), rows: rows, eps: epsilon, mode: .plain)
+
+        // q_proj (queries + gate), k_proj, v_proj over the rows.
+        let qProj = try model.qProj(layer: L)
+        encodePrefillProjection(commandBuffer, view: qProj,
+                                x: xNormBuffer, y: qgBuffer,
+                                rows: rows, n: qgRows, k: hiddenSize)
+        let kProj = try model.kProj(layer: L)
+        encodePrefillProjection(commandBuffer, view: kProj,
+                                x: xNormBuffer, y: attnKBuffer,
+                                rows: rows, n: kvDim, k: hiddenSize)
+        let vProj = try model.vProj(layer: L)
+        encodePrefillProjection(commandBuffer, view: vProj,
+                                x: xNormBuffer, y: attnVBuffer,
+                                rows: rows, n: kvDim, k: hiddenSize)
+
+        // Per head, q_proj rows are [query headDim][gate headDim]: split
+        // them. `rows: rows` is safe (map S20 step 5): qwen_split_qg
+        // strides its source rows by exactly queryHeads * 2 * headDim, the
+        // full width of `qgBuffer`'s rows — the step-3 danger only hit the
+        // wider convOut slices.
+        attention.encodeSplitQG(
+            commandBuffer: commandBuffer,
+            qg: qgBuffer, q: qBuffer, gate: gateBuffer,
+            queryHeads: queryHeads, headDim: headDim, rows: rows)
+
+        // Per-head RMSNorm of q and k over the rows (plain mode: the
+        // weights carry the +1). The buffers' rows are exactly
+        // numHeads * headDim wide, so the base-offset kernel strides them
+        // correctly.
+        let qNorm = try model.qNorm(layer: L)
+        norms.encodePerHead(
+            commandBuffer: commandBuffer,
+            x: qBuffer,
+            weight: qNorm.buffer, weightOffset: Int(qNorm.offset),
+            out: qNormedBuffer,
+            headDim: UInt32(headDim), numHeads: queryHeads, rows: rows,
+            eps: epsilon, mode: .plain)
+        let kNorm = try model.kNorm(layer: L)
+        norms.encodePerHead(
+            commandBuffer: commandBuffer,
+            x: attnKBuffer,
+            weight: kNorm.buffer, weightOffset: Int(kNorm.offset),
+            out: kNormedBuffer,
+            headDim: UInt32(headDim), numHeads: kvHeads, rows: rows,
+            eps: epsilon, mode: .plain)
+
+        // Test-only: the normalized, not yet rotated q and k of the
+        // chunk's rows (golden `q_pre_norm` / `k_pre_norm`) before RoPE
+        // rewrites them in place.
+        if L == debugInternalsLayer, let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(from: qNormedBuffer, sourceOffset: 0,
+                      to: qPreRopeTapBuffer, destinationOffset: 0,
+                      size: rows * queryDim * MemoryLayout<Float16>.size)
+            blit.copy(from: kNormedBuffer, sourceOffset: 0,
+                      to: kPreRopeTapBuffer, destinationOffset: 0,
+                      size: rows * kvDim * MemoryLayout<Float16>.size)
+            blit.endEncoding()
+        }
+
+        // Partial RoPE in place: row t sits at position + t.
+        attention.encodeRopePartial(
+            commandBuffer: commandBuffer,
+            data: qNormedBuffer, positionBase: UInt32(position),
+            headDim: headDim, numHeads: queryHeads, rows: rows,
+            rotatedPairs: rotatedPairs, theta: Float(cfg.ropeTheta))
+        attention.encodeRopePartial(
+            commandBuffer: commandBuffer,
+            data: kNormedBuffer, positionBase: UInt32(position),
+            headDim: headDim, numHeads: kvHeads, rows: rows,
+            rotatedPairs: rotatedPairs, theta: Float(cfg.ropeTheta))
+
+        // The chunk's K/V into this layer's cache slice at `position`,
+        // then causal GQA attention: row t attends [0, position + t].
+        // Strides in elements (D5 layout [position][kv head][headDim]).
+        guard let layerKV = cache.kvByteOffset(layer: L, position: 0) else {
+            preconditionFailure("attention layer \(L) has no KV slot")
+        }
+        let headStride = headDim
+        let posStride = kvHeads * headDim
+        attention.encodeKVWrite(
+            commandBuffer: commandBuffer,
+            k: kNormedBuffer, v: attnVBuffer,
+            kvK: cache.kBuffer, kvKOffset: layerKV,
+            kvV: cache.vBuffer, kvVOffset: layerKV,
+            rows: rows, kvHeads: kvHeads, headDim: headDim,
+            kvStart: UInt32(position),
+            posStride: posStride, headStride: headStride)
+        attention.encodeAttention(
+            commandBuffer: commandBuffer,
+            q: qNormedBuffer,
+            kvK: cache.kBuffer, kvKOffset: layerKV,
+            kvV: cache.vBuffer, kvVOffset: layerKV,
+            out: attnOutBuffer,
+            queryHeads: queryHeads, kvHeads: kvHeads, headDim: headDim,
+            queryTokens: rows, kvStart: UInt32(position),
+            posStride: posStride, headStride: headStride,
+            scale: 1.0 / sqrt(Float(headDim)))
+
+        // Output gate over the rows, then o_proj and the residual add.
+        attention.encodeGate(
+            commandBuffer: commandBuffer,
+            attn: attnOutBuffer, gate: gateBuffer, out: gatedBuffer,
+            count: queryDim * rows)
+        let oProj = try model.oProj(layer: L)
+        encodePrefillProjection(commandBuffer, view: oProj,
+                                x: gatedBuffer, y: mixerBuffer,
+                                rows: rows, n: hiddenSize, k: queryDim)
+        deltaScan.encodeAdd(
+            commandBuffer: commandBuffer,
+            a: hiddenBuffer, b: mixerBuffer, out: hiddenBuffer,
+            n: hiddenSize * rows)
+
+        // Test-only internals of this layer under the C7 golden keys
+        // (layer3_internals.json), one row per chunk token, as in the S19
+        // layer; the MoE block of the same layer adds its own keys.
+        // `q_pre_norm` / `k_pre_norm` are the golden's names for q and k
+        // after the per-head norm and before RoPE.
+        if L == debugInternalsLayer {
+            recordInternals(layer: L, [
+                "x_norm": xNormBuffer,
+                "q_pre_norm": qPreRopeTapBuffer,
+                "gate": gateBuffer,
+                "k_pre_norm": kPreRopeTapBuffer,
+                "v": attnVBuffer,
+                "q_rope": qNormedBuffer,
+                "k_rope": kNormedBuffer,
+                "attn_out": attnOutBuffer,
+                "gated": gatedBuffer,
+                "mixer_out": mixerBuffer,
             ])
         }
     }
