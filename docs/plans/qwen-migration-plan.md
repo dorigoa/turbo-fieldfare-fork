@@ -1769,25 +1769,61 @@ le famiglie; una factory sceglie il runner. Gemma invariato.
 
 **Leggi.** D3, D7, D13; in `Runtime/Generation/RawCompletion.swift` le righe
 270–420; `Tokenization/Detokenizer.swift`; gli usi di `GFTokenizer` nel
-modulo (`grep -rn "GFTokenizer" Sources/TurboFieldfare/Runtime`).
+modulo (`grep -rn "GFTokenizer" Sources/TurboFieldfare/Runtime`); i protocolli
+di `Runtime/Generation/LogitProducer.swift`; il report di S20 (solo "Note per
+le sezioni successive").
 
 **Puoi modificare.** File nuovi `Sources/TurboFieldfare/Tokenization/ChatTokenizer.swift`
 e `Sources/TurboFieldfare/Runtime/Inference/LanguageModelRunnerFactory.swift`;
 `RawCompletion.swift` (solo overload e inoltro); i file Qwen in
 `Tokenization/Qwen/`; test in `Tests/TurboFieldfare/Core/Runtime/Generation/Qwen/`.
+Le estensioni di conformità stanno nei due file nuovi, così `Tokenizer.swift`,
+`Detokenizer.swift` e `RealForwardRunner.swift` non cambiano.
 
 **Passi.**
 
-1. Protocollo `ChatTokenizer` con ciò che `runRawCompletion` usa: `vocabSize`,
-   `stopTokenIDs`, `endOfTurnID`, l'ID opzionale che indica "aspetto un
-   risultato di tool", `structuralMarkerIDs`, un detokenizer in streaming,
-   `encode`, `decode`. `GFTokenizer` lo adotta con un'estensione; anche
-   `QwenTokenizer`.
+1. Protocollo pubblico `ChatTokenizer` con ciò che `runRawCompletion` usa:
+   `vocabSize`, `stopTokenIDs`, `endOfTurnID`, `structuralMarkerIDs`,
+   `encode(_:addBOS:)`, `decode(_:skipSpecialTokens:)`, più due requisiti con
+   nomi nuovi, così nessuna proprietà esistente cambia:
+   - `toolResultWaitID: Int32?`, l'ID che indica "aspetto un risultato di
+     tool": per Gemma il suo `toolResponseID`, per Qwen `nil` (il turno si
+     chiude con `<|im_end|>`). Un requisito `toolResponseID: Int32?` non
+     funziona: in entrambi i tokenizer `toolResponseID` è già un `Int32` non
+     opzionale.
+   - `makeStreamingDetokenizer(barrierTokenIDs: Set<Int32>) -> any
+     StreamingDetokenizer`, con il protocollo pubblico `StreamingDetokenizer`
+     (`mutating func push(_ id: Int32) -> String`, `mutating func flush() ->
+     String`). `GFDetokenizer` e `QwenDetokenizer` hanno già questa forma: lo
+     adottano con un'estensione vuota e restano interni. Oggi
+     `runRawCompletion` crea un `GFDetokenizer` concreto: la versione nuova
+     chiama questo metodo.
+
+   I requisiti non hanno valori di default, quindi chi chiama passa `addBOS` e
+   `skipSpecialTokens` espliciti: per `skipSpecialTokens` i default di Gemma e
+   Qwen sono diversi (`true` e `false`). `GFTokenizer` adotta il protocollo
+   con un'estensione; anche `QwenTokenizer` (`endOfTurnID` = `imEndID`).
 2. Overload di `runRawCompletion` con `any ChatTokenizer`; la versione con
    `GFTokenizer` chiama la nuova e si comporta come prima.
-3. `LanguageModelRunnerFactory.make(model:context:maxContext:runtimeConfiguration:)`:
-   `RealForwardRunner` per Gemma, `QwenHybridForwardRunner` per Qwen; e il
-   caricamento del tokenizer giusto dalla cartella `tokenizer/`.
+3. Protocollo pubblico `LanguageModelRunner: ContinuableLogitProducer` con
+   `maxContext` e `rewind(to:) throws`: è ciò che CLI, server e app chiamano
+   oggi su `RealForwardRunner`, oltre a `reset` e `continuationPosition`, che
+   sono già in `ContinuableLogitProducer`. Entrambi i runner lo adottano con
+   un'estensione vuota, perché i membri esistono già e sono pubblici.
+   - `LanguageModelRunnerFactory.make(model:context:maxContext:runtimeConfiguration:)
+     throws -> any LanguageModelRunner` sceglie con `model.family`
+     (`ModelFamily`, `.gemma4` o `.qwen35Moe`): `RealForwardRunner` per Gemma,
+     con `runtimeConfiguration`; `QwenHybridForwardRunner` per Qwen, senza,
+     perché il runner non ha quel parametro. Annota nel report, per S22–S24,
+     che per Qwen la configurazione runtime non arriva al runner.
+   - `LanguageModelRunnerFactory.loadTokenizer(family:forModelDirectory:)
+     async throws -> any ChatTokenizer` chiama `load(forModelDirectory:)` di
+     `GFTokenizer` o di `QwenTokenizer`.
+   - Prefill a blocchi e immagini restano come oggi: `runRawCompletion` cerca
+     `ChunkedPrefillRunner` con `as?`, e le immagini restano di
+     `RealForwardRunner` (D12). Per Qwen `rewind` lancia
+     `QwenRewindError.rewindUnsupported` fuori dagli snapshot di D6: gestirlo
+     è compito di S23 e S25, non di S21.
 4. Test: generazione con `ScriptedLogitProducer` (in
    `Sources/TurboFieldfareValidation/Support/Fixtures/`) e tokenizer Qwen: stop
    su `<|im_end|>`; prova reale breve (32 token greedy di p0 con la factory).
