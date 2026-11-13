@@ -108,3 +108,5 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   riuso arg buffer (passo 2) vale 41k alloc/span a 128; l'overlap (passo 4)
   da solo vale poco (fetch 0,16 s/span a 4096, ma 0,49 a 512 con cache fredda
   per span). Passo 5 (GEMM per colonne) è dove sta il fattore T.
+- Riepilogo sessione passo 1 (commit 75e4625): mappa, contatori e test di
+  misura in verde release; baseline hash salvata; prefill dispatch-bound.
