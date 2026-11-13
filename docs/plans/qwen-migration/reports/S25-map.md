@@ -268,3 +268,32 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   `applyModelVariant`/`savedSampling` S24); valore → `AppGenerationRequest(`
   AppModel.swift :3120. Con Gemma `isThinking` resta false e nessun evento
   `.thinking` parte: interfaccia invariata.
+
+## Aggiornamenti passo 6 (UI thinking) — per i passi 7-8
+- Righe nuove/chiave: `AppModel.swift` `savedThinkingEnabled` :63,
+  `thinkingEnabled` public var :128, `isThinkingControlAvailable` :1450
+  (= `modelVariant == .qwen36`), restore al cambio variante :1181-1182,
+  scrittura in `settingsSnapshot()` :2541, richiesta `enableThinking` :3193
+  (Gemma: sempre nil). `AppPresentationState.swift`: `isThinking` nello
+  snapshot + etichetta decode "Thinking…". `InspectorView.generationSection`
+  Toggle "Thinking" gated + caption (dopo i controlli Top-P, stesso
+  `.disabled` del blocco). `AccessibilityID.inspectorThinking`.
+  `MacAppSettings.thinkingEnabledQwen36` opzionale (assente = acceso;
+  `setThinkingEnabled`: true → nil, Gemma → nessuna chiave).
+- Test passo 6: `AppPresentationStateTests.decodePhaseNames…`;
+  `MacAppSettingsSamplingTests` 3 nuovi; `AppModelVariantTests` 2 nuovi
+  (`aThinkingChangeStaysWithItsFamily`,
+  `theThinkingSwitchBecomesEnableThinkingOnlyForQwen`; pattern `makeModel`
+  con `modelPathText = temporaryDirectory` per `makeRequest`).
+- Passo 7: nessuna API nuova da usare; valgono in mappa
+  `ConversationContinuability.evaluate` :39 con regola :47-49 (modelID del
+  manifest: Gemma↔qwen36 già separati → verificare con test, non aggiungere)
+  e `AppModelHistory` `continuability(of:)` :519 /
+  `recordedOtherVariant(of:)` :534 / `openConversation(id:)` :568 (non
+  continuabile = sola lettura). `ConversationTurnRecord.thinking` :196 resta
+  mai scritto.
+- Passo 8 (prove utente da elencare nel report): con Qwen — interruttore
+  visibile in Inspector solo con qwen36, persistente al riavvio, "Thinking…"
+  in HUD mentre il frame è aperto, testo della risposta senza ragionamento;
+  con Gemma — nessun interruttore, HUD invariato, chat preesistenti
+  continuabili.
