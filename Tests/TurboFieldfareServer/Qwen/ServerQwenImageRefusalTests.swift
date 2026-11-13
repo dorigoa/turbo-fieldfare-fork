@@ -1,4 +1,5 @@
 import Foundation
+import NIOCore
 import Testing
 @testable import TurboFieldfare
 @testable import TurboFieldfareServerCore
@@ -66,6 +67,49 @@ struct ServerQwenImageRefusalTests {
         #expect(body.contains("image_not_supported"))
         #expect(body.contains(#""param":"messages""#))
         try await server.shutdown()
+    }
+
+    /// A real image reaches the streaming body parser first, which refuses
+    /// images before staging any byte. Under Qwen it must answer with the
+    /// D12 body too, not the companion-pack message of Gemma: the S23 curl
+    /// proof caught that gap.
+    @Test func streamedImageIsRefusedWithTheD12Body() async throws {
+        let modelID = "mlx-community/Qwen3.6-35B-A3B-4bit"
+        let server = TurboFieldfareHTTPServer(
+            modelID: modelID,
+            queueLimit: 1,
+            backend: QwenImageRefusingBackend(),
+            family: .qwen35Moe)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(
+            (#"{"model":"\#(modelID)","messages":[{"role":"user","content":["#
+             + #"{"type":"text","text":"what is this?"},"#
+             + #"{"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}}]}]}"#).utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        let body = String(decoding: data, as: UTF8.self)
+        #expect(body.contains("image input is not available for this model"))
+        #expect(body.contains("image_not_supported"))
+        #expect(!body.contains("vision_unavailable"))
+        try await server.shutdown()
+    }
+
+    /// Gemma keeps its companion-pack refusal from the same parser.
+    @Test func gemmaStreamedImageKeepsTheVisionMessage() throws {
+        let parser = StreamingChatRequestBody(visionCapability: "missing")
+        var buffer = ByteBuffer(bytes: Data(
+            #"{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}}]}]}"#.utf8))
+        #expect(throws: ServerRequestError.invalid(
+            message: "image support is unavailable",
+            param: "messages", code: "vision_unavailable")) {
+            try parser.feed(&buffer)
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+`TurboFieldfareServer` exposes a local Chat Completions API for one model,
+Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` without authentication
+or TLS. Do not expose it through a proxy or tunnel.
 
 ## Start the server
 
@@ -109,6 +109,41 @@ repository, so a client still set up for the 4-bit name is refused instead of
 being served a different variant without notice. `--model-id <id>` replaces
 the ID for either variant. `GET /v1/models` lists the ID in use, and responses
 echo it in their `model` field.
+
+## Qwen3.6
+
+The server also serves Qwen3.6-35B-A3B (4-bit). Pass its model directory; the
+server reads the family from the manifest, and the `model opened` and ready
+lines name it with `family=qwen3_5_moe`:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/qwen36.gturbo \
+  --port 8080 \
+  --max-context 16384
+```
+
+The API model ID is the one its manifest records,
+`mlx-community/Qwen3.6-35B-A3B-4bit`; `--model-id` replaces it as for Gemma.
+The differences from Gemma:
+
+- **Sampling defaults.** A request that omits `temperature`, `top_k` or
+  `top_p` gets the checkpoint's reference values: 1.0, 20 and 0.95. Values the
+  request sets are used as given.
+- **Reasoning.** Thinking is on by default. The reasoning text never reaches
+  `content`. Send `"chat_template_kwargs": {"enable_thinking": false}` to answer
+  without it; that object accepts only the boolean `enable_thinking`. Under
+  Gemma the field is still an unrecognized request field.
+- **Tool calls.** Tools are rendered by the model's own chat template, and the
+  model's XML tool calls come back in the OpenAI `tool_calls` field with
+  `finish_reason` `tool_calls`. A call to a tool the request did not declare
+  fails the request instead of reaching the client.
+- **Prompt reuse.** A request is reused only as a continuation at the exact
+  end of the cached prompt; any other request runs a full prefill. The
+  model's state cannot be rewound to an earlier point.
+- **Images.** Not available. A request with an image gets HTTP 400 with
+  `image_not_supported` and the message "image input is not available for
+  this model"; `--vision-pack` with a Qwen model is refused at startup.
 
 ## Connect a client
 

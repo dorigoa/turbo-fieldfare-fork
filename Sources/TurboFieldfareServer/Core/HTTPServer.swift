@@ -215,7 +215,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // elsewhere is counted and dropped.
             bodyParser = Self.carriesChatBody(head)
                 ? StreamingChatRequestBody(attachmentRoot: attachmentRoot,
-                                           visionCapability: visionCapability)
+                                           visionCapability: visionCapability,
+                                           family: family)
                 : nil
             bodyError = nil
             receivedBodyBytes = 0
