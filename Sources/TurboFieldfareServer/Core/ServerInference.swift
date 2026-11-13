@@ -806,6 +806,21 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
     }
 
+    /// The continuation bridges the prompt cache matches with (S23). Gemma's
+    /// tokenizer is its own bridge, as it always was; Qwen's gets an adapter
+    /// pinning the incoming request's thinking frame, so a resumed
+    /// continuation opens the generation prompt the caller asked for.
+    private func promptCacheBridge(
+        for request: ValidatedChatRequest
+    ) throws -> any ServerPromptContinuationBridge {
+        if family == .qwen35Moe {
+            return QwenPromptCacheBridge(
+                tokenizer: try qwenChatTokenizer,
+                enableThinking: request.enableThinking)
+        }
+        return try gemmaTokenizer
+    }
+
     public func generate(
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
@@ -1034,18 +1049,21 @@ public actor ServerModelSession: ServerInferenceBackend {
         // re-encoded; only a full-prefill miss needs them.
         let renderedTextIDs: [Int32]? = isMultimodal
             ? nil : try (prepared.promptIDs ?? renderPrompt(request))
-        // Interim within S23: the Qwen prompt cache is wired by the
-        // section's third step (reuse only as D6 allows). Until it is, a
-        // Qwen request always takes the full-prefill path, which is always
-        // legal: D6 guarantees a cold prefill works for every prompt.
-        let promptCacheActive = promptCacheMode == .singlePrefix && family == .gemma4
+        // Reuse is only ever a continuation at the exact end of the cached
+        // prefix - for both families, and for Qwen that is exactly what D6
+        // permits: continuing in queue at the current position always works,
+        // and anything else re-prefills in full (a miss takes the reset path,
+        // the one legal alternative). The bridges the match runs on come from
+        // the family's tokenizer (S23).
+        let promptCacheActive = promptCacheMode == .singlePrefix
         var cacheMatch: ServerPromptCacheMatch = .miss
         if promptCacheActive {
             cacheMatch = promptCache.match(
                 domain: promptCacheDomain,
                 request: request,
                 renderedPromptIDs: renderedTextIDs,
-                tokenizer: try gemmaTokenizer)
+                bridge: try promptCacheBridge(for: request),
+                family: family)
         }
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart

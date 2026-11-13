@@ -95,7 +95,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: continuation,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            bridge: tokenizer)
 
         guard case .hit(let effective, let cached) = match else {
             Issue.record("expected text continuation hit")
@@ -116,7 +116,7 @@ struct ServerPromptCacheTests {
         let prefix: [Int32] = [2, 3]
         var cache = ServerPromptCache()
         #expect(cache.match(domain: domain, request: initial, renderedPromptIDs: prefix + [4],
-                            tokenizer: tokenizer).missReason == .noEntry)
+                            bridge: tokenizer).missReason == .noEntry)
         cache.publish(domain: domain, request: initial, content: "answer", calls: [],
                       result: rawResult(prompt: [2], kvBacked: prefix, boundary: 106, reason: .endOfTurn))
         let otherDomain = ServerPromptCacheDomain(
@@ -125,14 +125,14 @@ struct ServerPromptCacheTests {
             kvStorage: domain.kvStorage, fp16RingEnabled: domain.fp16RingEnabled,
             templateSHA256: domain.templateSHA256)
         #expect(cache.match(domain: otherDomain, request: initial, renderedPromptIDs: prefix + [4],
-                            tokenizer: tokenizer).missReason == .domainChanged)
+                            bridge: tokenizer).missReason == .domainChanged)
         let tools = [GFTokenizer.FunctionDefinition(
             name: "read", description: "Read a file.", parameters: .object(["type": .string("object")]))]
         let changedTools = request(messages: initial.messages, tools: tools)
         #expect(cache.match(domain: domain, request: changedTools, renderedPromptIDs: prefix + [4],
-                            tokenizer: tokenizer).missReason == .toolsChanged)
+                            bridge: tokenizer).missReason == .toolsChanged)
         #expect(cache.match(domain: domain, request: initial, renderedPromptIDs: prefix + [4],
-                            tokenizer: tokenizer) == .hit(effectivePromptIDs: prefix + [4], cachedPromptTokens: 2))
+                            bridge: tokenizer) == .hit(effectivePromptIDs: prefix + [4], cachedPromptTokens: 2))
     }
 
     @Test func capturedOpenCodeToolResultUsesFrozenToolBoundary() async throws {
@@ -175,7 +175,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: continuation,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            bridge: tokenizer)
 
         guard case .hit(let effective, let cached) = match else {
             Issue.record("expected captured OpenCode tool-result hit")
@@ -268,7 +268,7 @@ struct ServerPromptCacheTests {
             request: continuation,
             renderedPromptIDs: try tokenizer.encodeToolChat(
                 messages: continuation.messages, tools: tools),
-            tokenizer: tokenizer)
+            bridge: tokenizer)
 
         guard case .hit(let effective, let cached) = match else {
             Issue.record("expected repeated-call tool-result hit")
@@ -371,7 +371,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: changed,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer).missReason == .historyDiverged)
+            bridge: tokenizer).missReason == .historyDiverged)
     }
 
     @Test func tailCompletedStopStringDoesNotPublishPrefix() async throws {
@@ -460,7 +460,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: continuation,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            bridge: tokenizer)
         // Refused by identity now, not by a blanket rule: the entry remembers
         // which image built it, so a client that drops the image parts cannot
         // resume onto a KV holding projected features it never sent. This is
@@ -493,7 +493,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: follow,
                              imageIdentities: [["image-a"], [], []]),
-            renderedPromptIDs: nil, tokenizer: tokenizer)
+            renderedPromptIDs: nil, bridge: tokenizer)
         guard case .hit = sameImage else {
             Issue.record("the same image must continue from the cached prefix")
             return
@@ -503,13 +503,13 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: follow,
                              imageIdentities: [["image-b"], [], []]),
-            renderedPromptIDs: nil, tokenizer: tokenizer)
+            renderedPromptIDs: nil, bridge: tokenizer)
         #expect(otherImage.missReason == .imagesDiverged)
 
         let noImage = cache.match(
             domain: domain,
             request: request(messages: follow, imageIdentities: [[], [], []]),
-            renderedPromptIDs: nil, tokenizer: tokenizer)
+            renderedPromptIDs: nil, bridge: tokenizer)
         #expect(noImage.missReason == .imagesDiverged)
     }
 
@@ -537,7 +537,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: follow,
                              imageIdentities: [["image-a"], [], ["image-b"]]),
-            renderedPromptIDs: nil, tokenizer: tokenizer)
+            renderedPromptIDs: nil, bridge: tokenizer)
         // The history and its images match, so this resumes via a render
         // rather than throwing the cached prefix away.
         #expect(match == .renderThenResume(cachedPromptTokens: kvBacked.count))
@@ -573,7 +573,7 @@ struct ServerPromptCacheTests {
             let follow = request(messages: messages, imageIdentities: identities)
             let match = cache.match(
                 domain: domain, request: follow,
-                renderedPromptIDs: nil, tokenizer: tokenizer)
+                renderedPromptIDs: nil, bridge: tokenizer)
             guard case .hit(let effective, let cached) = match else {
                 Issue.record("turn \(turn) lost the cached image prefix")
                 return
@@ -615,7 +615,7 @@ struct ServerPromptCacheTests {
                 domain: domain,
                 request: request(messages: follow,
                                  imageIdentities: [leading, [], []]),
-                renderedPromptIDs: nil, tokenizer: tokenizer)
+                renderedPromptIDs: nil, bridge: tokenizer)
         }
         guard case .hit = match(all) else {
             Issue.record("identical four-image prefix must reuse")
@@ -655,7 +655,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: follow,
                              imageIdentities: [[], [], ["image-a"], [], []]),
-            renderedPromptIDs: nil, tokenizer: tokenizer)
+            renderedPromptIDs: nil, bridge: tokenizer)
         #expect(moved.missReason == .imagesDiverged)
     }
 
@@ -710,7 +710,7 @@ struct ServerPromptCacheTests {
             maximumCompletionTokens: 16)
         #expect(cache.match(domain: domain, request: malformedFollow,
                             renderedPromptIDs: nil,
-                            tokenizer: tokenizer).missReason
+                            bridge: tokenizer).missReason
                 == .missingImageIdentity)
     }
 
@@ -734,7 +734,7 @@ struct ServerPromptCacheTests {
         ])
         guard case .hit = cache.match(
             domain: domain, request: follow,
-            renderedPromptIDs: nil, tokenizer: tokenizer) else {
+            renderedPromptIDs: nil, bridge: tokenizer) else {
             Issue.record("text-only continuation must still reuse the prefix")
             return
         }
@@ -783,7 +783,7 @@ struct ServerPromptCacheTests {
         let introducing = request(messages: messages, imageIdentities: identities)
         guard case .renderThenResume = cache.match(
             domain: domain, request: introducing,
-            renderedPromptIDs: nil, tokenizer: tokenizer) else {
+            renderedPromptIDs: nil, bridge: tokenizer) else {
             Issue.record("introducing an image should resume after a render")
             return
         }
@@ -800,7 +800,7 @@ struct ServerPromptCacheTests {
             let follow = request(messages: messages, imageIdentities: identities)
             guard case .hit(let effective, let cached) = cache.match(
                 domain: domain, request: follow,
-                renderedPromptIDs: nil, tokenizer: tokenizer) else {
+                renderedPromptIDs: nil, bridge: tokenizer) else {
                 Issue.record("turn \(turn) lost the late image prefix")
                 return
             }
@@ -826,7 +826,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: messages, imageIdentities: swapped),
             renderedPromptIDs: nil,
-            tokenizer: tokenizer).missReason == .imagesDiverged)
+            bridge: tokenizer).missReason == .imagesDiverged)
     }
 
     /// The rendered-prefix fast path must not be usable for an image request:
@@ -857,7 +857,7 @@ struct ServerPromptCacheTests {
             domain: domain,
             request: request(messages: follow,
                              imageIdentities: [["image-b"], [], []]),
-            renderedPromptIDs: rendered, tokenizer: tokenizer)
+            renderedPromptIDs: rendered, bridge: tokenizer)
         #expect(other.missReason == .imagesDiverged)
     }
 

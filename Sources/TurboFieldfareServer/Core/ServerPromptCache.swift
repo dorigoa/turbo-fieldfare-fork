@@ -6,6 +6,49 @@ public enum ServerPromptCacheMode: String, Sendable, Equatable {
     case singlePrefix = "single-prefix"
 }
 
+/// What the cache needs from a tokenizer to extend a cached prefix: the two
+/// continuation bridges. Local to the server module (S23) because the cache
+/// must not name a family's tokenizer type: Gemma's tokenizer already hands
+/// both methods with these exact signatures and conforms directly; Qwen's
+/// carries an extra `enableThinking` on each, which the caller pins to the
+/// incoming request (D11) - the cached turns are never re-rendered, only
+/// the continuation's generation prompt follows the new setting.
+protocol ServerPromptContinuationBridge: Sendable {
+    func encodeTextContinuation(userContent: String) -> [Int32]
+    func encodeToolResultContinuation(
+        cachedMessages: [GFTokenizer.Message],
+        assistant: GFTokenizer.Message,
+        incomingMessages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> [Int32]
+}
+
+extension GFTokenizer: ServerPromptContinuationBridge {}
+
+struct QwenPromptCacheBridge: ServerPromptContinuationBridge {
+    let tokenizer: QwenTokenizer
+    let enableThinking: Bool
+
+    func encodeTextContinuation(userContent: String) -> [Int32] {
+        tokenizer.encodeTextContinuation(userContent: userContent,
+                                         enableThinking: enableThinking)
+    }
+
+    func encodeToolResultContinuation(
+        cachedMessages: [GFTokenizer.Message],
+        assistant: GFTokenizer.Message,
+        incomingMessages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> [Int32] {
+        try tokenizer.encodeToolResultContinuation(
+            cachedMessages: cachedMessages,
+            assistant: assistant,
+            incomingMessages: incomingMessages,
+            tools: tools,
+            enableThinking: enableThinking)
+    }
+}
+
 struct ServerPromptCacheDomain: Sendable, Equatable {
     let modelID: String
     let sourceSnapshotHash: String?
@@ -165,7 +208,8 @@ struct ServerPromptCache: Sendable {
         domain: ServerPromptCacheDomain,
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32]?,
-        tokenizer: GFTokenizer
+        bridge: any ServerPromptContinuationBridge,
+        family: ModelFamily = .gemma4
     ) -> ServerPromptCacheMatch {
         guard let entry else { return .miss(.noEntry) }
         guard entry.domain == domain else { return .miss(.domainChanged) }
@@ -225,13 +269,14 @@ struct ServerPromptCache: Sendable {
             return matchTextContinuation(
                 entry: entry,
                 continuation: continuation,
-                tokenizer: tokenizer)
+                bridge: bridge)
         }
         return matchToolContinuation(
             entry: entry,
             request: request,
             continuation: continuation,
-            tokenizer: tokenizer)
+            bridge: bridge,
+            family: family)
     }
 
     private func assistantMatches(
@@ -255,7 +300,7 @@ struct ServerPromptCache: Sendable {
     private func matchTextContinuation(
         entry: ServerPromptCacheEntry,
         continuation: [GFTokenizer.Message],
-        tokenizer: GFTokenizer
+        bridge: any ServerPromptContinuationBridge
     ) -> ServerPromptCacheMatch {
         guard continuation.count == 1,
               continuation[0].role == .user,
@@ -266,14 +311,14 @@ struct ServerPromptCache: Sendable {
                 || entry.assistantTurn.rawStopReason == .maxTokens else {
             return .miss(.unsupportedContinuation)
         }
-        var bridge = tokenizer.encodeTextContinuation(userContent: content)
+        var bridgeIDs = bridge.encodeTextContinuation(userContent: content)
         if entry.assistantTurn.rawStopReason == .maxTokens {
-            bridge = entry.uncommittedBoundaryTokenIDs + bridge
-        } else if bridge.first != entry.uncommittedBoundaryTokenIDs.first {
+            bridgeIDs = entry.uncommittedBoundaryTokenIDs + bridgeIDs
+        } else if bridgeIDs.first != entry.uncommittedBoundaryTokenIDs.first {
             return .miss(.boundaryMismatch)
         }
         return .hit(
-            effectivePromptIDs: entry.kvBackedTokenIDs + bridge,
+            effectivePromptIDs: entry.kvBackedTokenIDs + bridgeIDs,
             cachedPromptTokens: entry.kvPosition)
     }
 
@@ -281,10 +326,23 @@ struct ServerPromptCache: Sendable {
         entry: ServerPromptCacheEntry,
         request: ValidatedChatRequest,
         continuation: [GFTokenizer.Message],
-        tokenizer: GFTokenizer
+        bridge: any ServerPromptContinuationBridge,
+        family: ModelFamily
     ) -> ServerPromptCacheMatch {
         let calls = entry.assistantTurn.message.toolCalls
-        guard entry.assistantTurn.rawStopReason == .toolCalls,
+        // Which raw stop closes a cached tool turn is a family fact: Gemma's
+        // tool template parks the stream on the tool-response marker, so its
+        // tool turn ends `.toolCalls`; Qwen has no tool-result wait token and
+        // closes every turn - tool calls included - on `im_end`, `.endOfTurn`.
+        // The bridge-first check below still pins the family's boundary, so
+        // accepting `.endOfTurn` here cannot resume onto another family's
+        // prompt.
+        let closesToolTurn: Bool
+        switch family {
+        case .gemma4: closesToolTurn = entry.assistantTurn.rawStopReason == .toolCalls
+        case .qwen35Moe: closesToolTurn = entry.assistantTurn.rawStopReason == .endOfTurn
+        }
+        guard closesToolTurn,
               continuation.count == calls.count,
               zip(continuation, calls).allSatisfy({ message, call in
                   message.role == .tool
@@ -298,9 +356,9 @@ struct ServerPromptCache: Sendable {
         // Not `try?` discarded: a bridge that fails to render is a distinct and
         // diagnosable condition, not the same as a history that simply
         // diverged, and both would otherwise arrive as one anonymous miss.
-        let bridge: [Int32]
+        let bridgeIDs: [Int32]
         do {
-            bridge = try tokenizer.encodeToolResultContinuation(
+            bridgeIDs = try bridge.encodeToolResultContinuation(
                 cachedMessages: entry.inputMessages,
                 assistant: entry.assistantTurn.message,
                 incomingMessages: request.messages,
@@ -308,11 +366,11 @@ struct ServerPromptCache: Sendable {
         } catch {
             return .miss(.bridgeRenderFailed)
         }
-        guard bridge.first == entry.uncommittedBoundaryTokenIDs.first else {
+        guard bridgeIDs.first == entry.uncommittedBoundaryTokenIDs.first else {
             return .miss(.boundaryMismatch)
         }
         return .hit(
-            effectivePromptIDs: entry.kvBackedTokenIDs + bridge,
+            effectivePromptIDs: entry.kvBackedTokenIDs + bridgeIDs,
             cachedPromptTokens: entry.kvPosition)
     }
 }
