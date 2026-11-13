@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Metal
 import Testing
@@ -845,22 +846,30 @@ struct QwenHybridForwardRunnerTests {
         #expect(!runner.chunkCommitState.isDirty)
     }
 
-    /// S20 step 8: prefill throughput with the default chunk (128 tokens:
-    /// 4 and 32 spans) on 512 and 4096 tokens, and token-at-a-time decode
-    /// after the 4096-token prefill. The runner uses `maxContext: 4224` so
-    /// the 4096-token prefill fits. The rates go to the report (2.9); they
-    /// are measurements, not golden bounds.
+    /// S20 step 8, extended by S26 step 1: prefill throughput on 512 and
+    /// 4096 tokens at chunks 128 and 256, plus token-at-a-time decode after
+    /// a default-chunk 4096-token prefill. With the S26 counters on, each
+    /// run also splits its wall time into CPU encode, GPU busy and await
+    /// seconds and counts the MoE work; one single-span run per chunk size
+    /// prints the per-layer groups / experts / dispatches / argument
+    /// buffers / expert-fetch of exactly one block. The runner uses
+    /// `maxContext: 4224` so the 4096-token prefill fits. The rates go to
+    /// the report (2.9); they are measurements, not golden bounds.
     @Test("the prefill and decode throughput are measured for the report")
     func prefillAndDecodeThroughputAreMeasured() async throws {
         let env = try makeEnvironment(maxContext: 4224)
         let runner = env.runner
         let vocabSize = env.model.config.vocabSize
+        let numLayers = env.model.config.numLayers
         let logits = try #require(env.device.makeBuffer(
             length: vocabSize * MemoryLayout<Float16>.size,
             options: .storageModeShared))
-        let config = PrefillRuntimeConfig.defaultChunked
-        #expect(config.chunkTokens == 128)
-        func prefill(_ count: Int) async throws -> (tokens: Int, duration: Duration) {
+        func seconds(_ duration: Duration) -> Double {
+            Double(duration.components.seconds)
+                + Double(duration.components.attoseconds) * 1e-18
+        }
+        func prefill(_ count: Int, config: PrefillRuntimeConfig) async throws
+            -> (tokens: Int, duration: Duration) {
             let tokens = Array(0..<count).map { Int32($0) }
             let clock = ContinuousClock()
             let start = clock.now
@@ -875,24 +884,80 @@ struct QwenHybridForwardRunnerTests {
             #expect(result.newPosition == count)
             return (count, duration)
         }
+        typealias Counters = QwenHybridForwardRunner.S26PrefillCounters
+        func printTotals(_ label: String, _ counters: Counters, spans: Int) {
+            print("S26 \(label): cpuEncode=\(counters.cpuEncodeSeconds)s "
+                + "gpu=\(counters.gpuSeconds)s await=\(counters.awaitSeconds)s "
+                + "commandBuffers=\(counters.gpuIntervals.count)")
+            var groups = 0, experts = 0, dispatches = 0, argBuffers = 0, fetch = 0.0
+            for layer in 0..<numLayers {
+                let stats = counters.layers[layer] ?? .init()
+                groups += stats.groups
+                experts += stats.expertsFetched
+                dispatches += stats.dispatches
+                argBuffers += stats.argumentBuffers
+                fetch += stats.expertFetchSeconds
+            }
+            let per = Double(spans)
+            print("S26 \(label) per span: groups=\(Double(groups) / per) "
+                + "expertsRead=\(Double(experts) / per) "
+                + "moeDispatches=\(Double(dispatches) / per) "
+                + "argBuffers=\(Double(argBuffers) / per) "
+                + "expertFetch=\(fetch / per)s")
+            let head = counters.layers[-1] ?? .init()
+            print("S26 \(label) embedding+final+head dispatches per span: "
+                + "\(Double(head.dispatches) / per)")
+        }
+        func printLayerTable(_ label: String, _ counters: Counters) {
+            print("S26 \(label) per-layer groups/experts/dispatches/argBuffers/fetch:")
+            for layer in 0..<numLayers {
+                let stats = counters.layers[layer] ?? .init()
+                print("S26   L\(layer): \(stats.groups)/\(stats.expertsFetched)/"
+                    + "\(stats.dispatches)/\(stats.argumentBuffers)/"
+                    + "\(stats.expertFetchSeconds)s")
+            }
+        }
 
         // Warm-up (one default span) before the timed runs.
         runner.reset()
-        let warmup = try await prefill(128)
+        let warmup = try await prefill(128, config: .defaultChunked)
         print("S20 step 8 warm-up prefill \(warmup.tokens) tokens: \(warmup.duration)")
 
-        for count in [512, 4096] {
+        for chunk in [128, 256] {
+            let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(chunk)
+            #expect(config.chunkTokens == chunk)
+            for count in [512, 4096] {
+                runner.reset()
+                let counters = Counters()
+                runner.s26Counters = counters
+                let run = try await prefill(count, config: config)
+                #expect(counters.waitForDrain())
+                runner.s26Counters = nil
+                let secondsOfRun = seconds(run.duration)
+                let rate = Double(run.tokens) / secondsOfRun
+                let spans = (count + chunk - 1) / chunk
+                print("S26 prefill \(run.tokens) tokens (chunk \(chunk), \(spans) spans): "
+                    + "\(secondsOfRun)s = \(rate) tokens/s")
+                printTotals("prefill \(count) chunk \(chunk)", counters, spans: spans)
+                #expect(rate > 0)
+            }
+            // One block, exactly: a single-span prefill of `chunk` tokens
+            // attributes one block's cost layer by layer.
             runner.reset()
-            let run = try await prefill(count)
-            let seconds = Double(run.duration / .seconds(1))
-            let rate = Double(run.tokens) / seconds
-            print("S20 step 8 prefill \(run.tokens) tokens "
-                + "(chunk \(config.chunkTokens), \(run.tokens / config.chunkTokens) spans): "
-                + "\(seconds)s = \(rate) tokens/s")
-            #expect(rate > 0)
+            let counters = Counters()
+            runner.s26Counters = counters
+            let block = try await prefill(chunk, config: config)
+            #expect(counters.waitForDrain())
+            runner.s26Counters = nil
+            print("S26 single block \(chunk) tokens: \(seconds(block.duration))s")
+            printTotals("block \(chunk)", counters, spans: 1)
+            printLayerTable("block \(chunk)", counters)
         }
 
-        // Decode token per token after the 4096-token prefill.
+        // Decode token per token after a fresh default-chunk 4096-token
+        // prefill, without counters (the S20 baseline conditions).
+        runner.reset()
+        _ = try await prefill(4096, config: .defaultChunked)
         let decodeCount = 128
         let clock = ContinuousClock()
         let decodeStart = clock.now
@@ -902,12 +967,99 @@ struct QwenHybridForwardRunnerTests {
                 token: id, position: 4096 + offset, into: logits)
         }
         let decodeDuration = clock.now - decodeStart
-        let decodeSeconds = Double(decodeDuration / .seconds(1))
+        let decodeSeconds = seconds(decodeDuration)
         let decodeRate = Double(decodeCount) / decodeSeconds
         #expect(runner.continuationPosition == 4096 + decodeCount)
-        print("S20 step 8 decode \(decodeCount) tokens after the 4096-token prefill: "
+        print("S26 decode \(decodeCount) tokens after the 4096-token prefill: "
             + "\(decodeSeconds)s = \(decodeRate) tokens/s")
         #expect(decodeRate > 0)
+    }
+
+    /// S26 step 1: the reference hashes the optimization steps 2-4 must
+    /// keep identical (the card's "regola dei risultati"). SHA-256 over the
+    /// FP16 logits of the last position for the six prompts at chunks 4 and
+    /// 128, plus the logits of eight greedy decode steps after p0. Saved to
+    /// `scratch/S26/baseline.json` (outside git) and printed for the report.
+    /// The chunk-4 and chunk-128 hashes must agree per prompt: the chunked
+    /// path is bit-deterministic across span splits (S20 step 6).
+    @Test("the S26 logit hash baseline is recorded for steps 2-5")
+    func s26LogitHashBaselineIsRecorded() async throws {
+        let env = try makeEnvironment()
+        let runner = env.runner
+        let vocabSize = env.model.config.vocabSize
+        let logits = try #require(env.device.makeBuffer(
+            length: vocabSize * MemoryLayout<Float16>.size, options: .storageModeShared))
+        func logitHash() -> String {
+            let raw = Data(bytes: logits.contents(),
+                           count: vocabSize * MemoryLayout<Float16>.size)
+            return SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var promptHashes: [String: [String: String]] = [:]
+        for name in ["p0", "p1", "p2", "p3", "p4", "p5"] {
+            let ids = try promptIDs(name)
+            var row: [String: String] = [:]
+            for chunk in [4, 128] {
+                runner.reset()
+                let config = PrefillRuntimeConfig.defaultChunked.replacingChunkTokens(chunk)
+                let result = try await runner.prefillChunked(
+                    tokens: ids[...], startPosition: 0, outputMode: .logits,
+                    config: config, into: logits, onProgress: { _ in })
+                #expect(result.newPosition == ids.count)
+                row["chunk\(chunk)"] = logitHash()
+            }
+            #expect(row["chunk4"] == row["chunk128"],
+                    "\(name): chunked prefill is not bit-deterministic across span splits")
+            promptHashes[name] = row
+            print("S26 hash \(name): chunk4 \(row["chunk4"]!) chunk128 \(row["chunk128"]!)")
+        }
+
+        // Eight greedy decode steps after p0: the prefill's logits decide
+        // token 1, each produce's logits decide the next one.
+        let ids0 = try promptIDs("p0")
+        runner.reset()
+        let result = try await runner.prefillChunked(
+            tokens: ids0[...], startPosition: 0, outputMode: .logits,
+            config: .defaultChunked, into: logits, onProgress: { _ in })
+        #expect(result.newPosition == ids0.count)
+        var greedyHashes: [String] = []
+        var greedyTokens: [Int] = []
+        var row = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+        for step in 0..<8 {
+            greedyHashes.append(logitHash())
+            let token = Self.topIndices(row, count: 1)[0]
+            greedyTokens.append(token)
+            if step < 7 {
+                try await runner.produce(token: Int32(token),
+                                         position: ids0.count + step, into: logits)
+                row = Self.readFP16(logits, byteOffset: 0, count: vocabSize)
+            }
+        }
+        print("S26 hash greedy p0 tokens \(greedyTokens)")
+        for (step, hash) in greedyHashes.enumerated() {
+            print("S26 hash greedy step \(step): \(hash)")
+        }
+
+        // Save the baseline (scratch, outside git) for the later steps.
+        var size = 0
+        sysctlbyname("hw.model", nil, &size, nil, 0)
+        var modelBytes = [CChar](repeating: 0, count: size)
+        sysctlbyname("hw.model", &modelBytes, &size, nil, 0)
+        let modelText = String(decoding: modelBytes.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
+                               as: UTF8.self)
+        let baseline: [String: Any] = [
+            "mac": modelText,
+            "variant": "Qwen3.6 4-bit (scratch/qwen36.gturbo)",
+            "promptLogitsSha256": promptHashes,
+            "greedyAfterP0": ["tokens": greedyTokens, "logitsSha256": greedyHashes],
+        ]
+        let directory = QwenTestResources.repoRoot.appendingPathComponent("scratch/S26")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: baseline,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: directory.appendingPathComponent("baseline.json"))
+        print("S26 baseline written to "
+            + directory.appendingPathComponent("baseline.json").path)
     }
 
     /// S19 step 3: the Gated DeltaNet mixer of layer 0 must reproduce the

@@ -98,6 +98,7 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 tokenId: UInt32(tokens[tokens.startIndex + span.tokenOffset + t]),
                 d: UInt32(hiddenSize), outScale: 1.0)
         }
+        s26Counters?.noteDispatches(layer: -1, rows)
         recordHiddenTap(.afterEmbedding, rows: rows, in: commandBuffer)
 
         // Layers 0..<cfg.numLayers on the first `rows` rows (3.5): a linear
@@ -148,6 +149,8 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 x: normedBuffer, xOffset: (rows - 1) * rowBytes, y: logits,
                 m: UInt32(vocabSize), n: UInt32(hiddenSize))
         }
+        // S26 counters: final RMSNorm + the lm_head of the final span.
+        s26Counters?.noteDispatches(layer: -1, 1 + (writeFinalHead ? 1 : 0))
         commandBuffer.commit()
         await commandBuffer.completed()
         finishHiddenTapRow(count: rows)
@@ -294,6 +297,12 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             commandBuffer: commandBuffer,
             a: hiddenBuffer, b: mixerBuffer, out: hiddenBuffer,
             n: hiddenSize * rows)
+
+        // S26 counters: one dispatch each for norm, qkv/z/a/b, conv, scale,
+        // gates, scan, gated norm, out proj, add, plus 2 per row for the
+        // per-head L2 loop (GEMM path; the GEMV fallback is never taken on
+        // this model, map S26).
+        s26Counters?.noteDispatches(layer: L, 12 + 2 * rows)
 
         // Test-only internals of this layer under the C7 golden keys, as in
         // the S19 layer: `v` is a slice of the raw `convOutBuffer` at
@@ -462,6 +471,11 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             a: hiddenBuffer, b: mixerBuffer, out: hiddenBuffer,
             n: hiddenSize * rows)
 
+        // S26 counters: one dispatch each for norm, q/k/v, split q/gate,
+        // two per-head norms, two RoPEs, KV write, attention, gate, o_proj
+        // and add (GEMM path, map S26).
+        s26Counters?.noteDispatches(layer: L, 14)
+
         // Test-only internals of this layer under the C7 golden keys
         // (layer3_internals.json), one row per chunk token, as in the S19
         // layer; the MoE block of the same layer adds its own keys.
@@ -551,6 +565,10 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 weightsOffset: t * slots * MemoryLayout<Float>.size,
                 experts: cfg.numExperts, topK: slots)
         }
+        // S26 counters: post-attention norm + router (one GEMM, or one GEMV
+        // per row on the fallback path) + one top-K per row.
+        s26Counters?.noteDispatches(layer: L,
+                                    routerMetadata.path == .fallback ? 1 + 2 * rows : 2 + rows)
 
         // The routed experts are read from the layer file (C5), so the ids
         // must be on the CPU first: commit, read the rows' ids and weights
@@ -609,13 +627,24 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
         while groupStart < union.count {
             let groupEnd = min(groupStart + 16, union.count)
             let group = Array(union[groupStart..<groupEnd])
+            // S26 counters: the serial expert read (pread) of this group.
+            let fetchStart = ContinuousClock.now
             let blobs = try await model.fetchRoutedExperts(layer: L, experts: group)
+            if let counters = s26Counters {
+                let fetched = ContinuousClock.now - fetchStart
+                counters.noteExpertFetch(layer: L,
+                                         seconds: Double(fetched.components.seconds)
+                                             + Double(fetched.components.attoseconds) * 1e-18)
+                counters.noteGroup(layer: L, experts: group.count)
+            }
             let blobByExpert = Dictionary(
                 uniqueKeysWithValues: zip(group, blobs.map(\.buffer)))
             commandBuffer = try makeCommandBuffer()
             // Every (row, slot) pair whose expert is in this group: the
             // one-slot pass writes row t, slot j's activations and
             // projection at (t*slots+j).
+            var pairDispatches = 0
+            var pairArgumentBuffers = 0
             for t in 0..<rows {
                 for slot in 0..<slots {
                     let id = idsRaw.load(fromByteOffset: (t * slots + slot) * idBytes,
@@ -626,6 +655,8 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                     else {
                         throw QwenRunnerError.argumentBufferFailed(name: "routedBlob")
                     }
+                    pairDispatches += 2
+                    pairArgumentBuffers += 1
                     let actsOffset = (t * slots + slot) * interBytes
                     let routedOffset = (t * slots + slot) * rowBytes
                     moe.encodeGateUpSilu(
@@ -644,6 +675,8 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                         hidden: hidden, inter: inter, slots: 1)
                 }
             }
+            s26Counters?.noteDispatches(layer: L, pairDispatches)
+            s26Counters?.noteArgumentBuffers(layer: L, pairArgumentBuffers)
             commandBuffer.commit()
             await commandBuffer.completed()
             groupStart = groupEnd
@@ -656,12 +689,14 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
         if sharedBlobLayer != L {
             try stageSharedExpert(layer: L, in: commandBuffer)
             sharedBlobLayer = L
+            s26Counters?.noteDispatches(layer: L, 1)
         }
         guard let sharedArgBuffer = moe.makeBlobsArgumentBuffer(
             blobs: [sharedBlobBuffer], slots: 1)
         else {
             throw QwenRunnerError.argumentBufferFailed(name: "sharedBlob")
         }
+        s26Counters?.noteArgumentBuffers(layer: L, 1)
         let gateScalar = try model.qwenSharedExpertGateScalar(layer: L)
         let gateRowBytes = MemoryLayout<Float16>.size
         for t in 0..<rows {
@@ -706,6 +741,9 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 y: hiddenBuffer, yOffset: t * rowBytes,
                 hidden: hidden, slots: slots)
         }
+        // S26 counters: per row, shared gate/up, shared down, gate GEMV,
+        // gate sigmoid and the residual add.
+        s26Counters?.noteDispatches(layer: L, 5 * rows)
 
         // Test-only: the routed contribution alone per row (the golden
         // `routed_out`): the residual kernel with zero residual and shared

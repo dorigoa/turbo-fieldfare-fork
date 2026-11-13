@@ -170,6 +170,12 @@ public final class QwenHybridForwardRunner: LogitProducer,
     /// `tappedInternals`. `produce` still advances the cache.
     internal var debugStopAfterLayer: Int?
 
+    /// Test-only (S26 step 1): when set, the chunked prefill records the
+    /// cost breakdown (CPU encode, GPU busy and expert-fetch seconds, per
+    /// layer groups / experts / dispatches). `nil` in production: every
+    /// hook below is a single `nil` check on already-cold paths.
+    internal var s26Counters: S26PrefillCounters?
+
     /// Recorded hidden rows of the current generation, layout as above.
     internal private(set) var tappedHidden: MTLBuffer?
     /// Tokens recorded so far (one row per point each).
@@ -998,6 +1004,7 @@ public final class QwenHybridForwardRunner: LogitProducer,
         guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
             throw QwenRunnerError.commandBufferFailed
         }
+        s26Counters?.noteCreated(commandBuffer)
         return commandBuffer
     }
 
@@ -1047,6 +1054,146 @@ public final class QwenHybridForwardRunner: LogitProducer,
         guard let tap = debugHiddenTap,
               tappedHiddenCount + count <= tap.rows else { return }
         tappedHiddenCount += count
+    }
+
+    // MARK: - S26 prefill cost counters (test-only)
+
+    /// S26 step 1: a test-only split of the chunked prefill cost. While a
+    /// test holds `s26Counters`, every command buffer the runner creates is
+    /// also timed (CPU encode = creation → scheduled, GPU busy and await =
+    /// the buffer's own GPU stamps), the MoE block counts its expert groups,
+    /// fetched experts, dispatches, argument buffers and fetch waits, and
+    /// the blocks count dispatches and blobs. The counters add no Metal
+    /// behaviour change: the handlers only record, production runs never
+    /// allocate them. `waitForDrain()` closes the window between a completed
+    /// buffer and its asynchronous completion handler.
+    final class S26PrefillCounters: @unchecked Sendable {
+
+        struct LayerStats {
+            var groups = 0
+            var expertsFetched = 0
+            var dispatches = 0
+            var argumentBuffers = 0
+            var expertFetchSeconds = 0.0
+        }
+
+        private let lock = NSLock()
+        private var createdCount = 0
+        private var completedCount = 0
+        private var stamps: [ObjectIdentifier: (created: ContinuousClock.Instant,
+                                               scheduled: ContinuousClock.Instant?)] = [:]
+
+        /// Σ CPU time from `makeCommandBuffer` to the buffer being scheduled.
+        var cpuEncodeSeconds = 0.0
+        /// Σ GPU busy time of the completed buffers (gpuEndTime − gpuStartTime).
+        var gpuSeconds = 0.0
+        /// Σ wall time from scheduled to completed (await plus GPU tail).
+        var awaitSeconds = 0.0
+        /// Completed buffers' GPU stamps, in creation order (diagnostics).
+        var gpuIntervals: [(start: TimeInterval, end: TimeInterval)] = []
+        /// MoE-block dispatches outside any layer (none today).
+        var nonLayerDispatches = 0
+        var layers: [Int: LayerStats] = [:]
+
+        func reset() {
+            lock.lock()
+            createdCount = 0
+            completedCount = 0
+            stamps.removeAll()
+            lock.unlock()
+            cpuEncodeSeconds = 0
+            gpuSeconds = 0
+            awaitSeconds = 0
+            gpuIntervals = []
+            nonLayerDispatches = 0
+            layers = [:]
+        }
+
+        /// Called by `makeCommandBuffer`: time the buffer's CPU encode with
+        /// the scheduled handler and its GPU window with the completed one.
+        func noteCreated(_ commandBuffer: MTLCommandBuffer) {
+            let created = ContinuousClock.now
+            lock.lock()
+            createdCount += 1
+            stamps[ObjectIdentifier(commandBuffer)] = (created, nil)
+            lock.unlock()
+            commandBuffer.addScheduledHandler { [weak self] buffer in
+                guard let self else { return }
+                let scheduled = ContinuousClock.now
+                self.lock.lock()
+                if var entry = self.stamps[ObjectIdentifier(buffer)],
+                   entry.scheduled == nil {
+                    entry.scheduled = scheduled
+                    self.stamps[ObjectIdentifier(buffer)] = entry
+                    self.cpuEncodeSeconds += Self.seconds(scheduled - entry.created)
+                }
+                self.lock.unlock()
+            }
+            commandBuffer.addCompletedHandler { [weak self] buffer in
+                guard let self else { return }
+                let completed = ContinuousClock.now
+                self.lock.lock()
+                if let entry = self.stamps.removeValue(forKey: ObjectIdentifier(buffer)) {
+                    if let scheduled = entry.scheduled {
+                        self.awaitSeconds += Self.seconds(completed - scheduled)
+                    }
+                    let start = buffer.gpuStartTime
+                    let end = buffer.gpuEndTime
+                    if end >= start {
+                        self.gpuSeconds += end - start
+                        self.gpuIntervals.append((start, end))
+                    }
+                }
+                self.completedCount += 1
+                self.lock.unlock()
+            }
+        }
+
+        /// Waits until every created buffer's completion handler has run
+        /// (bounded), so a test can read the totals after a run.
+        func waitForDrain(timeout: Duration = .seconds(5)) -> Bool {
+            let deadline = ContinuousClock.now + timeout
+            while ContinuousClock.now < deadline {
+                lock.lock()
+                let drained = createdCount == completedCount
+                lock.unlock()
+                if drained { return true }
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            return false
+        }
+
+        func noteExpertFetch(layer: Int, seconds: Double) {
+            lock.lock()
+            layers[layer, default: LayerStats()].expertFetchSeconds += seconds
+            lock.unlock()
+        }
+
+        func noteGroup(layer: Int, experts: Int) {
+            lock.lock()
+            var stats = layers[layer, default: LayerStats()]
+            stats.groups += 1
+            stats.expertsFetched += experts
+            layers[layer] = stats
+            lock.unlock()
+        }
+
+        func noteDispatches(layer: Int, _ count: Int) {
+            lock.lock()
+            layers[layer, default: LayerStats()].dispatches += count
+            lock.unlock()
+        }
+
+        func noteArgumentBuffers(layer: Int, _ count: Int) {
+            lock.lock()
+            layers[layer, default: LayerStats()].argumentBuffers += count
+            lock.unlock()
+        }
+
+        private static func seconds(_ duration: Duration) -> Double {
+            Double(duration.components.seconds)
+                + Double(duration.components.attoseconds) * 1e-18
+        }
     }
 }
 
