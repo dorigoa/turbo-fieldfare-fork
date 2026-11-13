@@ -148,3 +148,20 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   prefill completo. D11 (823-828): `<think>` mai nel contenuto; app: "Thinking…" +
   interruttore (solo Qwen). D12 (829-832): immagini Qwen mai accettate; UI già gate da
   S24, runtime fail-closed. D13 (833-837): ChatTokenizer; funzioni esistenti stessa firma.
+
+## Aggiornamenti passo 2 (38ec4db) — per il passo 3
+- `MultimodalConversation.swift` dopo il passo 2 (righe nuove): proprietà `renderer` :287,
+  `tokenizer: any ChatTokenizer & Sendable` :293, `runner: any LanguageModelRunner` :296;
+  init Gemma (firma invariata) :329, init generale :356; guard D12 `generate` :546,
+  `restore` :749; downcast GFTokenizer in `encodeTurn` :874.
+- Passo 3: i call site di `rewind` sono ora `:642` (`restoreAfterFailure`, catch di
+  `generate`, `lineageBroken = true` :645) e `:672` (`trimHiddenStopTokens`, stop-string,
+  `lineageBroken = true` :675). Helper `MultimodalConversationKVRecovery` invariato :185–229
+  (lancia `.lineageRecoveryFailed`). Fallback D6 = catch di `QwenRewindError.rewindUnsupported`
+  (QwenHybridForwardRunner.swift:6): `reset` + rigioco di `kvTokenIDs` nudi con
+  `runRawPrefill(start: .reset)` come in `restore` :818-841, non `lineageBroken`.
+- Test: `ScriptedConversationRunner` (private, in
+  `Tests/…/Generation/Qwen/MultimodalConversationQwenPromptTests.swift`) ha già cursore,
+  `prepared`, `resetCount`, `rewind(to:)` = set del cursore: per il passo 3 aggiungere un flag
+  `rewindThrows` che lancia `.rewindUnsupported` e riusare il modello del toy
+  (`toyModel()` + `ModelLoaderTests.writeToySynthetic()`).
