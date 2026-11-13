@@ -577,7 +577,9 @@ actor RealInferenceSession {
     /// produced (S25 step 2). Fails closed on a family/tokenizer mismatch:
     /// reaching one means a tokenizer from another family was cached.
     nonisolated static func promptRenderer(family: ModelFamily,
-                                           tokenizer: any ChatTokenizer) throws -> any ConversationPromptRenderer {
+                                           tokenizer: any ChatTokenizer,
+                                           enableThinking: Bool = true) throws
+        -> any ConversationPromptRenderer {
         switch family {
         case .gemma4:
             guard let gemma = tokenizer as? GFTokenizer else {
@@ -590,9 +592,11 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed(
                     "the loaded tokenizer is not a Qwen tokenizer")
             }
-            // `enableThinking` stays at the default until step 5 carries the
-            // request-level switch down from the decode protocol.
-            return QwenConversationPromptRenderer(tokenizer: qwen)
+            // The request's `enableThinking` arrives here (S25 step 5): the
+            // same flag picks the generation prompt's frame and the
+            // assistant decoder's start state, so they cannot disagree.
+            return QwenConversationPromptRenderer(tokenizer: qwen,
+                                                  enableThinking: enableThinking)
         }
     }
 
@@ -649,7 +653,8 @@ actor RealInferenceSession {
         prefillConfig: PrefillRuntimeConfig,
         progress: ProgressState,
         memorySampler: AppMemorySampler,
-        report: @escaping @Sendable (RawDecodeProgress) -> Void
+        report: @escaping @Sendable (RawDecodeProgress) -> Void,
+        onThinking: @escaping @Sendable (Bool) -> Void
     ) async throws -> TurnOutcome {
             // D12 (S25 step 4): refuse images for every non-Gemma family
             // before hashing a byte or touching the model.
@@ -724,13 +729,61 @@ actor RealInferenceSession {
             progress.prefillStart = Date()
 
 
+        // D11 (S25 step 5): the first turn of a chat can arrive here (the gate
+        // admits a turn-less one as a one-shot), so the single-prompt path is
+        // also app content: a Qwen thinking frame must not reach `report`
+        // here either. The wrap mirrors the conversation's loop, and for a
+        // family that does not filter — Gemma — it is a pass-through, the
+        // call below exactly as it was.
+        let thinkingStream = ConversationThinkingStream(renderer: renderer,
+                                                        onThinking: onThinking)
+        defer { thinkingStream.closeTurn() }
+        var decodingFailure: Error?
+        let stopFlag = stopFlagReader()
         let result = try await runRawCompletion(
             producer: runner, tokenizer: tokenizer, promptIds: promptIds,
             multimodalInput: multimodalInput,
             config: config, context: ctx, scratch: scratch,
             prefillConfig: prefillConfig,
-            shouldStop: stopFlagReader(),
-            onProgress: report)
+            shouldStop: {
+                // A poisoned decoder is poisoned for good: stop like the CLI's
+                // Qwen path does, and let the recorded error fail the turn.
+                if decodingFailure != nil { return true }
+                return stopFlag()
+            }) { progress in
+                guard thinkingStream.isFiltering else {
+                    report(progress)
+                    return
+                }
+                switch progress {
+                case .prefill:
+                    report(progress)
+                case .token(let index, let id, let delta):
+                    guard decodingFailure == nil else { break }
+                    do {
+                        let visible = try thinkingStream.consume(delta)
+                        if !visible.isEmpty {
+                            report(.token(index: index, id: id, delta: visible))
+                        }
+                    } catch { decodingFailure = error }
+                case .tail(let tail):
+                    guard decodingFailure == nil else { break }
+                    do {
+                        let visible = try thinkingStream.consume(tail)
+                        if !visible.isEmpty {
+                            report(.tail(visible))
+                        }
+                    } catch { decodingFailure = error }
+                }
+            }
+        // The decoder's finish flush, same order as the conversation's: the
+        // run is over, held text surfaces, an unclosed block throws — and a
+        // one-shot holds no lineage, so the error simply fails the turn.
+        do {
+            let flushed = try thinkingStream.finish()
+            if !flushed.isEmpty { report(.tail(flushed)) }
+        } catch { decodingFailure = decodingFailure ?? error }
+        if let decodingFailure { throw decodingFailure }
         return TurnOutcome(
             reason: result.reason, prefillSeconds: result.prefillSeconds,
             decodeSeconds: result.decodeSeconds, newTokens: result.newTokens,
@@ -796,9 +849,11 @@ actor RealInferenceSession {
     private func runConversationTurn(
         request: AppGenerationRequest,
         prefillConfig: PrefillRuntimeConfig,
+        renderer: any ConversationPromptRenderer,
         progress: ProgressState,
         memorySampler: AppMemorySampler,
-        report: @escaping @Sendable (RawDecodeProgress) -> Void
+        report: @escaping @Sendable (RawDecodeProgress) -> Void,
+        onThinking: @escaping @Sendable (Bool) -> Void
     ) async throws -> TurnOutcome {
         // D12 (S25 step 4): image turns are refused for every non-Gemma family
         // before the conversation is built and before the attachments are even
@@ -808,6 +863,11 @@ actor RealInferenceSession {
                 "Image support is unavailable: this model family does not accept images.")
         }
         let conversation = try conversationForTurn(request)
+        // The conversation may predate this request's thinking switch, and a
+        // fresh one was built from the session's default renderer. Hand it the
+        // turn's renderer before anything encodes: the renderer is consulted
+        // only at turn encoding, never under a live decode (S25 step 5).
+        await conversation.setPromptRenderer(renderer)
         var parts: [MultimodalContinuationPart] = []
         var imageURLs: [URL] = []
         for attachment in request.imageAttachments {
@@ -840,6 +900,7 @@ actor RealInferenceSession {
                 prefillConfig: prefillConfig,
                 checkCancellation: { try Task.checkCancellation() },
                 shouldStop: stopFlagReader(),
+                onThinking: onThinking,
                 onProgress: report)
             progress.promptTokenCount = turn.promptTokens
             // The conversation's own count. `promptTokens + completionTokens`
@@ -910,8 +971,22 @@ actor RealInferenceSession {
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
-            guard let runner, let tokenizer, let promptRenderer, let ctx, let scratch else {
+            guard let runner, let tokenizer, let promptRenderer, let ctx, let scratch,
+                  let family = loadedFamily else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
+            }
+            // D11 (S25 step 5): the thinking switch rides the request. The
+            // session's renderer is the family default (on), so only an
+            // explicit `false` forces a rebuild — and rebuild it is, because
+            // the frame decision and the assistant decoder's start state both
+            // live on the renderer.
+            let turnRenderer: any ConversationPromptRenderer
+            if request.enableThinking == false {
+                turnRenderer = try Self.promptRenderer(family: family,
+                                                       tokenizer: tokenizer,
+                                                       enableThinking: false)
+            } else {
+                turnRenderer = promptRenderer
             }
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
@@ -949,19 +1024,27 @@ actor RealInferenceSession {
                 }
             }
 
+            // D11 (S25 step 5): the block's open/closed state goes to the app
+            // as its own event; the conversation reports it only on the
+            // transitions, and closes the block during its own unwind, so the
+            // state can never outlive the run.
+            let reportThinking: @Sendable (Bool) -> Void = { active in
+                continuation.yield(.thinking(active: active))
+            }
             let outcome: TurnOutcome
             if request.continuesConversation {
                 outcome = try await runConversationTurn(
                     request: request, prefillConfig: prefillConfig,
+                    renderer: turnRenderer,
                     progress: progress, memorySampler: memorySampler,
-                    report: report)
+                    report: report, onThinking: reportThinking)
             } else {
                 outcome = try await runOneShot(
                     request: request, runner: runner, tokenizer: tokenizer,
-                    renderer: promptRenderer,
+                    renderer: turnRenderer,
                     ctx: ctx, scratch: scratch, prefillConfig: prefillConfig,
                     progress: progress, memorySampler: memorySampler,
-                    report: report)
+                    report: report, onThinking: reportThinking)
             }
             let result = outcome
 

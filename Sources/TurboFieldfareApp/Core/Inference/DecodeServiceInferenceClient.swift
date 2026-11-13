@@ -245,7 +245,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID,
                         conversationEpoch: request.conversationEpoch,
-                        turnIndex: request.turnIndex)
+                        turnIndex: request.turnIndex,
+                        enableThinking: request.enableThinking)
                     try write(.generate(command), to: handles.input,
                               expecting: handles.responses)
 
@@ -272,6 +273,15 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             // The stored reading is not observed by the UI, so
                             // yield an event that causes it to redraw.
                             continuation.yield(.memorySample)
+                            continue
+                        }
+                        if event.kind == .thinking {
+                            // A thinking transition is a state statement, not
+                            // a stream position: it carries no sequence and
+                            // consumes none, so the prefill/snapshot check
+                            // below stays contiguous. A peer that never sets
+                            // the field cannot produce this kind anyway.
+                            continuation.yield(.thinking(active: event.thinkingActive ?? true))
                             continue
                         }
                         if event.kind == .prefill || event.kind == .snapshot {

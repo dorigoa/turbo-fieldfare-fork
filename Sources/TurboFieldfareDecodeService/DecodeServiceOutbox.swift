@@ -17,6 +17,11 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         var terminalCommitted = false
         var finished = false
         var sequence: UInt64 = 0
+        /// Thinking-block transitions waiting for the next drain (S25 step 5,
+        /// D11). Coalesced rather than dropped: a true/false pair inside one
+        /// 100 ms window still has to end with the block closed, and one
+        /// bool cannot say which.
+        var thinkingQueue: [Bool] = []
     }
 
     private let condition = NSCondition()
@@ -54,6 +59,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         case .token(let token):
             state.pendingText += token.textDelta
             state.latestToken = token
+        case .thinking(let active):
+            state.thinkingQueue.append(active)
+            condition.signal()
         case .finished(let diagnostics):
             if !state.terminalCommitted {
                 state.terminal = terminal(.finished, diagnostics: diagnostics)
@@ -105,10 +113,12 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             let token = state.latestToken
             let terminal = state.terminal
             let done = state.finished
+            let thinking = state.thinkingQueue
             state.latestPrefill = nil
             state.pendingText = ""
             state.latestToken = nil
             state.terminal = nil
+            state.thinkingQueue = []
             var prefillSequence: UInt64?
             if prefill != nil {
                 state.sequence &+= 1
@@ -123,7 +133,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
 
             _ = memorySampler.sample()
 
-            if prefill == nil, text.isEmpty, token == nil, terminal == nil, !done {
+            if prefill == nil, text.isEmpty, token == nil, terminal == nil,
+               thinking.isEmpty, !done {
                 let snapshot = DecodeServiceEvent(
                     kind: .memory, generationID: generationID,
                     currentMemoryBytes: memorySampler.sample(),
@@ -154,6 +165,19 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes())
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+            }
+            // Thinking transitions ride ahead of the terminal event so an
+            // open block can never outlive its run on the client: the
+            // conversation closes it during the turn's unwind, before the
+            // terminal is published, and the queue preserves that order.
+            for active in thinking {
+                let event = DecodeServiceEvent(
+                    kind: .thinking, generationID: generationID,
+                    currentMemoryBytes: memorySampler.sample(),
+                    peakMemoryBytes: memorySampler.peakBytes,
+                    visionTowerMappedBytes: towerBytes(),
+                    thinkingActive: active)
+                try handle.write(contentsOf: DecodeFrameCodec.encode(event))
             }
             if let terminal {
                 try handle.write(contentsOf: DecodeFrameCodec.encode(terminal))

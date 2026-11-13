@@ -96,6 +96,62 @@ import TurboFieldfareDecodeProtocol
         #expect(writerFinished.wait(timeout: .now() + 5) == .success)
     }
 
+    /// S25 step 5: thinking transitions have to arrive in order and before
+    /// the terminal event — an indicator left open is a lie — and they must
+    /// not consume sequence numbers, because the client's contiguity check
+    /// only counts prefill and snapshot frames.
+    @Test func thinkingTransitionsArriveBeforeTheTerminalAndKeepTheSequence() throws {
+        let generationID = UUID()
+        let outbox = DecodeServiceOutbox(generationID: generationID)
+        let pipe = Pipe()
+        let writerFinished = DispatchSemaphore(value: 0)
+        let writer = Thread {
+            defer {
+                try? pipe.fileHandleForWriting.close()
+                writerFinished.signal()
+            }
+            try? outbox.runWriter(to: pipe.fileHandleForWriting)
+        }
+        writer.start()
+
+        outbox.publish(.thinking(active: true))
+        outbox.publish(.token(AppTokenEvent(index: 0, textDelta: "V",
+                                            elapsedDecodeSeconds: 1)))
+        outbox.publish(.thinking(active: false))
+        outbox.publish(.finished(diagnostics(stopReason: .cancelled)))
+
+        var thinking: [Bool] = []
+        var snapshotSequence: UInt64?
+        var sawTerminal = false
+        readFrames: while true {
+            let event = try DecodeFrameCodec.read(
+                DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+            switch event.kind {
+            case .thinking:
+                guard let active = event.thinkingActive else {
+                    Issue.record("a thinking event without its state")
+                    break
+                }
+                thinking.append(active)
+            case .snapshot:
+                snapshotSequence = event.sequence
+            case .finished:
+                sawTerminal = true
+                break readFrames
+            default:
+                break
+            }
+        }
+        #expect(thinking == [true, false])
+        // The thinking frames rode alongside the snapshot without touching
+        // the counter the client validates.
+        #expect(snapshotSequence == 1)
+        #expect(sawTerminal)
+
+        outbox.finish()
+        #expect(writerFinished.wait(timeout: .now() + 5) == .success)
+    }
+
     @Test func liveEventsCarryTheImageTowerFigure() throws {
         let generationID = UUID()
         let outbox = DecodeServiceOutbox(

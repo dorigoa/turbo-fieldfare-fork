@@ -94,6 +94,12 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// committed, so a dropped or duplicated turn is a refusal rather than a
     /// silently reordered conversation.
     public var turnIndex: Int?
+    /// Whether this turn's Qwen generation prompt opens its thinking block
+    /// (S25 step 5, D11). Optional because absent means on: a peer predating
+    /// the switch, or a client that has no switch, gets the model's default
+    /// behaviour rather than a silently muted one. Ignored by families whose
+    /// template has no thinking frame.
+    public var enableThinking: Bool?
 
     public init(prompt: String,
                 imageAttachments: [DecodeImageAttachment]? = nil,
@@ -103,7 +109,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID(),
                 conversationEpoch: UUID? = nil,
-                turnIndex: Int? = nil) {
+                turnIndex: Int? = nil,
+                enableThinking: Bool? = nil) {
         self.conversationEpoch = conversationEpoch
         self.turnIndex = turnIndex
         self.prompt = prompt
@@ -116,6 +123,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
+        self.enableThinking = enableThinking
     }
 }
 
@@ -208,6 +216,11 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     /// Carries a live memory reading while image encoding or another silent
     /// phase has not produced progress or tokens yet.
     case memory
+    /// The thinking-block state of a turn that has one (S25 step 5, D11):
+    /// `thinkingActive` is true while the model reasons and false when the
+    /// block closes or the turn ends. A family with no thinking frame never
+    /// sends it.
+    case thinking
     case finished
     case cancelled
     case failed
@@ -318,6 +331,10 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var boundaryNeedsReplay: Bool?
     public var prefill: DecodePrefillDiagnostics?
     public var runner: DecodeRunnerDiagnostics?
+    /// The state carried by a `.thinking` event (S25 step 5, D11). Nil on
+    /// every other event, including from a peer that predates it: a missing
+    /// field is no state change.
+    public var thinkingActive: Bool?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",
@@ -338,7 +355,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 boundaryTokenIDs: [Int32]? = nil,
                 boundaryNeedsReplay: Bool? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
-                runner: DecodeRunnerDiagnostics? = nil) {
+                runner: DecodeRunnerDiagnostics? = nil,
+                thinkingActive: Bool? = nil) {
         self.kind = kind
         self.generationID = generationID
         self.sequence = sequence
@@ -366,6 +384,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.boundaryNeedsReplay = boundaryNeedsReplay
         self.prefill = prefill
         self.runner = runner
+        self.thinkingActive = thinkingActive
     }
 }
 

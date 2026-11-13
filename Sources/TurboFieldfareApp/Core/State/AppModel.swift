@@ -154,6 +154,10 @@ public final class AppModel {
     public var loadState: AppModelLoadState = .notLoaded
     public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
     public internal(set) var phase: AppGenerationPhase = .idle
+    /// True while the running turn is reasoning inside its thinking frame
+    /// (S25 step 5, D11). Only families with a thinking frame report one, so
+    /// this is always false for Gemma; every generation run starts it closed.
+    public private(set) var isThinking: Bool = false
     public private(set) var liveTokenCount: Int = 0
     public private(set) var liveElapsedDecodeSeconds: Double = 0
     public internal(set) var livePrefillDone: Int = 0
@@ -2953,6 +2957,7 @@ public final class AppModel {
             options: request.runtimeOptions,
             forceLogitsHead: !request.isPureGreedy)
         isCancellationPending = false
+        isThinking = false
         liveTokenCount = 0
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
@@ -3153,6 +3158,11 @@ public final class AppModel {
             livePrefillDone = done
             livePrefillTotal = total
             sampleLiveMemory()
+        case .thinking(let active):
+            // The runtime reports only transitions, and it closes an open
+            // block during the turn's own unwind, so the state cannot
+            // outlive the run. The HUD reads `isThinking` (step 6).
+            isThinking = active
         case .token(let token):
             phase = .decode
             liveTokenCount = token.index + 1

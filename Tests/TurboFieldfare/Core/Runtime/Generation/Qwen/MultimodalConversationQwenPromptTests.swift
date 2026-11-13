@@ -134,7 +134,10 @@ struct MultimodalConversationQwenPromptTests {
             vocabSize: tokenizer.vocabSize, maxContext: 8192,
             step: scriptNext(a: a, b: b, end: end))
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
-        let renderer = QwenConversationPromptRenderer(tokenizer: tokenizer)
+        // Thinking off (S25 step 5): this test watches the cache contract,
+        // and the D11 filter would withhold the scripted "ab" as reasoning.
+        let renderer = QwenConversationPromptRenderer(tokenizer: tokenizer,
+                                                      enableThinking: false)
         let conversation = MultimodalConversation(
             model: try toyModel(), context: context,
             renderer: renderer, tokenizer: tokenizer, runner: runner,
@@ -213,6 +216,79 @@ struct MultimodalConversationQwenPromptTests {
         #expect(try on.continuationTokens(userText: text) != off.continuationTokens(userText: text))
     }
 
+    /// D11 (S25 step 5): a Qwen turn streams inside its thinking frame. The
+    /// reasoning never reaches the turn text, the reported state opens with
+    /// the first reasoning fragment, and it closes once visible content —
+    /// here, the answer after the frame's closer — arrives.
+    @Test("reasoning stays out of the turn text and the state closes on the visible answer (D11)")
+    func reasoningStaysOutOfTextAndStateCloses() async throws {
+        let a = try byteID("a"), b = try byteID("b"), c = try byteID("c")
+        let visible = try byteID("V")
+        let end = tokenizer.imEndID
+        let tag = try ["<", "/", "t", "h", "i", "n", "k", ">"].map { try byteID($0) }
+        // `a b c` are reasoning, the tag closes the frame, `V` is the answer.
+        let next: [Int32: Int32] = {
+            var steps: [Int32: Int32] = [a: b, b: c, c: tag[0], visible: end]
+            for (from, to) in zip(tag, tag.dropFirst()) { steps[from] = to }
+            steps[tag[tag.count - 1]] = visible
+            return steps
+        }()
+        let runner = ScriptedConversationRunner(
+            vocabSize: tokenizer.vocabSize, maxContext: 8192) { input, _ in
+                if let following = next[input] { return .argmax(following) }
+                // First step: the prompt's last token is the frame's newline,
+                // not a scripted input; start the answer with `a`.
+                return .argmax(a)
+            }
+        let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
+        let conversation = MultimodalConversation(
+            model: try toyModel(), context: context,
+            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer),
+            tokenizer: tokenizer, runner: runner,
+            scratch: scratch, maxContext: 8192)
+        let states = Mutex<[Bool]>([])
+        let turn = try await conversation.send(
+            parts: [.text("why")],
+            config: GenerationConfig(maxNewTokens: 16, temperature: 0),
+            prefillConfig: .off,
+            onThinking: { active in states.withLock { $0.append(active) } })
+        // Only the answer survives the filter — not the reasoning, and not
+        // the frame's markers.
+        #expect(turn.text == "V")
+        #expect(turn.reason == .endOfTurn)
+        // Opened by the first reasoning fragment, closed by the first visible
+        // text after the closer; `closeTurn` afterwards is a no-op.
+        #expect(states.withLock { $0 } == [true, false])
+    }
+
+    /// The switch reaching the pipeline end to end: with thinking off the
+    /// decoder starts outside the frame, so no state ever opens and the
+    /// whole streamed text is the answer.
+    @Test("a thinking-off turn opens no state and filters nothing (D11)")
+    func thinkingOffTurnPassesTextThrough() async throws {
+        let a = try byteID("a"), b = try byteID("b")
+        let end = tokenizer.imEndID
+        let runner = ScriptedConversationRunner(
+            vocabSize: tokenizer.vocabSize, maxContext: 8192,
+            step: scriptNext(a: a, b: b, end: end))
+        let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
+        let conversation = MultimodalConversation(
+            model: try toyModel(), context: context,
+            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer,
+                                                     enableThinking: false),
+            tokenizer: tokenizer, runner: runner,
+            scratch: scratch, maxContext: 8192)
+        let states = Mutex<[Bool]>([])
+        let turn = try await conversation.send(
+            parts: [.text("hi")],
+            config: GenerationConfig(maxNewTokens: 16, temperature: 0),
+            prefillConfig: .off,
+            onThinking: { active in states.withLock { $0.append(active) } })
+        #expect(turn.text == "ab")
+        #expect(turn.reason == .endOfTurn)
+        #expect(states.withLock { $0 }.isEmpty)
+    }
+
     /// D6: DeltaNet state cannot rewind, so the recovery rewind throws
     /// `rewindUnsupported`. The conversation must rebuild the KV from the
     /// recorded tokens (reset + replay, the restore pattern) instead of
@@ -227,7 +303,10 @@ struct MultimodalConversationQwenPromptTests {
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
         let conversation = MultimodalConversation(
             model: try toyModel(), context: context,
-            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer),
+            // Thinking off (S25 step 5): the D6 replay is under test, and
+            // the D11 filter would withhold the scripted "ab" as reasoning.
+            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer,
+                                                     enableThinking: false),
             tokenizer: tokenizer, runner: runner,
             scratch: scratch, maxContext: 8192)
 
@@ -288,7 +367,10 @@ struct MultimodalConversationQwenPromptTests {
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
         let conversation = MultimodalConversation(
             model: try toyModel(), context: context,
-            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer),
+            // Thinking off (S25 step 5): the trim/replay is under test, and
+            // the D11 filter would withhold the scripted "a" as reasoning.
+            renderer: QwenConversationPromptRenderer(tokenizer: tokenizer,
+                                                     enableThinking: false),
             tokenizer: tokenizer, runner: runner,
             scratch: scratch, maxContext: 8192)
         // `b` is committed to the KV as an invisible stop-prefix, `c` completes
