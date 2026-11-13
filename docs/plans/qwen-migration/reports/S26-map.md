@@ -80,17 +80,34 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   `scratch/logs/S26-measure.log`); `s26LogitHashBaselineIsRecorded`
   (SHA-256 logit → `scratch/S26/baseline.json`, hash anche nel report S26).
 
-## Intervalli da leggere per passo (dopo il passo 1)
+## Intervalli da leggere per passo (dopo il passo 1; righi aggiornati al 2)
 
-- Passo 2 (arg buffer + dispatch): `+Prefill` :627-745, :232-243, :557-567;
-  `QwenMoE.swift` :97-177 (wrapper, `makeBlobsArgumentBuffer` riusabile:
-  encoder e PSO non cambiano tra call); `QwenNorms.swift` :131; `QwenRouter`
-  topK :36 (un token per call anche nel decode — non cambiare il decode).
-- Passo 3 (shared 40 blob): `+Prefill` :689-694; main :888-895, :972-1001,
-  buffer/init :283-288 (`sharedBlobBuffer`) e :141 (`sharedBlobLayer`).
-- Passo 4 (overlap): `+Prefill` :581-683; ModelExpertIO (firme sopra).
-- Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :627-683; kernel D4 in
-  `Metal/Qwen/` + wrapper in `Kernels/Qwen/`.
+- Passo 2 (fatto, commit 90d60ae): vedi "Aggiunte passo 2" in fondo.
+- Passo 3 (shared 40 blob): `+Prefill` :690-701 (staging a ogni cambio di
+  layer + arg buffer shared), :705-748 (catena per riga); main :888-895,
+  :972-1001 (`stageSharedExpert`), buffer/init :283-288 (`sharedBlobBuffer`)
+  e :141 (`sharedBlobLayer`).
+- Passo 4 (overlap): `+Prefill` :576-686 (readback id, poi loop gruppi:
+  fetch :627, arg buffer :641-654, commit+await :683-684); ModelExpertIO
+  (firme sopra).
+- Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :657-686 (loop
+  coppie); kernel D4 in `Metal/Qwen/` + wrapper in `Kernels/Qwen/`.
+
+## Aggiunte passo 2 (commit 90d60ae, hash verificati identici)
+
+- `qwen_l2norm_perhead` accetta `xRowStride` (buffer(5); default = compatto,
+  decode invariato): il loop L2 q/k su convOut è ora 2 chiamate/span-layer
+  con `xRowStride: qkvChannels` (`+Prefill` :225-242).
+- `qwen_router_topk` multiriga: grid height = rows, `uint2 tg_position` +
+  `uint2 tid2` (i built-in di posizione devono essere tutti scalari o tutti
+  vettori uguali — regola di compilazione Metal scoperta qui); `encodeTopK`
+  ha `rows: Int = 1`, il decode non lo passa. Una chiamata/span-layer.
+- Arg buffer routed: uno per expert del gruppo (≤16), riusato da tutte le
+  righe (`groupArgBuffers`, `+Prefill` :641-654); shared: uno per call,
+  invariato. Contatori: argumentBuffers = gruppi, linear 12, router 3.
+- Misure (4096/128): 73,0 tok/s (era 51,8); GPU/span 1,47 s; arg buffer
+  3.943/span. Decode 12,82. Rimangono: coppie monoriga 81.920/span (passo
+  5), shared+residual per riga 25.600/span, attese per gruppo (passo 4).
 
 ## Aggiunte passo 1 (misure di partenza, release, Mac16,9)
 
@@ -110,3 +127,6 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   per span). Passo 5 (GEMM per colonne) è dove sta il fattore T.
 - Riepilogo sessione passo 1 (commit 75e4625): mappa, contatori e test di
   misura in verde release; baseline hash salvata; prefill dispatch-bound.
+- Riepilogo sessione passo 2 (commit 90d60ae): L2/topK batchati su tutte le
+  righe, arg buffer per expert di gruppo; hash identici, 73,0 tok/s a 4096,
+  decode invariato; prossimo: passo 3 (shared 40 blob persistenti).
