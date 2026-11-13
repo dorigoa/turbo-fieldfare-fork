@@ -116,14 +116,14 @@ extension Args {
     }
 
     public static let usage = """
-    TurboFieldfareCLI — Gemma 4 26B-A4B text generation
+    TurboFieldfareCLI — Gemma 4 26B-A4B and Qwen 3.6 35B-A3B text generation
 
     usage: TurboFieldfareCLI --model <dir>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
 
     required:
       --model <dir>             Path to a .gturbo model directory, 4-bit or 8-bit;
-                                the variant is read from its manifest.
+                                the variant and the family are read from its manifest.
       --prompt <string>         Raw-completion prompt.
       --chat-prompt <string>    Single-turn instruction chat; pairs with --image
       --messages-file <path>    JSON chat messages with role and content fields.
@@ -143,8 +143,8 @@ extension Args {
       --seed <uint64>            Deterministic sampling seed (default off).
       --stop <string>            Stop substring (repeatable).
       --quiet                    Suppress the footer: a variant line
-                                 (variant=4-bit or variant=8-bit) and the
-                                 timing line.
+                                 (variant=4-bit or variant=8-bit, plus the
+                                 model family) and the timing line.
       --expert-cache-slots <n>   Expert-cache slots: \(RuntimeConfiguration.allowedValueList(RuntimeConfiguration.allowedExpertCacheSlots)) (default 16).
       --expert-cache-policy <s>  Expert-cache policy: lfu or lru (default lfu).
       --prefill on|off           Enable or disable chunked prompt prefill (default on).

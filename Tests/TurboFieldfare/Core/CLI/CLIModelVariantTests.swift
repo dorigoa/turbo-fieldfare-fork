@@ -108,7 +108,7 @@ import TurboFieldfare
     @Test func footerAddsAVariantLineBeforeTheUnchangedTimingLine() {
         let footer = timingFooter(reason: "endOfTurn", prefillTokens: 42, newTokens: 5,
                                   decodeSeconds: 2, variant: Self.eightBit)
-        #expect(footer == "\n[variant=8-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit]\n"
+        #expect(footer == "\n[variant=8-bit family=gemma4 manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit]\n"
             + "[stop=endOfTurn prefill=42tok new=5tok decode=2.00s tok/s=2.500]\n")
         let lines = footer.split(separator: "\n")
         #expect(lines.last?.hasPrefix("[stop=") == true)
@@ -116,7 +116,7 @@ import TurboFieldfare
 
         let fourBit = timingFooter(reason: "maxTokens", prefillTokens: 7, newTokens: 0,
                                    decodeSeconds: 0, variant: Self.fourBit)
-        #expect(fourBit == "\n[variant=4-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-4bit]\n"
+        #expect(fourBit == "\n[variant=4-bit family=gemma4 manifest_model_id=mlx-community/gemma-4-26b-a4b-it-4bit]\n"
             + "[stop=maxTokens prefill=7tok new=0tok decode=0.00s tok/s=0.000]\n")
     }
 
