@@ -6,46 +6,35 @@ per i passi 2-5 leggere solo gli intervalli indicati qui.
 
 ## Costi del prefill (file:riga, dopo il passo 1)
 
-1. **Lettura expert a gruppi + attesa** — `QwenHybridForwardRunner+Prefill.swift`
-   (d'ora in poi `+Prefill`) :627-683: loop dei gruppi di ≤16 (union degli id
-   del blocco); `fetchRoutedExperts(layer:experts:)` :632 è **seriale**: la CPU
-   legge i blob (pread, ~1.77 MB/expert) mentre la GPU è ferma; commit+await
-   :680-681 dopo ogni gruppo. Con 256 token l'union arriva a ~90-120 expert →
-   6-8 gruppi per layer per span. Decode: `QwenHybridForwardRunner.swift`
-   :859 un solo fetch (8 expert) + commit/await :834 prima (lettura id).
-2. **Un `makeBlobsArgumentBuffer` per coppia (token, slot)** — `+Prefill` :653
-   (alloc `MTLBuffer` nuovo per ogni coppia (t, j) del gruppo, :648-679);
-   lo shared ne fa uno per call :694. Decode: uno per layer :860, :891.
-3. **Chiamate `rows: 1` dei kernel per testa** — L2 per testa q/k su slice di
-   convOut: loop :232-243 (2 dispatch per riga = 2T per layer lineare);
-   `encodeTopK` un token per call :557-567 (T dispatch). Il kernel accetta
-   già `rows:` (QwenNorms.swift `encodeL2PerHead` :131) ma `xOffset` è solo
-   la base → serve un **passo di riga** per chiamare con rows: T (pericolo
-   xOffset S20). Shared expert + residual: loop per riga :702-745 (5 kernel
-   per riga, tutti monoriga: `encodeGateUpSilu`/`encodeDown`/gemv8/
-   `encodeSigmoid`/`encodeResidual` accettano count/offset per riga).
-4. **Staging shared expert** — `stageSharedExpert` (main) :972-1001: 9 blit
-   (gate/up/down × w,s,b) in `sharedBlobBuffer` (1.769.472 B) **a ogni cambio
-   di layer**: prefill = 40 staging per span (:689-691), decode = 40 per
-   token (:887-889). Passo 3: 40 blob persistenti all'init (~71 MB).
-5. **Attese GPU per layer** — commit+await per la lettura CPU degli id :581-582
-   (uno per layer per span: spezza il command buffer del chunk); più :680-681
-   per gruppo. Decode: :834 per layer. Fine span :155-159 (necessaria: cache
-   advance + onProgress).
+1. **Lettura expert a gruppi + attesa (passo 4)** — `+Prefill` :627-684:
+   loop dei gruppi di ≤16 (union degli id del blocco); `fetchRoutedExperts`
+   :627 **seriale** (pread ~1,77 MB/expert con GPU ferma); commit+await
+   :683-684 dopo ogni gruppo; union ~90-120 expert a 256 token → 6-8 gruppi
+   per layer per span. Decode: un solo fetch + commit/await prima.
+2. **Arg buffer per coppia (token, slot)** — risolto al passo 2: uno per
+   expert del gruppo (`groupArgBuffers` :641-654), shared uno per call.
+3. **Chiamate `rows: 1` (passo 5)** — risolto al passo 2 per topK e L2 q/k.
+   Restano: coppie (t,j) gate/up+down monoriga e la catena shared+residual
+   per riga `+Prefill` :705-748 (5 kernel/riga: `encodeGateUpSilu`/
+   `encodeDown`/gemv8/`encodeSigmoid`/`encodeResidual`, tutti con
+   count/offset per riga).
+4. **Staging shared expert** — risolto al passo 3: 40 blob persistenti
+   all'init, nessuno staging per layer né in prefill né in decode.
+5. **Attese GPU per layer (quota del passo 4)** — commit+await per la
+   lettura CPU degli id :576-577 (uno per layer per span) più :683-684 per
+   gruppo. Fine span :155-159 (necessaria: cache advance + onProgress).
 
 ## Firme `ModelExpertIO.swift` (non si tocca)
 
-- `planRoutedExperts(layer:experts:avoidingSlots:)` :61 — `public func
-  planRoutedExperts(layer: Int, experts: [Int], avoidingSlots: Set<Int> = [])
-  throws -> RoutedExpertFetchPlan?`
+- `planRoutedExperts(layer:experts:avoidingSlots:)` :61 — `(layer: Int,
+  experts: [Int], avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan?`
 - `planRoutedExpertsIfPossible(…) -> RoutedExpertFetchPlan?` :72 (nil se non
   sta negli slot evitando quelli dati)
-- `fetchRoutedExperts(plan:)` :108 — `public func fetchRoutedExperts(plan:
-  RoutedExpertFetchPlan) async throws -> [TensorView]`
+- `fetchRoutedExperts(plan:)` :108 — `(plan: RoutedExpertFetchPlan) async
+  throws -> [TensorView]`
 - `adviseRoutedExperts(plan:)` :102 — `throws -> ExpertIOAdviceResult`
   (prefetch dei miss, non blocca)
-- `routedExpertCacheSlotCount(layer:)` :88 — `Int?` (slotCount in `.pread`;
-  16 per Qwen, `Model.swift` :348)
+- `routedExpertCacheSlotCount(layer:)` :88 — `Int?` (16 per Qwen, `.pread`)
 - `RoutedExpertFetchPlan` :5-18: `experts/misses/hits/assignedSlots`
 - Nota: un fetch può scrivere solo in slot non usati dalla GPU; con 16 slot
   totali l'overlap (passo 4) usa due metà da 8 (avoidingSlots).
@@ -54,10 +43,9 @@ per i passi 2-5 leggere solo gli intervalli indicati qui.
 
 Sì. Il blob expert è affine MLX gruppo 64, lo stesso layout che MPP serve per
 le proiezioni (C5 = planner Gemma). `MPPPrefillInt4QMM.encode`
-(`Kernels/TensorCore/MPPPrefillInt4QMM.swift` :119) prende
-weights/scales/biases come buffer+offset: passare il buffer dello slot con
-`Int(v.offset) + <offset C5>` dove v è il TensorView di
-`fetchRoutedExperts`/`routedExpertBuffers`. Offset da
+(`Kernels/TensorCore/MPPPrefillInt4QMM.swift` :119) prende weights/scales/
+biases come buffer+offset: passare il buffer dello slot con `Int(v.offset) +
+<offset C5>` (v da `fetchRoutedExperts`). Offset da
 `QwenMoE.expertOffsets(hidden: 2048, inter: 512)` (`Kernels/Qwen/QwenMoE.swift`
 :66): gate w/s/b 0 / 524288 / 557056; up 589824 / 1114112 / 1146880; down
 1179648 / 1703936 / 1736704; stride blob 1769472. Guardie MPP :145-152:
@@ -74,59 +62,59 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   completed), per layer groups/expertsFetched/dispatches/argumentBuffers/
   expertFetchSeconds; `waitForDrain()` prima di leggere.
 - Attivazione: `runner.s26Counters = Counters()` (+Prefill nota ai blocchi:
-  embedding/head layer -1, linear `12+2T`, attention `14`, MoE norm+router+
-  topK, coppie ×2, shared staging 1, shared+residual `5T`).
+  embedding/head layer -1, linear `12`, attention `14`, MoE norm+router+topK
+  `3`, coppie ×2, shared+residual `5T`).
 - Test: `prefillAndDecodeThroughputAreMeasured` (misure + breakdown, log
   `scratch/logs/S26-measure.log`); `s26LogitHashBaselineIsRecorded`
   (SHA-256 logit → `scratch/S26/baseline.json`, hash anche nel report S26).
 
 ## Intervalli da leggere per passo (dopo il passo 1; righi aggiornati al 2)
 
-- Passo 2 (fatto, commit 90d60ae): vedi "Aggiunte passo 2" in fondo.
-- Passo 3 (shared 40 blob): `+Prefill` :690-701 (staging a ogni cambio di
-  layer + arg buffer shared), :705-748 (catena per riga); main :888-895,
-  :972-1001 (`stageSharedExpert`), buffer/init :283-288 (`sharedBlobBuffer`)
-  e :141 (`sharedBlobLayer`).
-- Passo 4 (overlap): `+Prefill` :576-686 (readback id, poi loop gruppi:
-  fetch :627, arg buffer :641-654, commit+await :683-684); ModelExpertIO
-  (firme sopra).
+- Passi 2-3 (fatti, 90d60ae e db27c44): vedi le "Aggiunte" in fondo.
+- Passo 4 (overlap): `+Prefill` :576-686 (readback id :576-577, poi loop
+  gruppi: fetch :627, arg buffer :641-654, commit+await :683-684);
+  ModelExpertIO (firme sopra).
 - Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :657-686 (loop
   coppie); kernel D4 in `Metal/Qwen/` + wrapper in `Kernels/Qwen/`.
 
-## Aggiunte passo 2 (commit 90d60ae, hash verificati identici)
+## Aggiunte passo 2 (commit 90d60ae, hash identici)
 
-- `qwen_l2norm_perhead` accetta `xRowStride` (buffer(5); default = compatto,
-  decode invariato): il loop L2 q/k su convOut è ora 2 chiamate/span-layer
-  con `xRowStride: qkvChannels` (`+Prefill` :225-242).
-- `qwen_router_topk` multiriga: grid height = rows, `uint2 tg_position` +
-  `uint2 tid2` (i built-in di posizione devono essere tutti scalari o tutti
-  vettori uguali — regola di compilazione Metal scoperta qui); `encodeTopK`
-  ha `rows: Int = 1`, il decode non lo passa. Una chiamata/span-layer.
-- Arg buffer routed: uno per expert del gruppo (≤16), riusato da tutte le
-  righe (`groupArgBuffers`, `+Prefill` :641-654); shared: uno per call,
-  invariato. Contatori: argumentBuffers = gruppi, linear 12, router 3.
-- Misure (4096/128): 73,0 tok/s (era 51,8); GPU/span 1,47 s; arg buffer
-  3.943/span. Decode 12,82. Rimangono: coppie monoriga 81.920/span (passo
-  5), shared+residual per riga 25.600/span, attese per gruppo (passo 4).
+- `qwen_l2norm_perhead` accetta `xRowStride` (buffer(5); default compatto →
+  decode invariato): loop L2 q/k su convOut = 2 chiamate/span-layer
+  (`+Prefill` :225-242). `qwen_router_topk` multiriga (grid height = rows;
+  regola Metal: i built-in di posizione tutti scalari o tutti vettori
+  uguali); `encodeTopK` ha `rows: Int = 1`, il decode non lo passa.
+- Arg buffer routed: uno per expert del gruppo (≤16) riusato da tutte le
+  righe (`groupArgBuffers` :641-654). Contatori: argumentBuffers = gruppi,
+  linear 12, router 3. Misure 4096/128: 73,0 tok/s, GPU/span 1,47 s,
+  arg buffer 3.943/span, decode 12,82.
 
-## Aggiunte passo 1 (misure di partenza, release, Mac16,9)
+## Aggiunte passo 3 (commit db27c44, hash verificati identici)
 
-- Hash di riferimento in `scratch/S26/baseline.json` + report S26: al passo 0
-  del greedy il logit hash di p0 = hash(p0 prefill) ✓; chunk 4 = chunk 128 su
-  tutti i 6 prompt (bit-determinismo ✓). Decode baseline 12,77 tok/s.
-- Steady state 4096/128: 2,47 s/span → gpu 2,14 s, encode CPU 0,13, fetch
-  expert 0,16, muro−gpu ≈ 0,33 (13%). **121k dispatch per span**: coppie
-  token-expert (t,j) gateUp+down = 81.920 (68%), shared+residual per riga
-  25.600 (21%), topK per riga 5.120, mixer 8.180, altro 130. Costo medio
-  dispatch ≈ 15 µs: il prefill è **dispatch-bound**, non banda.
-- Chunk 256 (di default non cambia): 54,0 vs 51,8 tok/s a 4096; ma coppie
-  raddoppiate per span → dispatch per token invariati.
-- Per i passi 2-5: l'unità da attaccare è la coppia (t,j) monoriga; il
-  riuso arg buffer (passo 2) vale 41k alloc/span a 128; l'overlap (passo 4)
-  da solo vale poco (fetch 0,16 s/span a 4096, ma 0,49 a 512 con cache fredda
-  per span). Passo 5 (GEMM per colonne) è dove sta il fattore T.
-- Riepilogo sessione passo 1 (commit 75e4625): mappa, contatori e test di
-  misura in verde release; baseline hash salvata; prefill dispatch-bound.
-- Riepilogo sessione passo 2 (commit 90d60ae): L2/topK batchati su tutte le
-  righe, arg buffer per expert di gruppo; hash identici, 73,0 tok/s a 4096,
-  decode invariato; prossimo: passo 3 (shared 40 blob persistenti).
+- `sharedBlobBuffers: [MTLBuffer]` (40 blob C5, 1.769.472 B l'uno = 70,8 MB
+  residentes in più, per S27) creati e riempiti una sola volta in
+  `stageAllSharedExpertBlobs` (funzione file-locale in fondo a
+  `QwenHybridForwardRunner.swift`, blit unico + `waitUntilCompleted`
+  nell'init). `sharedBlobLayer`/`stageSharedExpert` rimossi; decode (main
+  :884-899) e prefill (`+Prefill` :687-701) usano `sharedBlobBuffers[L]`,
+  bit-identico allo staging vecchio (intermediateSize == moeInter == 512).
+- Misura: +0/1% sul muro (staging non era un collo: GPU busy 84%, attese
+  per gruppo = passo 4). moeDispatches/span 108.140 (−40 staging). Decode
+  12,83 invariato. Prossimo: passo 4 (overlap fetch gruppo N+1 con GPU
+  gruppo N, due metà da 8 slot).
+
+## Aggiunte passo 1 (misure di partenza; tabella completa nel report S26)
+
+- Baseline: hash in `scratch/S26/baseline.json` (greedy passo 0 = hash p0 ✓,
+  chunk 4 = chunk 128 ✓); 4096/128 = 2,47 s/span con 121k dispatch
+  (coppie (t,j) 81.920, shared+residual 25.600, topK 5.120, mixer 8.180),
+  costo medio ≈ 15 µs/dispatch: il prefill è **dispatch-bound**. Chunk 256
+  non cambia i dispatch per token.
+- Per i passi 2-5: l'unità da attaccare è la coppia (t,j) monoriga;
+  l'overlap (passo 4) da solo vale poco (fetch 0,16 s/span a 4096, 0,49 a 512
+  con cache fredda). Passo 5 (GEMM per colonne) è dove sta il fattore T.
+- Riepilogo passo 1 (75e4625): mappa, contatori, baseline hash; dispatch-bound.
+- Riepilogo passo 2 (90d60ae): L2/topK batchati, arg buffer per expert;
+  hash identici, 73,0 tok/s a 4096, decode invariato.
+- Riepilogo passo 3 (db27c44): 40 blob shared persistenti (+70,8 MB);
+  hash identici, 72,5 tok/s (rumore), decode 12,83; prossimo: passo 4.
