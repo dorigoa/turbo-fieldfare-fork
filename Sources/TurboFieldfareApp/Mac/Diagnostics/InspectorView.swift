@@ -432,6 +432,16 @@ struct InspectorView: View {
                     }
                 }
             }
+            // D11 (S25 step 6): only a family with a thinking frame offers
+            // the switch, so Gemma's Generation section is unchanged.
+            if model.isThinkingControlAvailable {
+                Toggle("Thinking", isOn: $model.thinkingEnabled)
+                    .toggleStyle(.switch)
+                    .accessibilityIdentifier(.inspectorThinking)
+                Text("When on, the model reasons before answering and the status says Thinking. The reasoning never becomes part of the reply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .disabled(model.isRunning || model.loadState.isLoading
             || model.isVisionFilesystemMutationInProgress)

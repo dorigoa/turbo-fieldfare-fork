@@ -56,6 +56,11 @@ public final class AppModel {
     /// screen belong to `modelVariant`; a switch saves them here and shows the
     /// other family's.
     private var savedSampling: [AppModelVariant: AppSamplingValues]
+    /// Each family's thinking-frame choice as saved for the run (S25 step 6),
+    /// keyed like `savedSampling`. Only Qwen has a frame, so the Gemma slot
+    /// always holds its default; the switch on screen belongs to `modelVariant`
+    /// and a variant change saves and restores it the way sampling is.
+    private var savedThinkingEnabled: [AppModelVariant: Bool]
     /// Which checkpoint the app installs and loads. Settable only through
     /// `setModelVariant`, because changing it moves the model location, the
     /// download, the installed-model probe and memory admission together.
@@ -116,6 +121,11 @@ public final class AppModel {
     public var topK: Int = 64
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
+    /// Whether this family's generations open their thinking frame (D11,
+    /// S25 step 6). The screen value for `modelVariant`, saved per family like
+    /// the sampling above; a family without a frame shows no switch and sends
+    /// no value, so what reaches Gemma never changes.
+    public var thinkingEnabled: Bool = true
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var showPromptExamples: Bool = true
     public private(set) var textSize: AppTextSize = .standard
@@ -364,6 +374,15 @@ public final class AppModel {
         self.topK = launchSampling.topK
         self.topPEnabled = launchSampling.topPEnabled
         self.topP = launchSampling.topP
+        // The thinking frame follows the same per-family reading: each
+        // family's saved choice (only Qwen can have one), and the launch
+        // variant's shown.
+        var savedThinkingEnabled: [AppModelVariant: Bool] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedThinkingEnabled[family] = settings.thinkingEnabled(for: family)
+        }
+        self.savedThinkingEnabled = savedThinkingEnabled
+        self.thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.textSize = settings.textSize
@@ -968,7 +987,8 @@ public final class AppModel {
             livePrefillTotal: livePrefillTotal,
             lastStopReason: diagnostics?.stopReason,
             isVisionFilesystemMutationInProgress: isVisionFilesystemMutationInProgress,
-            memoryRefusal: modelVariantMemoryRefusal))
+            memoryRefusal: modelVariantMemoryRefusal,
+            isThinking: isThinking))
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -1156,6 +1176,10 @@ public final class AppModel {
         topK = values.topK
         topPEnabled = values.topPEnabled
         topP = values.topP
+        // The thinking switch travels with its family for the same reason the
+        // sliders do (S25 step 6).
+        savedThinkingEnabled[Self.samplingKey(for: modelVariant)] = thinkingEnabled
+        thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
         modelVariant = variant
         installer = installerFactory(variant)
         // Admission moves with the variant: a context the old one could back
@@ -1414,6 +1438,17 @@ public final class AppModel {
     /// any price in page cache.
     public var isImageInputAvailable: Bool {
         modelVariant.supportsImages && isVisionRuntimeSupported && isVisionPackInstalled
+    }
+
+    /// Whether the Inspector shows the thinking switch (D11, S25 step 6).
+    ///
+    /// Qwen3.6 is the only family with a thinking frame, so only it gets the
+    /// control; Gemma's Generation section stays exactly as it was. Like the
+    /// image gate the family decides: changing variant unloads the model, so
+    /// the variant on screen is the one a run will use, and the switch is
+    /// configurable before the load as well as after.
+    public var isThinkingControlAvailable: Bool {
+        modelVariant == .qwen36
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
@@ -2499,6 +2534,14 @@ public final class AppModel {
                 ? screenSampling
                 : savedSampling[family] ?? family.defaultSampling
             settings.setSampling(values, for: family)
+            // The thinking frame is routed like the sampling: the value on
+            // screen belongs to the shown variant, and writing the others
+            // back with their saved choices keeps an edit made for one
+            // family from ever landing in the other's key (S25 step 6).
+            let thinking = Self.samplingKey(for: modelVariant) == family
+                ? thinkingEnabled
+                : savedThinkingEnabled[family] ?? true
+            settings.setThinkingEnabled(thinking, for: family)
         }
         return settings
     }
@@ -3143,7 +3186,11 @@ public final class AppModel {
             // the service's own exact state, while every image fails closed.
             conversationTokens: conversation.kvTokens ?? effective.maxContextTokens,
             conversationEpoch: ticket?.epoch,
-            turnIndex: ticket?.index)
+            turnIndex: ticket?.index,
+            // D11 (S25 step 6): only a family with a thinking frame sends a
+            // value; Gemma's request keeps reading exactly as before, with
+            // the field absent.
+            enableThinking: isThinkingControlAvailable ? thinkingEnabled : nil)
         try request.validate(requireModelDirectory: true)
         return request
     }

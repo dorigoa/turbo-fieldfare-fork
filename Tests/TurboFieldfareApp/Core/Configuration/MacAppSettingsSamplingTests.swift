@@ -133,6 +133,71 @@ import Testing
         }
     }
 
+    /// S25, D11: the thinking key is additive and optional. A file that never
+    /// saw it answers with the shipped defaults — Qwen runs its frame open,
+    /// Gemma has no frame and answers yes anyway, same as an unset key.
+    @Test func theThinkingKeyDefaultsToTheFamilyAnswers() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        try Data("""
+        {"version":4,"selectedModelPath":"/models/gemma4.gturbo",\
+        "contextTokens":8192,"expertCacheSlots":16,"temperature":0.5,\
+        "topKEnabled":false,"topK":40,"topPEnabled":true,"topP":0.9,\
+        "prefillEnabled":true}
+        """.utf8).write(to: file)
+
+        let settings = try #require(try MacAppSettingsFileStore.load(at: file))
+        #expect(settings.thinkingEnabledQwen36 == nil)
+        #expect(settings.thinkingEnabled(for: .qwen36))
+        #expect(settings.thinkingEnabled(for: .int4))
+        #expect(settings.thinkingEnabled(for: .int8))
+    }
+
+    /// Turning Qwen's frame off stores its own key, survives a save and
+    /// reload, and moves nothing in the records that predate variants.
+    @Test func aQwenThinkingChangeRoundTripsUnderItsOwnKey() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        var settings = MacAppSettings()
+        settings.setThinkingEnabled(false, for: .qwen36)
+        try MacAppSettingsFileStore.save(settings, at: file)
+
+        let read = try #require(try MacAppSettingsFileStore.load(at: file))
+        #expect(read.thinkingEnabledQwen36 == false)
+        #expect(!read.thinkingEnabled(for: .qwen36))
+        #expect(read.thinkingEnabled(for: .int4))
+        #expect(read.thinkingEnabled(for: .int8))
+        let raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(raw["thinkingEnabledQwen36"] as? Bool == false)
+    }
+
+    /// A frame turned back on is the shipped state again, so its key goes
+    /// away and a later change of the default keeps steering; Gemma has no
+    /// key for a switch it can never show, so writes for it are dropped.
+    @Test func thinkingAtTheDefaultStaysUnsavedAndGemmaHasNoKey() throws {
+        var settings = MacAppSettings()
+        settings.setThinkingEnabled(false, for: .qwen36)
+        #expect(settings.thinkingEnabledQwen36 == false)
+        settings.setThinkingEnabled(true, for: .qwen36)
+        #expect(settings.thinkingEnabledQwen36 == nil)
+
+        settings.setThinkingEnabled(false, for: .int4)
+        settings.setThinkingEnabled(false, for: .int8)
+        #expect(settings.thinkingEnabledQwen36 == nil)
+        #expect(settings.thinkingEnabled(for: .int4))
+
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        var saved = MacAppSettings()
+        saved.setThinkingEnabled(false, for: .int8)
+        try MacAppSettingsFileStore.save(saved, at: file)
+        let raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(raw["thinkingEnabledQwen36"] == nil)
+    }
+
     private func makeRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("settings-sampling-\(UUID().uuidString)", isDirectory: true)

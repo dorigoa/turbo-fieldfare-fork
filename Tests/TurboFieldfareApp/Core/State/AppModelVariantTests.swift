@@ -439,6 +439,58 @@ import TurboFieldfare
         #expect(saved.topKQwen36 == 20)
     }
 
+    /// S25, D11: only the frame family offers the switch. Its choice stays
+    /// with the family the way the sliders' does, Gemma never grows a key,
+    /// and the hidden Gemma screen value keeps its own answer so a switch
+    /// back never inherits an edit made for another family.
+    @MainActor @Test func aThinkingChangeStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.modelVariant == .qwen36)
+        #expect(model.isThinkingControlAvailable)
+        #expect(model.thinkingEnabled, "a family left as it ships runs its frame open")
+        model.thinkingEnabled = false
+
+        await model.setModelVariant(.int4)
+        #expect(!model.isThinkingControlAvailable, "Gemma offered a frame it does not have")
+        #expect(model.thinkingEnabled, "the hidden Gemma switch inherited Qwen's off")
+
+        await model.setModelVariant(.int8)
+        #expect(!model.isThinkingControlAvailable, "8-bit Gemma offered a frame too")
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.isThinkingControlAvailable)
+        #expect(!model.thinkingEnabled, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.thinkingEnabledQwen36 == false)
+        #expect(saved.thinkingEnabled(for: .int4))
+    }
+
+    /// The switch becomes `enableThinking` only for the frame family: Gemma's
+    /// request reads exactly as before the frame existed — field absent — and
+    /// a Qwen request carries the switch's position, on by default.
+    @MainActor @Test func theThinkingSwitchBecomesEnableThinkingOnlyForQwen() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(model.modelVariant == .int4)
+        #expect(try model.makeRequest().enableThinking == nil,
+                "Gemma's request grew a field the pre-frame reader never sent")
+
+        await model.setModelVariant(.qwen36)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(try model.makeRequest().enableThinking == true)
+        model.thinkingEnabled = false
+        #expect(try model.makeRequest().enableThinking == false)
+    }
+
     // MARK: - Helpers
 
     private static let fakeInstallers: @Sendable (AppModelVariant) -> any AppModelInstallerClient = {

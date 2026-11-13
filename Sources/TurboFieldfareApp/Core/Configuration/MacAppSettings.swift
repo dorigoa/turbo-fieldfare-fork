@@ -50,6 +50,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topKQwen36: Int?
     var topPEnabledQwen36: Bool?
     var topPQwen36: Double?
+    /// Whether Qwen3.6 runs with its thinking frame open (D11, S25). Absent
+    /// means the user never moved it from the family default, which is on —
+    /// the same reading as the optional sampling keys above. Gemma has no
+    /// thinking frame, so it has no such key.
+    var thinkingEnabledQwen36: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -79,6 +84,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topKQwen36
         case topPEnabledQwen36
         case topPQwen36
+        case thinkingEnabledQwen36
     }
 
     init(version: Int = currentVersion,
@@ -107,7 +113,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topKEnabledQwen36: Bool? = nil,
          topKQwen36: Int? = nil,
          topPEnabledQwen36: Bool? = nil,
-         topPQwen36: Double? = nil) {
+         topPQwen36: Double? = nil,
+         thinkingEnabledQwen36: Bool? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -135,6 +142,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topKQwen36 = topKQwen36
         self.topPEnabledQwen36 = topPEnabledQwen36
         self.topPQwen36 = topPQwen36
+        self.thinkingEnabledQwen36 = thinkingEnabledQwen36
     }
 
     init(from decoder: Decoder) throws {
@@ -210,6 +218,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topKQwen36 = try container.decodeIfPresent(Int.self, forKey: .topKQwen36)
         topPEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topPEnabledQwen36)
         topPQwen36 = try container.decodeIfPresent(Double.self, forKey: .topPQwen36)
+        thinkingEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabledQwen36)
     }
 
     /// The sampling to run `variant` with: what its family saved, or the
@@ -254,6 +263,28 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             topKQwen36 = values.topK
             topPEnabledQwen36 = values.topPEnabled
             topPQwen36 = values.topP
+        }
+    }
+
+    /// Whether `variant` runs its generations with a thinking frame (D11,
+    /// S25). Only families that have one answer: Qwen3.6 reads its saved key,
+    /// where absent means the family default of on; Gemma has no frame, so it
+    /// always says yes — the same answer as an unset key.
+    func thinkingEnabled(for variant: SupportedModelVariant) -> Bool {
+        switch variant {
+        case .int4, .int8: true
+        case .qwen36: thinkingEnabledQwen36 ?? true
+        }
+    }
+
+    /// Stores `variant`'s thinking choice. Only Qwen3.6 has a frame to store
+    /// one for; its default is remembered as absence, so a family left as it
+    /// ships keeps following a later change of that default, exactly like the
+    /// sampling override above.
+    mutating func setThinkingEnabled(_ enabled: Bool, for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8: break
+        case .qwen36: thinkingEnabledQwen36 = enabled ? nil : false
         }
     }
 
