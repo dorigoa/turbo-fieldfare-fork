@@ -195,6 +195,12 @@ enum MultimodalConversationKVRecovery {
         do {
             try rewind(positionBefore)
         } catch {
+            // D6: DeltaNet state cannot rewind anywhere but a snapshot, and a
+            // runner that refuses says so with `rewindUnsupported`. That is
+            // not a failed recovery — it is the signal for the caller to
+            // rebuild the KV from the recorded tokens instead of condemning
+            // the lineage. Any other failure stays wrapped as today.
+            if case QwenRewindError.rewindUnsupported = error { throw error }
             throw MultimodalConversationError.lineageRecoveryFailed(
                 reason: "The turn failed with \(generationError). Rewinding to "
                     + "token \(positionBefore) then failed with \(error).")
@@ -219,6 +225,9 @@ enum MultimodalConversationKVRecovery {
             do {
                 try rewind(target)
             } catch {
+                // `rewindUnsupported` propagates un-wrapped for the D6 replay
+                // fallback, as in `restoreAfterFailure`.
+                if case QwenRewindError.rewindUnsupported = error { throw error }
                 throw MultimodalConversationError.lineageRecoveryFailed(
                     reason: "Removing stop-string tokens required rewinding to "
                         + "token \(target), which failed with \(error).")
@@ -641,6 +650,20 @@ public actor MultimodalConversation {
                         generationError: generationError,
                         rewind: runner.rewind(to:),
                         reset: runner.reset)
+                } catch is QwenRewindError {
+                    // D6: the runner refused to rewind (Qwen's DeltaNet state
+                    // only survives at a snapshot). Rebuild the KV from the
+                    // recorded lineage — the same reset-and-replay a stored
+                    // chat restore performs — instead of condemning it. The
+                    // staged turn stays pending, so the caller can retry it.
+                    do {
+                        try await replayRecordedKV(
+                            kvTokenIDs,
+                            prefillConfig: effectivePrefill,
+                            onProgress: onProgress)
+                    } catch {
+                        throw error  // the replay itself condemned the lineage
+                    }
                 } catch {
                     lineageBroken = true
                     throw error
@@ -665,12 +688,26 @@ public actor MultimodalConversation {
         // visible prefix before the match began stays, so at most a few
         // characters of one boundary token remain hidden.
         if result.reason == .stopString, result.withheldTrailingKVTokens > 0 {
+            let trimTarget = result.kvBackedTokenIDs.count - result.withheldTrailingKVTokens
             do {
                 kvTokenIDs = try MultimodalConversationKVRecovery.trimHiddenStopTokens(
                     result.kvBackedTokenIDs,
                     withheld: result.withheldTrailingKVTokens,
                     rewind: runner.rewind(to:),
                     reset: runner.reset)
+            } catch is QwenRewindError {
+                // D6: same fallback as the failure path above. The turn
+                // already produced its text; what the KV must keep is the
+                // trimmed prefix, so replay that from an empty cache rather
+                // than condemn a turn that completed cleanly.
+                do {
+                    try await replayRecordedKV(
+                        Array(result.kvBackedTokenIDs.prefix(trimTarget)),
+                        prefillConfig: effectivePrefill,
+                        onProgress: onProgress)
+                } catch {
+                    throw error
+                }
             } catch {
                 lineageBroken = true
                 throw error
@@ -699,6 +736,57 @@ public actor MultimodalConversation {
             generatedTokenIDs: generatedTokenIDs,
             uncommittedBoundaryTokenIDs: uncommittedBoundary,
             boundaryNeedsReplay: boundaryNeedsReplay)
+    }
+
+    /// D6 recovery for a `rewind` the runner refuses: rebuild the KV from the
+    /// recorded tokens the way `restore` does — from an empty cache, prefill
+    /// the bare recorded sequence — leaving the cursor exactly where
+    /// `kvTokenIDs` says it is, so the conversation keeps resuming normally.
+    ///
+    /// A replay that fails from `.reset` can always be undone by resetting,
+    /// but unlike `restore` this one destroys every recorded turn from a live
+    /// conversation, so it does condemn the lineage: the caller must start a
+    /// fresh chat rather than resume a KV that no longer exists.
+    private func replayRecordedKV(
+        _ recorded: [Int32],
+        prefillConfig: PrefillRuntimeConfig,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)?
+    ) async throws {
+        if recorded.isEmpty {
+            // Nothing to replay; resetting alone puts the cursor at zero,
+            // which is what an empty record describes.
+            runner.reset()
+        } else {
+            do {
+                _ = try await runRawPrefill(
+                    producer: runner,
+                    promptIds: recorded,
+                    multimodalInput: nil,
+                    prefillConfig: prefillConfig,
+                    // Reset first: this is a rebuild, not a continuation, and
+                    // a refused rewind means the runner's cursor cannot be
+                    // trusted. `.reset` makes `runRawPrefill` reset the
+                    // producer itself.
+                    start: .reset,
+                    // No decode follows; the seed would be discarded anyway.
+                    outputMode: .greedyIfAvailable,
+                    seedUse: .discarded,
+                    historyReserve: recorded.count,
+                    scratch: scratch,
+                    onProgress: { onProgress?($0) })
+            } catch {
+                runner.reset()
+                kvTokenIDs.removeAll(keepingCapacity: true)
+                uncommittedBoundary = []
+                boundaryNeedsReplay = false
+                lineageBroken = true
+                throw MultimodalConversationError.lineageRecoveryFailed(
+                    reason: "The KV could not be rewound, and replaying the "
+                        + "recorded \(recorded.count)-token lineage failed "
+                        + "with \(error).")
+            }
+        }
+        kvTokenIDs = recorded
     }
 
     /// Rebuilds the KV of a stored conversation by prefilling its own token IDs,

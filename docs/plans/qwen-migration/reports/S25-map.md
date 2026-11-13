@@ -165,3 +165,21 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   `prepared`, `resetCount`, `rewind(to:)` = set del cursore: per il passo 3 aggiungere un flag
   `rewindThrows` che lancia `.rewindUnsupported` e riusare il modello del toy
   (`toyModel()` + `ModelLoaderTests.writeToySynthetic()`).
+
+## Aggiornamenti passo 3 (rewind D6) — per il passo 4
+- `MultimodalConversation.swift` ora 1003 righe. Nuove righe: helper
+  `restoreAfterFailure` :185 e `trimHiddenStopTokens` :210 lanciano
+  `QwenRewindError.rewindUnsupported` senza wrapper (:203, :230); call site
+  `catch is QwenRewindError` :653 (catch di `generate`) e :698 (trim
+  stop-string) → `replayRecordedKV` privato :750: `runRawPrefill` con
+  `start: .reset` sui token registrati (niente `uncommittedBoundary`),
+  `outputMode: .greedyIfAvailable`, `seedUse: .discarded`; replay fallito →
+  reset + registro svuotato + `lineageBroken` + `lineageRecoveryFailed`.
+  Spostamenti: actor :291, init Gemma :338, init generale :365, guard D12
+  generate :555 e restore :837, `encodeTurn` :942.
+- Test passo 3 nello stesso file del passo 2: `ScriptedConversationRunner` ha
+  `setRewindThrows(_:)` e `failNextProduction()` (throws AFTER commit →
+  `kvAdvanced` vera) + `ScriptedDecodeFailure` (internal, stesso file). Tre
+  test nuovi (rigira, trim, propagazione helper). Per il passo 4: nessuna
+  API pubblica nuova nel runtime; la factory per `RealInferenceClient` resta
+  quella in mappa (`make` :26, `loadTokenizer` :42, `Model.family(of:)`).
