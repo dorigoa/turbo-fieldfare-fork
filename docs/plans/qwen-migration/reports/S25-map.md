@@ -183,3 +183,44 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   test nuovi (rigira, trim, propagazione helper). Per il passo 4: nessuna
   API pubblica nuova nel runtime; la factory per `RealInferenceClient` resta
   quella in mappa (`make` :26, `loadTokenizer` :42, `Model.family(of:)`).
+
+## Aggiornamenti passo 4 (caricamento decode service) — per il passo 5
+- `RealInferenceClient.swift` ora 1169 righe. `RealInferenceSession`:
+  `tokenizer: (any ChatTokenizer & Sendable)?` :261, `promptRenderer:
+  (any ConversationPromptRenderer)?` :264, `loadedFamily: ModelFamily?` :266,
+  `runner: (any LanguageModelRunner)?` :270 (azzerati in `ensureLoaded` e
+  `unload`). `ensureLoaded` :406: legge il manifest con
+  `ManifestReader.load(directoryURL:expecting: .gemma4_26B_A4B)` :433 →
+  `Self.family(of:)` (mirror di `Model.family`, è internal) → tokenizer via
+  factory con cast family→concreto (no cast su marker Sendable: vietato dal
+  compilatore) in `loadTokenizer(family:for:)` :538 →
+  `LanguageModelRunnerFactory.make` :475 + `promptRenderer(family:tokenizer:)`
+  (Qwen: `QwenConversationPromptRenderer` default `enableThinking: true` —
+  il passo 5 deve far arrivare il campo fino a qui) + VisionRuntime aperto
+  solo se `Self.opensImagePack(for:)` :488 (mai con Qwen, D12).
+  `nonisolated static`: `family(of:)` :565, `opensImagePack` :572,
+  `promptRenderer` :579 (testabili senza attore).
+- Conversazioni create con l'init generale (`renderer:promptRenderer`):
+  `conversationForRestore` :373, `conversationForTurn` :764 (guard += promptRenderer).
+- Guardia D12 `request.imageAttachments.isEmpty || loadedFamily == .gemma4`
+  prima di qualunque lavoro: `runConversationTurn` :806 e `runOneShot` :656.
+- `runOneShot` :642: parametri `any LanguageModelRunner` +
+  `any ChatTokenizer & Sendable` + `renderer`; ramo testo
+  `renderer.firstTurnTokens(text:)` :665 (stesso template di prima), ramo
+  immagini downcast GFTokenizer :698 (D12 lo rende irraggiungibile con Qwen).
+  Diagnostics Gemma-only: snapshot contatori `(runner as?
+  RealForwardRunner).map` :932, `runnerDiagnostics` :1082 downcast (Qwen: nil).
+- Test nuovi `Tests/TurboFieldfareApp/Core/Inference/
+  RealInferenceClientFamilySelectionTests.swift` (3, senza modello: manifest
+  Qwen/Gemma scritti a mano → `family(of:)`, `opensImagePack`, e
+  `promptRenderer` che rifiuta un tokenizer di altra famiglia con
+  `MismatchedTokenizer` + `NullDetokenizer` file-locali; riutilizzabili).
+- Passo 5: campo `enableThinking` in `DecodeGenerationRequest` (opzionale,
+  assente = true) → `Entry.swift` :320 → `AppGenerationRequest`
+  (AppGenerationRequest.swift:4) → `runConversationTurn`/renderer: il renderer
+  è creato una volta per load in `ensureLoaded`; per il thinking per-richiesta
+  servirà ricostruirlo (o ricrearlo alla creazione della conversazione) quando
+  `enableThinking` cambia — il conversation actor lo riceve all'init.
+  Pipeline D11: `QwenAssistantDecoder`/`onReasoning` in `MultimodalConversation`
+  (i `.token`/`.tail` oggi vanno dritti in `text` in `generate`), delta →
+  eventi app nella closure `report` :922-949 (`.token`→`AppTokenEvent`).
