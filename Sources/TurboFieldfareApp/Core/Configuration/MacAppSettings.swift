@@ -40,6 +40,16 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var selectedModelPathInt8: String?
     /// Where the Qwen3.6 model lives, remembered the same way.
     var selectedModelPathQwen36: String?
+    /// Sampling saved for Qwen3.6, remembered the same way. Absent means the
+    /// user has never moved it from that family's own defaults, so every
+    /// launch follows `defaultSampling` again (U4, S24). The Gemma keys above
+    /// are not optional because they predate variants: Gemma's own values have
+    /// always been stored, changed or not.
+    var temperatureQwen36: Double?
+    var topKEnabledQwen36: Bool?
+    var topKQwen36: Int?
+    var topPEnabledQwen36: Bool?
+    var topPQwen36: Double?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -64,6 +74,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case modelVariant
         case selectedModelPathInt8
         case selectedModelPathQwen36
+        case temperatureQwen36
+        case topKEnabledQwen36
+        case topKQwen36
+        case topPEnabledQwen36
+        case topPQwen36
     }
 
     init(version: Int = currentVersion,
@@ -87,7 +102,12 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          loadModelOnLaunch: Bool = false,
          modelVariant: SupportedModelVariant = .int4,
          selectedModelPathInt8: String? = nil,
-         selectedModelPathQwen36: String? = nil) {
+         selectedModelPathQwen36: String? = nil,
+         temperatureQwen36: Double? = nil,
+         topKEnabledQwen36: Bool? = nil,
+         topKQwen36: Int? = nil,
+         topPEnabledQwen36: Bool? = nil,
+         topPQwen36: Double? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -110,6 +130,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.modelVariant = modelVariant
         self.selectedModelPathInt8 = selectedModelPathInt8
         self.selectedModelPathQwen36 = selectedModelPathQwen36
+        self.temperatureQwen36 = temperatureQwen36
+        self.topKEnabledQwen36 = topKEnabledQwen36
+        self.topKQwen36 = topKQwen36
+        self.topPEnabledQwen36 = topPEnabledQwen36
+        self.topPQwen36 = topPQwen36
     }
 
     init(from decoder: Decoder) throws {
@@ -180,6 +205,56 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         selectedModelPathQwen36 = try container.decodeIfPresent(
             String.self,
             forKey: .selectedModelPathQwen36)
+        temperatureQwen36 = try container.decodeIfPresent(Double.self, forKey: .temperatureQwen36)
+        topKEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topKEnabledQwen36)
+        topKQwen36 = try container.decodeIfPresent(Int.self, forKey: .topKQwen36)
+        topPEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topPEnabledQwen36)
+        topPQwen36 = try container.decodeIfPresent(Double.self, forKey: .topPQwen36)
+    }
+
+    /// The sampling to run `variant` with: what its family saved, or the
+    /// family's own defaults where the user has never changed anything (U4).
+    func sampling(for variant: SupportedModelVariant) -> AppSamplingValues {
+        switch variant {
+        case .int4, .int8:
+            return AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                     topPEnabled: topPEnabled, topP: topP)
+        case .qwen36:
+            guard let temperature = temperatureQwen36, let topKEnabled = topKEnabledQwen36,
+                  let topK = topKQwen36, let topPEnabled = topPEnabledQwen36,
+                  let topP = topPQwen36 else { return variant.defaultSampling }
+            return AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                     topPEnabled: topPEnabled, topP: topP)
+        }
+    }
+
+    /// Saves `values` as `variant`'s sampling. Where Qwen ends up exactly at
+    /// its family defaults the saved overrides are dropped, so a state the
+    /// user never moved stays able to follow a later change of the defaults
+    /// (S24); the Gemma keys have no such notion — they were always stored.
+    mutating func setSampling(_ values: AppSamplingValues, for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8:
+            temperature = values.temperature
+            topKEnabled = values.topKEnabled
+            topK = values.topK
+            topPEnabled = values.topPEnabled
+            topP = values.topP
+        case .qwen36:
+            guard values != variant.defaultSampling else {
+                temperatureQwen36 = nil
+                topKEnabledQwen36 = nil
+                topKQwen36 = nil
+                topPEnabledQwen36 = nil
+                topPQwen36 = nil
+                return
+            }
+            temperatureQwen36 = values.temperature
+            topKEnabledQwen36 = values.topKEnabled
+            topKQwen36 = values.topK
+            topPEnabledQwen36 = values.topPEnabled
+            topPQwen36 = values.topP
+        }
     }
 
     /// The saved location of `variant`'s install, if one was ever chosen.
@@ -207,6 +282,23 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
+            && (1...256).contains(topK)
+            && topP.isFinite && (0.01...1).contains(topP)
+            && Self.isValidQwenSampling(temperatureQwen36, topKEnabledQwen36, topKQwen36,
+                                        topPEnabledQwen36, topPQwen36)
+    }
+
+    /// An override is written as a complete set by `setSampling`; a file with
+    /// only part of it names values no slider could have produced, which is
+    /// the same case as any other invalid value.
+    private static func isValidQwenSampling(_ temperature: Double?, _ topKEnabled: Bool?,
+                                            _ topK: Int?, _ topPEnabled: Bool?,
+                                            _ topP: Double?) -> Bool {
+        let present = [temperature != nil, topKEnabled != nil, topK != nil,
+                       topPEnabled != nil, topP != nil]
+        guard (present.allSatisfy { $0 } || present.allSatisfy { !$0 }) else { return false }
+        guard let temperature, let topK, let topP else { return true }
+        return temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
     }

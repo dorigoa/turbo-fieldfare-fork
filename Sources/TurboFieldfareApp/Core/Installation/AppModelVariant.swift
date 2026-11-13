@@ -9,6 +9,25 @@ import TurboFieldfareRepackCore
 /// the type through `TurboFieldfareAppCore` alone.
 public typealias AppModelVariant = SupportedModelVariant
 
+/// The sampling values the app runs a model with: what the Inspector edits and
+/// every generation request carries.
+public struct AppSamplingValues: Codable, Equatable, Sendable {
+    public var temperature: Double
+    public var topKEnabled: Bool
+    public var topK: Int
+    public var topPEnabled: Bool
+    public var topP: Double
+
+    public init(temperature: Double, topKEnabled: Bool, topK: Int,
+                topPEnabled: Bool, topP: Double) {
+        self.temperature = temperature
+        self.topKEnabled = topKEnabled
+        self.topK = topK
+        self.topPEnabled = topPEnabled
+        self.topP = topP
+    }
+}
+
 extension SupportedModelVariant {
     /// The quantization profile a complete install of this variant carries.
     ///
@@ -43,6 +62,22 @@ extension SupportedModelVariant {
         switch self {
         case .int4, .int8: .gemma4_26B_A4B
         case .qwen36: .qwen36_35B_A3B
+        }
+    }
+
+    /// The sampling the family ships with, used until the user changes any of
+    /// it (U4, S24): Qwen3.6 from its checkpoint's `generation_config.json` —
+    /// temperature 1.0, top-k 20, top-p 0.95 — where Gemma has always run
+    /// 0.2 / 64 / 0.95. Both families ship with top-k and top-p filtering on,
+    /// as the Inspector's toggles have always defaulted to.
+    public var defaultSampling: AppSamplingValues {
+        switch self {
+        case .int4, .int8:
+            AppSamplingValues(temperature: 0.2, topKEnabled: true, topK: 64,
+                              topPEnabled: true, topP: 0.95)
+        case .qwen36:
+            AppSamplingValues(temperature: 1.0, topKEnabled: true, topK: 20,
+                              topPEnabled: true, topP: 0.95)
         }
     }
 

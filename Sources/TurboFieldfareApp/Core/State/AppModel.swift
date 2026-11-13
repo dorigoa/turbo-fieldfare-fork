@@ -50,6 +50,12 @@ public final class AppModel {
     /// variants' defaults are derived from the 4-bit location, so they are
     /// computed against this rather than stored.
     private let defaultFourBitModelURL: URL
+    /// Each family's sampling as the settings file recorded it, keyed by the
+    /// variant that owns the storage — the two Gemma variants share the keys
+    /// they had before variants existed, Qwen has its own (S24). The values on
+    /// screen belong to `modelVariant`; a switch saves them here and shows the
+    /// other family's.
+    private var savedSampling: [AppModelVariant: AppSamplingValues]
     /// Which checkpoint the app installs and loads. Settable only through
     /// `setModelVariant`, because changing it moves the model location, the
     /// download, the installed-model probe and memory admission together.
@@ -340,11 +346,20 @@ public final class AppModel {
                                             variant: variant)
         self.maxContextTokens = admitted.tokens
         self.contextClampNotice = admitted.notice
-        self.temperature = settings.temperature
-        self.topKEnabled = settings.topKEnabled
-        self.topK = settings.topK
-        self.topPEnabled = settings.topPEnabled
-        self.topP = settings.topP
+        // Sampling per family (U4): each family's saved values, and the
+        // launch variant's shown — its own if the user saved some, else the
+        // family's defaults.
+        var savedSampling: [AppModelVariant: AppSamplingValues] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedSampling[family] = settings.sampling(for: family)
+        }
+        self.savedSampling = savedSampling
+        let launchSampling = savedSampling[Self.samplingKey(for: variant)] ?? variant.defaultSampling
+        self.temperature = launchSampling.temperature
+        self.topKEnabled = launchSampling.topKEnabled
+        self.topK = launchSampling.topK
+        self.topPEnabled = launchSampling.topPEnabled
+        self.topP = launchSampling.topP
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.textSize = settings.textSize
@@ -1126,6 +1141,17 @@ public final class AppModel {
 
     private func applyModelVariant(_ variant: AppModelVariant) {
         guard variant != modelVariant else { return }
+        // Sampling follows the family (U4): what is on screen was being
+        // edited for the variant being left, and the one being switched to
+        // shows its own — the values saved for it, or the family's defaults
+        // where the user never changed any.
+        savedSampling[Self.samplingKey(for: modelVariant)] = screenSampling
+        let values = savedSampling[Self.samplingKey(for: variant)] ?? variant.defaultSampling
+        temperature = values.temperature
+        topKEnabled = values.topKEnabled
+        topK = values.topK
+        topPEnabled = values.topPEnabled
+        topP = values.topP
         modelVariant = variant
         installer = installerFactory(variant)
         // Admission moves with the variant: a context the old one could back
@@ -2417,17 +2443,27 @@ public final class AppModel {
         installETAText = DownloadETAFormatter.string(for: presentation)
     }
 
+    /// The family slot a variant's sampling lives in: the two Gemma variants
+    /// share the keys written before variants ever existed, Qwen3.6 has its
+    /// own (S24).
+    private static func samplingKey(for variant: AppModelVariant) -> AppModelVariant {
+        variant == .qwen36 ? .qwen36 : .int4
+    }
+
+    /// The sampling values on screen right now; they belong to `modelVariant`.
+    /// (`AppModelHistory`'s `currentSampling()` wraps these with the reply
+    /// length for a conversation record; this is just the sliders.)
+    private var screenSampling: AppSamplingValues {
+        AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                          topPEnabled: topPEnabled, topP: topP)
+    }
+
     private func currentSettings() -> MacAppSettings {
-        MacAppSettings(
+        var settings = MacAppSettings(
             selectedModelPath: savedModelPaths[.int4],
             migratedHistorySources: migratedHistorySources,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
-            temperature: temperature,
-            topKEnabled: topKEnabled,
-            topK: topK,
-            topPEnabled: topPEnabled,
-            topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
@@ -2440,6 +2476,16 @@ public final class AppModel {
             modelVariant: savedModelVariant,
             selectedModelPathInt8: savedModelPaths[.int8],
             selectedModelPathQwen36: savedModelPaths[.qwen36])
+        // The sampling on screen belongs to the variant being shown; every
+        // other family is written back with its own saved values, so an edit
+        // made on one model never persists as the other's keys (S24).
+        for family in [AppModelVariant.int4, .qwen36] {
+            let values = Self.samplingKey(for: modelVariant) == family
+                ? screenSampling
+                : savedSampling[family] ?? family.defaultSampling
+            settings.setSampling(values, for: family)
+        }
+        return settings
     }
 
     func persistSettings() {

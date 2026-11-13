@@ -386,6 +386,59 @@ import TurboFieldfare
         #expect(AppModel.contextOptionsNote(hostMemoryBytes: sixteenGigabyteHost, expertCacheSlots: 32) == nil)
     }
 
+    /// S24, U4: the Qwen variant opens on its family's sampling, and the
+    /// Gemma variants keep theirs — the same sliders, two sets of values.
+    @MainActor @Test func theQwenVariantOpensWithItsFamilySampling() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.modelVariant == .qwen36)
+        #expect(model.temperature == 1.0)
+        #expect(model.topK == 20)
+        #expect(model.topP == 0.95)
+
+        await model.setModelVariant(.int4)
+        #expect(model.temperature == 0.2)
+        #expect(model.topK == 64)
+        #expect(model.topP == 0.95)
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 1.0)
+        #expect(model.topK == 20)
+    }
+
+    /// A sampling the user changed stays with the family it was changed on,
+    /// under that family's keys: the untouched family keeps answering with its
+    /// defaults, and a save keeps both records apart.
+    @MainActor @Test func aChangedSamplingStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.temperature == 0.2)
+        model.temperature = 0.5
+        model.topK = 30
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 1.0, "Qwen took the values changed on Gemma")
+        #expect(model.topK == 20)
+        model.temperature = 0.7
+
+        await model.setModelVariant(.int4)
+        #expect(model.temperature == 0.5, "the Gemma edit was lost over the switch")
+        #expect(model.topK == 30)
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 0.7, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.temperature == 0.5)
+        #expect(saved.topK == 30)
+        #expect(saved.temperatureQwen36 == 0.7)
+        #expect(saved.topKQwen36 == 20)
+    }
+
     // MARK: - Helpers
 
     private static let fakeInstallers: @Sendable (AppModelVariant) -> any AppModelInstallerClient = {
