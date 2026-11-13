@@ -113,7 +113,9 @@ public final class QwenHybridForwardRunner: LogitProducer,
     let zeroHiddenBuffer: MTLBuffer  // FP16 [hiddenSize]
     let zeroScalarBuffer: MTLBuffer  // FP16 [1]
     /// C5 staging for the three resident shared-expert tensors (step 4).
-    let sharedBlobBuffer: MTLBuffer
+    /// S26 step 3: one blob per layer, staged once at init, instead of
+    /// re-staging the single S19/S20 blob on every layer switch.
+    let sharedBlobBuffers: [MTLBuffer]
     let sharedActsBuffer: MTLBuffer  // FP16 [sharedInter] shared gate·up·SiLU
     let sharedOutBuffer: MTLBuffer   // FP16 [hiddenSize] shared down out
     let sharedGateBuffer: MTLBuffer  // FP16 [maxT] shared-expert gate scalar (one per row)
@@ -133,10 +135,6 @@ public final class QwenHybridForwardRunner: LogitProducer,
     let kPreRopeTapBuffer: MTLBuffer // FP16 [kvDim]
     let attnOutBuffer: MTLBuffer     // FP16 [queryDim] attention out (pre-gate)
     let gatedBuffer: MTLBuffer       // FP16 [queryDim] attention out · gate
-    /// The layer whose shared expert currently fills `sharedBlobBuffer`
-    /// (step 4); the blob is re-staged whenever the layer changes.
-    var sharedBlobLayer: Int?
-
     // MARK: - Debug taps (test-only, S19 steps 2–7)
 
     /// Point of the forward pass whose hidden state a `HiddenTap` records.
@@ -279,12 +277,12 @@ public final class QwenHybridForwardRunner: LogitProducer,
         memset(self.zeroHiddenBuffer.contents(), 0, self.zeroHiddenBuffer.length)
         memset(self.zeroScalarBuffer.contents(), 0, self.zeroScalarBuffer.length)
         // The shared-expert weight blob is not per-token: one blob serves
-        // every row of the chunk.
-        self.sharedBlobBuffer = try makeWorkBuffer(
-            device: context.device,
-            elementCount: QwenMoE.expertBlobBytes(
-                hidden: hiddenSize, inter: cfg.intermediateSize),
-            element: UInt8.self, name: "sharedBlob")
+        // every row of the chunk. S26 step 3: one blob per layer, staged
+        // once here (numLayers × expertBlobBytes ≈ 71 MB resident).
+        self.sharedBlobBuffers = try stageAllSharedExpertBlobs(
+            device: context.device, queue: context.queue, model: model,
+            hidden: hiddenSize, inter: cfg.intermediateSize,
+            offsetsInter: cfg.moeIntermediateSize, layers: cfg.numLayers)
         self.sharedActsBuffer = try makeWorkBuffer(device: context.device, elementCount: cfg.intermediateSize * maxT, element: Float16.self, name: "sharedActs")
         self.sharedOutBuffer = try makeWorkBuffer(device: context.device, elementCount: hiddenSize * maxT, element: Float16.self, name: "sharedOut")
         self.sharedGateBuffer = try makeWorkBuffer(device: context.device, elementCount: maxT, element: Float16.self, name: "sharedGate")
@@ -883,25 +881,23 @@ public final class QwenHybridForwardRunner: LogitProducer,
             hidden: hidden, inter: inter, slots: slots)
 
         // Shared expert: the same two kernels as a one-slot pass over the
-        // resident tensors staged into `sharedBlobBuffer` (per layer).
-        if sharedBlobLayer != L {
-            try stageSharedExpert(layer: L, in: commandBuffer)
-            sharedBlobLayer = L
-        }
+        // resident tensors, pre-staged into `sharedBlobBuffers[L]` at init
+        // (S26 step 3).
+        let sharedBlob = sharedBlobBuffers[L]
         guard let sharedArgBuffer = moe.makeBlobsArgumentBuffer(
-            blobs: [sharedBlobBuffer], slots: 1)
+            blobs: [sharedBlob], slots: 1)
         else {
             throw QwenRunnerError.argumentBufferFailed(name: "sharedBlob")
         }
         moe.encodeGateUpSilu(
             commandBuffer: commandBuffer,
-            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
             offsets: offsets,
             x: moeXBuffer, acts: sharedActsBuffer,
             hidden: hidden, inter: inter, slots: 1)
         moe.encodeDown(
             commandBuffer: commandBuffer,
-            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+            blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
             offsets: offsets,
             acts: sharedActsBuffer, routedOut: sharedOutBuffer,
             hidden: hidden, inter: inter, slots: 1)
@@ -961,42 +957,6 @@ public final class QwenHybridForwardRunner: LogitProducer,
                 "layer_out": h,
             ])
         }
-    }
-
-    /// C5 staging of layer L's three resident shared-expert tensors (gate,
-    /// up, down; 4-bit affine) into `sharedBlobBuffer` at the blob's intra
-    /// offsets. The blits are encoded on the command buffer, so they are
-    /// ordered before the kernels that read the blob.
-    /// Internal (not private) so the S20 chunked-prefill extension in
-    /// `QwenHybridForwardRunner+Prefill.swift` reuses the C5 staging.
-    internal func stageSharedExpert(layer L: Int, in commandBuffer: MTLCommandBuffer) throws {
-        let offsets = QwenMoE.expertOffsets(
-            hidden: hiddenSize, inter: cfg.moeIntermediateSize)
-        let gate = try model.qwenSharedExpertGate(layer: L)
-        let up = try model.qwenSharedExpertUp(layer: L)
-        let down = try model.qwenSharedExpertDown(layer: L)
-        let sections: [(view: TensorView, weight: UInt32,
-                        scales: UInt32, biases: UInt32)] = [
-            (gate, offsets.gateWOff, offsets.gateSOff, offsets.gateBOff),
-            (up, offsets.upWOff, offsets.upSOff, offsets.upBOff),
-            (down, offsets.downWOff, offsets.downSOff, offsets.downBOff),
-        ]
-        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
-        for section in sections {
-            blit.copy(from: section.view.buffer,
-                      sourceOffset: Int(section.view.offset),
-                      to: sharedBlobBuffer, destinationOffset: Int(section.weight),
-                      size: Int(section.view.length))
-            blit.copy(from: section.view.buffer,
-                      sourceOffset: Int(section.view.scaleOffset),
-                      to: sharedBlobBuffer, destinationOffset: Int(section.scales),
-                      size: Int(section.view.scaleLength))
-            blit.copy(from: section.view.buffer,
-                      sourceOffset: Int(section.view.biasOffset),
-                      to: sharedBlobBuffer, destinationOffset: Int(section.biases),
-                      size: Int(section.view.biasLength))
-        }
-        blit.endEncoding()
     }
 
     /// A fresh command buffer on the shared queue.
@@ -1204,6 +1164,62 @@ private func makeWorkBuffer<E>(device: MTLDevice, elementCount: Int,
     guard let buffer = device.makeBuffer(length: bytes, options: .storageModeShared)
     else { throw QwenRunnerError.bufferAllocationFailed(name: name, bytes: bytes) }
     return buffer
+}
+
+/// C5 staging of every layer's three resident shared-expert tensors (gate,
+/// up, down; 4-bit affine) into one persistent blob per layer at the blob's
+/// intra offsets (S26 step 3). The blits are the same ones `stageSharedExpert`
+/// (S19) encoded on every layer switch, done once at init, so each layer's
+/// blob is bit-identical to what the per-switch staging produced. The blit
+/// completes before the buffers are returned, so no forward pass can read a
+/// half-staged blob.
+private func stageAllSharedExpertBlobs(
+    device: MTLDevice, queue: MTLCommandQueue, model: Model,
+    hidden: Int, inter: Int, offsetsInter: Int, layers: Int
+) throws -> [MTLBuffer] {
+    let offsets = QwenMoE.expertOffsets(hidden: hidden, inter: offsetsInter)
+    var blobs: [MTLBuffer] = []
+    blobs.reserveCapacity(layers)
+    for L in 0..<layers {
+        blobs.append(try makeWorkBuffer(
+            device: device,
+            elementCount: QwenMoE.expertBlobBytes(hidden: hidden, inter: inter),
+            element: UInt8.self, name: "sharedBlob\(L)"))
+    }
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let blit = commandBuffer.makeBlitCommandEncoder()
+    else {
+        throw QwenRunnerError.commandBufferFailed
+    }
+    for (L, blob) in blobs.enumerated() {
+        let sections: [(view: TensorView, weight: UInt32,
+                        scales: UInt32, biases: UInt32)] = [
+            (try model.qwenSharedExpertGate(layer: L),
+             offsets.gateWOff, offsets.gateSOff, offsets.gateBOff),
+            (try model.qwenSharedExpertUp(layer: L),
+             offsets.upWOff, offsets.upSOff, offsets.upBOff),
+            (try model.qwenSharedExpertDown(layer: L),
+             offsets.downWOff, offsets.downSOff, offsets.downBOff),
+        ]
+        for section in sections {
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.offset),
+                      to: blob, destinationOffset: Int(section.weight),
+                      size: Int(section.view.length))
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.scaleOffset),
+                      to: blob, destinationOffset: Int(section.scales),
+                      size: Int(section.view.scaleLength))
+            blit.copy(from: section.view.buffer,
+                      sourceOffset: Int(section.view.biasOffset),
+                      to: blob, destinationOffset: Int(section.biases),
+                      size: Int(section.view.biasLength))
+        }
+    }
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    return blobs
 }
 
 /// Internal failures of the runner that the public error enums do not

@@ -688,14 +688,11 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
         // Shared expert and residual, per row, on a fresh command buffer.
         commandBuffer = try makeCommandBuffer()
         // The shared expert runs as a one-slot pass over the resident
-        // tensors staged into `sharedBlobBuffer` (per layer, like S19).
-        if sharedBlobLayer != L {
-            try stageSharedExpert(layer: L, in: commandBuffer)
-            sharedBlobLayer = L
-            s26Counters?.noteDispatches(layer: L, 1)
-        }
+        // tensors, pre-staged into `sharedBlobBuffers[L]` at init
+        // (S26 step 3); no per-layer re-staging remains.
+        let sharedBlob = sharedBlobBuffers[L]
         guard let sharedArgBuffer = moe.makeBlobsArgumentBuffer(
-            blobs: [sharedBlobBuffer], slots: 1)
+            blobs: [sharedBlob], slots: 1)
         else {
             throw QwenRunnerError.argumentBufferFailed(name: "sharedBlob")
         }
@@ -705,14 +702,14 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
         for t in 0..<rows {
             moe.encodeGateUpSilu(
                 commandBuffer: commandBuffer,
-                blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+                blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
                 offsets: offsets,
                 x: moeXBuffer, xOffset: t * rowBytes,
                 acts: sharedActsBuffer, actsOffset: t * interBytes,
                 hidden: hidden, inter: inter, slots: 1)
             moe.encodeDown(
                 commandBuffer: commandBuffer,
-                blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlobBuffer],
+                blobsArgBuffer: sharedArgBuffer, blobs: [sharedBlob],
                 offsets: offsets,
                 acts: sharedActsBuffer, actsOffset: t * interBytes,
                 routedOut: sharedOutBuffer, routedOutOffset: t * rowBytes,
