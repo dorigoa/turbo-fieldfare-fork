@@ -21,6 +21,7 @@ import Testing
         #expect(settings.selectedModelPath == "/models/gemma4.gturbo")
         #expect(settings.selectedModelPath(for: .int4) == "/models/gemma4.gturbo")
         #expect(settings.selectedModelPath(for: .int8) == nil)
+        #expect(settings.selectedModelPath(for: .qwen36) == nil)
         #expect(settings.contextTokens == 16_384)
         #expect(settings.textSize == .large)
     }
@@ -32,12 +33,14 @@ import Testing
         let file = root.appendingPathComponent(MacAppSettings.fileName)
         let written = MacAppSettings(selectedModelPath: "/models/gemma4.gturbo",
                                      modelVariant: variant,
-                                     selectedModelPathInt8: "/models/gemma4-8bit.gturbo")
+                                     selectedModelPathInt8: "/models/gemma4-8bit.gturbo",
+                                     selectedModelPathQwen36: "/models/qwen36.gturbo")
         try MacAppSettingsFileStore.save(written, at: file)
 
         let read = try #require(try MacAppSettingsFileStore.load(at: file))
         #expect(read == written)
         #expect(read.selectedModelPath(for: .int8) == "/models/gemma4-8bit.gturbo")
+        #expect(read.selectedModelPath(for: .qwen36) == "/models/qwen36.gturbo")
     }
 
     /// What an older build reads: the version it accepts, the 4-bit location

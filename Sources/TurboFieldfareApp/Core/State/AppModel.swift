@@ -2430,7 +2430,8 @@ public final class AppModel {
             rdadvisePolicy: runtimeOptions.rdadvisePolicy,
             loadModelOnLaunch: loadModelOnLaunch,
             modelVariant: savedModelVariant,
-            selectedModelPathInt8: savedModelPaths[.int8])
+            selectedModelPathInt8: savedModelPaths[.int8],
+            selectedModelPathQwen36: savedModelPaths[.qwen36])
     }
 
     func persistSettings() {

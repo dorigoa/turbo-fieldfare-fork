@@ -210,9 +210,9 @@ struct InspectorView: View {
     private var modelSection: some View {
         Section("Model") {
             LabeledContent("Variant") {
-                // Qwen3.6 is in the catalog but not selectable here yet (S24).
+                // Every catalog entry is selectable here, Qwen3.6 included.
                 Picker("Variant", selection: modelVariantBinding) {
-                    ForEach(AppModelVariant.gemma4Variants, id: \.self) { variant in
+                    ForEach(AppModelVariant.allCases, id: \.self) { variant in
                         Text(variant.shortLabel).tag(variant)
                     }
                 }

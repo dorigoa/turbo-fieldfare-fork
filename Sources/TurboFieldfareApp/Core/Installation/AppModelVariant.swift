@@ -42,11 +42,7 @@ extension SupportedModelVariant {
         switch self {
         case .int4:
             return nil
-        case .qwen36:
-            // The app picker does not offer Qwen3.6 yet (S24 adds the copy
-            // and lifts the filter); nothing downloads through this path.
-            return nil
-        case .int8:
+        case .qwen36, .int8:
             let download = Int((Double(approximateDownloadBytes) / 1e9).rounded())
             let memory = recommendedMinimumHostMemoryBytes >> 30
             return "~\(download) GB download; \(memory) GB memory recommended"

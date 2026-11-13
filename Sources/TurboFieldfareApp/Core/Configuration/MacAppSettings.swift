@@ -38,6 +38,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// location, so an older build reading this file still finds its model
     /// where it left it and never loads a checkpoint it cannot run.
     var selectedModelPathInt8: String?
+    /// Where the Qwen3.6 model lives, remembered the same way.
+    var selectedModelPathQwen36: String?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -61,6 +63,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case loadModelOnLaunch
         case modelVariant
         case selectedModelPathInt8
+        case selectedModelPathQwen36
     }
 
     init(version: Int = currentVersion,
@@ -83,7 +86,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
          modelVariant: SupportedModelVariant = .int4,
-         selectedModelPathInt8: String? = nil) {
+         selectedModelPathInt8: String? = nil,
+         selectedModelPathQwen36: String? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -105,6 +109,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.loadModelOnLaunch = loadModelOnLaunch
         self.modelVariant = modelVariant
         self.selectedModelPathInt8 = selectedModelPathInt8
+        self.selectedModelPathQwen36 = selectedModelPathQwen36
     }
 
     init(from decoder: Decoder) throws {
@@ -172,6 +177,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         selectedModelPathInt8 = try container.decodeIfPresent(
             String.self,
             forKey: .selectedModelPathInt8)
+        selectedModelPathQwen36 = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedModelPathQwen36)
     }
 
     /// The saved location of `variant`'s install, if one was ever chosen.
@@ -179,10 +187,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath
         case .int8: selectedModelPathInt8
-        case .qwen36:
-            // Qwen3.6 has no saved location yet (S24 adds one); the catalog
-            // entry exists so the installer knows the checkpoint.
-            nil
+        case .qwen36: selectedModelPathQwen36
         }
     }
 
@@ -190,10 +195,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath = path
         case .int8: selectedModelPathInt8 = path
-        case .qwen36:
-            // No location to remember yet; the picker cannot select this
-            // variant until S24 gives it one.
-            break
+        case .qwen36: selectedModelPathQwen36 = path
         }
     }
 
@@ -201,6 +203,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     func isValid() -> Bool {
         Self.isValidModelPath(selectedModelPath)
             && Self.isValidModelPath(selectedModelPathInt8)
+            && Self.isValidModelPath(selectedModelPathQwen36)
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
