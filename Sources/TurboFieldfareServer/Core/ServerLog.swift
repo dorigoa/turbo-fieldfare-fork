@@ -64,7 +64,10 @@ enum ServerLog {
     }
 
     static func modelOpenedMessage(_ variant: ServerModelVariant) -> String {
-        "model opened variant=\(variant.label) manifest_model_id=\(variant.manifestModelID)"
+        // `family` is appended, so scripts reading the earlier fields keep
+        // working (S23, D3: the operator must see which family was opened).
+        "model opened variant=\(variant.label) "
+            + "manifest_model_id=\(variant.manifestModelID) family=\(variant.family.rawValue)"
     }
 
     static func visionPackInvalid(at url: URL, error: Error) {
