@@ -8,7 +8,7 @@ import Testing
 /// checkout without `scratch/` artifacts stays green. The server test target
 /// cannot see `QwenTestResources` (it lives in another test module), so this
 /// is the same locator, re-declared file-locally.
-private enum QwenServerTestResources {
+enum QwenServerTestResources {
     /// Repository root, derived from this file's location:
     /// `Tests/TurboFieldfareServer/Qwen/ServerQwenPromptCacheTests.swift`.
     static var repoRoot: URL {

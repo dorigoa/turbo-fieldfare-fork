@@ -28,8 +28,11 @@ public enum QwenToolCallParserError: Error, Equatable {
 public struct QwenToolCallParser: Sendable {
     public static let maximumBytes = 256 * 1024
 
-    public static let callOpen = "\u{3C}|tool_call|\u{3E}"
-    public static let callClose = "\u{3C}/tool_call|\u{3E}"
+    /// The text of the vocabulary's `tool_call` special tokens (IDs 248058
+    /// and 248059 in the pinned tokenizer, the same markers the chat template
+    /// writes). `ServerQwenScriptedGenerationTests` ties them to the vocabulary.
+    public static let callOpen = "\u{3C}tool_call\u{3E}"
+    public static let callClose = "\u{3C}/tool_call\u{3E}"
 
     public init() {}
 
