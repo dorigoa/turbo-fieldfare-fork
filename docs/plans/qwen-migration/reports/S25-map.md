@@ -297,3 +297,32 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   in HUD mentre il frame è aperto, testo della risposta senza ragionamento;
   con Gemma — nessun interruttore, HUD invariato, chat preesistenti
   continuabili.
+
+## Aggiornamenti passo 7 (cronologia cross-famiglia) — per il passo 8
+- Verificato, zero codice sorgente nuovo: la regola `.differentModel`
+  (ConversationContinuability :47-49 su `modelID`) separa già Gemma↔qwen36.
+  Catena reale verificata: `ConversationIdentity.forModelDirectory` decodifica
+  manifest Qwen (D2: `ManifestReader.validate` convalida i manifest con
+  `modelFamily` contro le costanti Qwen e ignora l'`expecting` Gemma) e
+  restituisce modelID = repoID della variante; `variant(forRepoID:)` mappe
+  qwen36 → `.qwen36` (copy "recorded with the Qwen3.6 model" già coperta da
+  `ModelVariantHistoryCopyTests` su `AppModelVariant.allCases`). Manifest
+  reale di `scratch/qwen36.gturbo`: modelID `mlx-community/Qwen3.6-35B-A3B-4bit`,
+  sourceSnapshotHash presente (sha256:0b28df…), modelFamily `qwen_3_5_moe`.
+  `templateIdentity` è `GFTokenizer.chatTemplateIdentity` per entrambe le
+  famiglie: il separatore è il modelID (se un domani Qwen dichiarasse un
+  template identity proprio, l'isolamento si rafforzerebbe senza rompere i test).
+- Test nuovi: `Tests/TurboFieldfareApp/Core/History/
+  CrossFamilyHistoryContinuabilityTests.swift` (filtro `CrossFamily`; 1 test
+  identità cross+same-family + 1 test parametrico 2 direzioni App-model:
+  `continuability == .cannotReplay(.differentModel)`, `recordedOtherVariant`,
+  `openConversation` disegna il transcript e `openedConversationState`/
+  `openedConversationRecordedVariant` = variante registrata). Provider di
+  identità reale (non iniettato): l'AppModel legge il manifest del directory.
+  `makeCompleteModelInstall(tag, variant: .qwen36, modelID: .qwen36.repoID,
+  at:)` funziona (slot quant 4-bit, receipt legato solo all'hash del manifest,
+  `detectVariant` mappe per sourceSnapshotHash) — riusabile.
+- Passo 8: nessuna API nuova dal passo 7; guard "Gemma intoccato" invariato
+  (solo file di test). Suite completa: `Scripts/test.sh` in background;
+  baseline noti: 7 fallimenti virgola di regione in
+  `TurboFieldfareMacPresentationTests` (elencati ai passi 4-6, non nostri).
