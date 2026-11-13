@@ -71,6 +71,10 @@ func runQwenFamily(args: Args,
         let args = effectiveArgs
         let runtime = try args.resolvedRuntimeConfiguration(
             forceLogitsHead: false, imagePrompt: false)
+        // Before the model load: an invalid sampling combination is refused
+        // in milliseconds, the way the Gemma parse-level check does.
+        let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
+        let config = try qwenGenerationConfig(args: args, maxNewTokens: effectiveMaxNew)
 
         let context = try MetalContext()
         let model = try Model.load(
@@ -85,8 +89,6 @@ func runQwenFamily(args: Args,
             maxContext: args.maxContext)
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize)
-        let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
-        let config = try qwenGenerationConfig(args: args, maxNewTokens: effectiveMaxNew)
 
         // The S11 parser splits the chat stream (D11): reasoning never
         // reaches stdout; it streams to stderr through the callback. The
@@ -193,14 +195,26 @@ final class QwenReasoningSink: @unchecked Sendable {
     }
 }
 
-/// The generation config for a Qwen run: the user's flags, exactly as the
-/// Gemma branch applies them.
+/// The generation config for a Qwen run (D10, U4): a sampling knob the user
+/// left untouched takes the value from the checkpoint's own
+/// `generation_config.json` (temperature 1.0, top-k 20, top-p 0.95); a knob
+/// the user set keeps their value.
 func qwenGenerationConfig(args: Args, maxNewTokens: Int) throws -> GenerationConfig {
-    GenerationConfig(
+    let temperature = args.temperatureSet ? args.temperature : 1.0
+    let topK = args.topKSet ? args.topK : 20
+    let topP = args.topPSet ? args.topP : 0.95
+    // The parse-level check only sees the raw flag values, where Gemma's
+    // defaults are what fill the gaps; this is the family-aware one.
+    guard !(temperature > 0 && topK == nil && topP.map({ $0 < 1 }) == true) else {
+        throw ArgsError.invalidValue(
+            flag: "--top-p",
+            value: "\(topP ?? 0) requires --top-k between 1 and 256")
+    }
+    return GenerationConfig(
         maxNewTokens: maxNewTokens,
-        temperature: args.temperature,
-        topK: args.topK,
-        topP: args.topP,
+        temperature: temperature,
+        topK: topK,
+        topP: topP,
         repetitionPenalty: args.repetitionPenalty,
         seed: args.seed,
         stopStrings: args.stops,

@@ -13,6 +13,11 @@ public struct Args: Equatable, Sendable {
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
+    /// True when the user passed the sampling flag at all (D10): the family
+    /// applies its own default (U4) to a knob the flag left untouched.
+    public var temperatureSet: Bool
+    public var topKSet: Bool
+    public var topPSet: Bool
     public var repetitionPenalty: Float
     public var seed: UInt64?
     public var stops: [String]
@@ -42,6 +47,9 @@ public struct Args: Equatable, Sendable {
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
+                temperatureSet: Bool = false,
+                topKSet: Bool = false,
+                topPSet: Bool = false,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
@@ -65,6 +73,9 @@ public struct Args: Equatable, Sendable {
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
+        self.temperatureSet = temperatureSet
+        self.topKSet = topKSet
+        self.topPSet = topPSet
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
         self.stops = stops
@@ -142,9 +153,9 @@ extension Args {
     options:
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192, max 262144).
-      --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
-      --top-k <int>              Top-k truncation, 1...256 (default 64; 0 = off).
-      --top-p <float>            Nucleus truncation (default 0.95).
+      --temperature <float>      Sampling temperature (Gemma 0.2, Qwen 1.0; 0 = greedy).
+      --top-k <int>              Top-k truncation, 1...256 (Gemma 64, Qwen 20; 0 = off).
+      --top-p <float>            Nucleus truncation (default 0.95 for both families).
       --repetition-penalty <f>   Repetition penalty (default 1.0).
       --seed <uint64>            Deterministic sampling seed (default off).
       --stop <string>            Stop substring (repeatable).
@@ -218,6 +229,9 @@ extension Args {
         var temperature: Float = 0.2
         var topK: Int? = 64
         var topP: Float? = 0.95
+        var temperatureSet = false
+        var topKSet = false
+        var topPSet = false
         var repetitionPenalty: Float = 1.0
         var seed: UInt64?
         var stops: [String] = []
@@ -280,18 +294,21 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed
+                temperatureSet = true
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topK = parsed == 0 ? nil : parsed
+                topKSet = true
             case "--top-p":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topP = parsed
+                topPSet = true
             case "--repetition-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0 else {
@@ -401,6 +418,9 @@ extension Args {
                              temperature: temperature,
                              topK: topK,
                              topP: topP,
+                             temperatureSet: temperatureSet,
+                             topKSet: topKSet,
+                             topPSet: topPSet,
                              repetitionPenalty: repetitionPenalty,
                              seed: seed,
                              stops: stops,
