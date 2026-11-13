@@ -41,7 +41,8 @@ do {
         modelID: arguments.modelID,
         queueLimit: arguments.queueLimit,
         backend: backend,
-        visionCapability: backend.visionCapability)
+        visionCapability: backend.visionCapability,
+        family: backend.family)
     _ = try await server.start(port: arguments.port)
     print(arguments.readyLine(servedVariant: backend.modelVariant,
                               visionCapability: backend.visionCapability))

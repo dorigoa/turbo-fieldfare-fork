@@ -513,9 +513,9 @@ enum ServerModelSessionError: Error, CustomStringConvertible {
     /// A Qwen pack has no vision companion (D12): an explicit `--vision-pack`
     /// for it is a startup mistake, refused with the path that caused it.
     case visionUnsupportedForQwen(path: String)
-    /// Interim guard inside S23: the Qwen chat path is wired by the section's
-    /// second step; until then a Qwen session must not fall through to the
-    /// Gemma tokenizer or runner.
+    /// A family's tokenizer was reached from the other family's path. The
+    /// session loads both fields from the manifest's family, so reaching one
+    /// is a wiring bug in the server, never a request outcome.
     case qwenChatUnavailable
 
     var description: String {
@@ -793,6 +793,19 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
     }
 
+    /// The Qwen tokenizer, for paths that exist only for Qwen: the pinned
+    /// chat template, the tool-call stream parser, and the Qwen cache
+    /// bridges. Like the Gemma accessor, reaching it from the other family's
+    /// path is a bug, not a request outcome.
+    private var qwenChatTokenizer: QwenTokenizer {
+        get throws {
+            guard let qwenTokenizer else {
+                throw ServerModelSessionError.qwenChatUnavailable
+            }
+            return qwenTokenizer
+        }
+    }
+
     public func generate(
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
@@ -802,13 +815,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     public func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
-        // Interim within S23: the Qwen chat path is wired by the section's
-        // second step. Nothing may touch the Gemma tokenizer or the Gemma
-        // cache for a Qwen pack before it is.
-        guard family == .gemma4 else {
-            throw ServerModelSessionError.qwenChatUnavailable
-        }
-        if !request.imageFiles.isEmpty {
+        if !request.imageFiles.isEmpty || request.multimodalMessages != nil {
             let softTokens = try imageSoftTokenCounts(request)
             try validateImageTokenBudget(request, softTokens: softTokens)
         }
@@ -1027,8 +1034,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         // re-encoded; only a full-prefill miss needs them.
         let renderedTextIDs: [Int32]? = isMultimodal
             ? nil : try (prepared.promptIDs ?? renderPrompt(request))
+        // Interim within S23: the Qwen prompt cache is wired by the
+        // section's third step (reuse only as D6 allows). Until it is, a
+        // Qwen request always takes the full-prefill path, which is always
+        // legal: D6 guarantees a cold prefill works for every prompt.
+        let promptCacheActive = promptCacheMode == .singlePrefix && family == .gemma4
         var cacheMatch: ServerPromptCacheMatch = .miss
-        if promptCacheMode == .singlePrefix {
+        if promptCacheActive {
             cacheMatch = promptCache.match(
                 domain: promptCacheDomain,
                 request: request,
@@ -1069,7 +1081,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 completionStart = .reset
             }
         case .miss(let reason):
-            if promptCacheMode == .singlePrefix {
+            if promptCacheActive {
                 ServerLog.promptCacheMiss(reason: reason)
             }
             promptCache.invalidate()
@@ -1102,10 +1114,23 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
+        // Gemma's structured decoder exists only where the tool template
+        // was rendered (its boundary markers are the template's); Qwen's
+        // stream parser runs for every Qwen request, tools or not, because
+        // the template's think frame is always there and its splitter is
+        // what keeps reasoning out of `content` (D11). The parser drops
+        // reasoning: the OpenAI surface has no channel for it, exactly as
+        // Gemma's thought channel is dropped today.
+        let needsGemmaToolTemplate = family == .gemma4 && needsToolTemplate
+        let gemmaDecoder = needsGemmaToolTemplate
             ? StructuredAssistantDecoder(
                 tokenizer: try gemmaTokenizer,
                 allowedTools: Set(request.tools.map(\.name)))
+            : nil
+        let qwenDecoder = family == .qwen35Moe
+            ? QwenAssistantDecoder(
+                allowedTools: Set(request.tools.map(\.name)),
+                insideReasoning: request.enableThinking)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
@@ -1147,21 +1172,29 @@ public actor ServerModelSession: ServerInferenceBackend {
                     case .prefill:
                         break
                     case .token(_, let tokenID, let delta):
-                        let events = if let decoder {
-                            try decoder.consume(tokenID: tokenID, delta: delta)
+                        let events: [StructuredAssistantEvent]
+                        if let gemmaDecoder {
+                            events = try gemmaDecoder.consume(tokenID: tokenID, delta: delta)
+                        } else if let qwenDecoder {
+                            events = try qwenDecoder.consume(delta)
                         } else {
-                            delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
+                            events = delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
                         }
                         handle(events)
                     case .tail(let text):
                         // The flush tail is not tied to a token ID, so it must
                         // go through the decoder's channel state explicitly;
                         // appending it directly would leak text held back
-                        // inside the thought channel or a tool call.
-                        let events = if let decoder {
-                            try decoder.consumeTail(text)
+                        // inside the thought channel or a tool call. The
+                        // Qwen parser flushes at `finish` below, so here it
+                        // only takes the tail as one more fragment.
+                        let events: [StructuredAssistantEvent]
+                        if let gemmaDecoder {
+                            events = try gemmaDecoder.consumeTail(text)
+                        } else if let qwenDecoder {
+                            events = text.isEmpty ? [] : try qwenDecoder.consume(text)
                         } else {
-                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
+                            events = text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
                         }
                         handle(events)
                     }
@@ -1174,7 +1207,20 @@ public actor ServerModelSession: ServerInferenceBackend {
             kind: StructuredOutputFailureKind,
             cause: StructuredOutputFailureCause
         ) throws -> StructuredOutputFailure {
-            StructuredOutputFailure(
+            // The diagnostics name the boundary tokens of the family that
+            // actually ran: both tokenizers carry the four marker IDs under
+            // the same names, so the field shape is shared and only the
+            // values are the family's own.
+            let markers: (start: Int32, end: Int32, response: Int32, responseEnd: Int32)
+            if let qwenTokenizer {
+                markers = (qwenTokenizer.toolCallStartID, qwenTokenizer.toolCallEndID,
+                           qwenTokenizer.toolResponseID, qwenTokenizer.toolResponseEndID)
+            } else {
+                let tokenizer = try gemmaTokenizer
+                markers = (tokenizer.toolCallStartID, tokenizer.toolCallEndID,
+                           tokenizer.toolResponseID, tokenizer.toolResponseEndID)
+            }
+            return StructuredOutputFailure(
                 kind: kind,
                 cause: cause,
                 diagnostics: StructuredOutputFailureDiagnostics(
@@ -1185,10 +1231,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                     decodedCalls: calls.count,
                     visibleBytes: content.utf8.count,
                     stopStringMatched: stopMatcher.isStopped,
-                    toolStartID: try gemmaTokenizer.toolCallStartID,
-                    toolEndID: try gemmaTokenizer.toolCallEndID,
-                    toolResponseID: try gemmaTokenizer.toolResponseID,
-                    toolResponseEndID: try gemmaTokenizer.toolResponseEndID))
+                    toolStartID: markers.start,
+                    toolEndID: markers.end,
+                    toolResponseID: markers.response,
+                    toolResponseEndID: markers.responseEnd))
         }
         if let decodingError {
             throw try structuredFailure(
@@ -1196,13 +1242,41 @@ public actor ServerModelSession: ServerInferenceBackend {
                 cause: .classify(decodingError))
         }
         do {
-            try decoder?.finish()
+            try gemmaDecoder?.finish()
+            // The Qwen parser's finish flush is the last word of the stream,
+            // after the tail fragment, in that order (the CLI runs the same
+            // sequence, S22): held text that never completed a tag surfaces
+            // as content, and an unclosed tool-call block throws. The events
+            // go through the same channel as the streamed ones; this mirrors
+            // the `handle` inside the progress closure above, which cannot
+            // leave that closure's region (Swift 6 region isolation).
+            if let qwenDecoder {
+                for event in try qwenDecoder.finish() {
+                    switch event {
+                    case .content(let text):
+                        let visible = stopMatcher.push(text)
+                        if !visible.isEmpty {
+                            content += visible
+                            onEvent(.content(visible))
+                        }
+                        if stopMatcher.isStopped { shouldStop = true }
+                    case .toolCall(let call):
+                        calls.append(call)
+                        onEvent(.toolCall(call))
+                    }
+                }
+            }
         } catch {
             throw try structuredFailure(
                 kind: .decoderFinish,
                 cause: .classify(error))
         }
-        if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
+        // The orphan-tool-response failure is a Gemma template fact: its
+        // tool template parks the stream on the tool-response marker, so a
+        // `.toolCalls` stop with nothing parsed can only be the marker with
+        // no calls behind it. Qwen turns close on `im_end` and its parser
+        // has already thrown on any malformed or unclosed call block.
+        if needsGemmaToolTemplate, result.reason == .toolCalls, calls.isEmpty {
             throw try structuredFailure(kind: .orphanToolResponse, cause: .none)
         }
         let tail = stopMatcher.finish()
@@ -1222,7 +1296,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // image identity: a later turn whose images differ is refused by
         // `imagesDiverged` rather than resumed onto a KV built from a different
         // picture.
-        if promptCacheMode == .singlePrefix {
+        if promptCacheActive {
             let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: request,
@@ -1247,13 +1321,33 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private func renderPrompt(_ request: ValidatedChatRequest) throws -> [Int32] {
         let promptIDs: [Int32]
-        if usesToolTemplate(request) {
-            promptIDs = try gemmaTokenizer.encodeToolChat(
-                messages: request.messages,
-                tools: request.tools)
-        } else {
-            let rendered = try gemmaTokenizer.applyChatTemplate(request.messages)
-            promptIDs = try gemmaTokenizer.encode(rendered, addBOS: false)
+        switch family {
+        case .gemma4:
+            if usesToolTemplate(request) {
+                promptIDs = try gemmaTokenizer.encodeToolChat(
+                    messages: request.messages,
+                    tools: request.tools)
+            } else {
+                let rendered = try gemmaTokenizer.applyChatTemplate(request.messages)
+                promptIDs = try gemmaTokenizer.encode(rendered, addBOS: false)
+            }
+        case .qwen35Moe:
+            // D8: the pinned `chat_template.jinja` renders the whole
+            // conversation, tool schemas included, so tools reach the model
+            // as template text and need no special template of their own;
+            // the conversation is encoded once either way. The thinking
+            // frame follows the validated request (D11).
+            let tokenizer = try qwenChatTokenizer
+            if usesToolTemplate(request) {
+                promptIDs = try tokenizer.encodeToolChat(
+                    messages: request.messages,
+                    tools: request.tools,
+                    enableThinking: request.enableThinking)
+            } else {
+                let rendered = try tokenizer.applyChatTemplate(
+                    request.messages, enableThinking: request.enableThinking)
+                promptIDs = tokenizer.encode(rendered, addBOS: false)
+            }
         }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
