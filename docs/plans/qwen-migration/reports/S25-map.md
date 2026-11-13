@@ -224,3 +224,47 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   Pipeline D11: `QwenAssistantDecoder`/`onReasoning` in `MultimodalConversation`
   (i `.token`/`.tail` oggi vanno dritti in `text` in `generate`), delta →
   eventi app nella closure `report` :922-949 (`.token`→`AppTokenEvent`).
+
+## Aggiornamenti passo 5 (pipeline D11 + campo `enableThinking`) — per il passo 6
+- `ConversationPromptRenderer.swift`: requisito `makeAssistantDecoder()
+  -> (any ConversationAssistantDecoder)?` :24 (default nil in extension :30 =
+  Gemma e qualsiasi famiglia nuova invariata); protocollo
+  `ConversationAssistantDecoder` :35 (`AnyObject`, `onReasoning`/`consume`/
+  `finish` = la faccia che `QwenAssistantDecoder` ha già, conformance vuota);
+  `ConversationThinkingStream` :56 (`@unchecked Sendable`): `isFiltering` :86,
+  `consume` :91 (testo visibile; `.toolCall` → throw
+  `QwenToolCallParserError.malformed`, fail-closed come CLI S22), `finish` :111,
+  `closeTurn` :128; stato think con `Mutex` + `onThinking?(Bool)` solo sulle
+  transizioni; `QwenConversationPromptRenderer.makeAssistantDecoder` :192 =
+  `QwenAssistantDecoder(allowedTools: [], insideReasoning: enableThinking)`.
+- `MultimodalConversation.swift`: `renderer` ora `var` :295;
+  `setPromptRenderer(_:)` :400 (solo a riposo: il renderer è letto solo
+  all'encoding del turno); `onThinking:` in `send` :522 e `generate` :555;
+  stream creato :618 con `defer closeTurn`; loop `onProgress` biforcato:
+  Gemma pass-through invariato, Qwen filtra `.token`/`.tail` e propaga
+  `decodingFailure` in `shouldStop`; `finish()` DOPO la registrazione KV
+  (~:776-790), throw solo da lì in poi.
+- `RealInferenceClient.swift`: `promptRenderer(family:tokenizer:
+  enableThinking:)` :579 (default true); wrap thinking identico in `runOneShot`
+  :738 (param `onThinking` :657); `runConversationTurn` :852 (param `renderer:`
+  :852, `setPromptRenderer` :870 prima dell'encoding, `onThinking` :856);
+  `generate`: `turnRenderer` :983 (ricostruito SOLO con
+  `request.enableThinking == false`, altrimenti renderer di sessione),
+  `reportThinking` :1031 → `.yield(.thinking(active:))`.
+- Eventi app: `AppInferenceEvent.thinking(active:)` AppDiagnostics.swift :157.
+- Wire: `DecodeGenerationRequest.enableThinking: Bool?` DecodeProtocol.swift
+  :102 (assente = true); kind `.thinking` :223 + `thinkingActive: Bool?` :337
+  (frame senza sequence); Outbox `thinkingQueue` :24, append :62, drain
+  :116/:121, scritto prima del terminale :173; `Entry.swift` :339;
+  `DecodeServiceInferenceClient` :278-285 mappa `.thinking` senza toccare la
+  contiguità snapshot.
+- `AppModel.swift`: `isThinking` :160 (`private(set)`), reset inizio run :2960,
+  `.thinking` in `apply` :3161-3165. Passo 6: HUD legga `model.isThinking`
+  (`PhaseLabel` StatusHUDView :176-224); interruttore in
+  `InspectorView.generationSection` :394 (gate famiglia: pattern
+  `isImageInputAvailable` AppModel.swift :1415 → valutare
+  `isThinkingControlAvailable`); persistenza `MacAppSettings`
+  `thinkingEnabledQwen36` (pattern chiavi `*Qwen36` :42-52, assente = true,
+  `applyModelVariant`/`savedSampling` S24); valore → `AppGenerationRequest(`
+  AppModel.swift :3120. Con Gemma `isThinking` resta false e nessun evento
+  `.thinking` parte: interfaccia invariata.
