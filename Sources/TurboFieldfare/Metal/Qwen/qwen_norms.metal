@@ -214,14 +214,20 @@ void qwen_gated_rmsnorm_perhead(
 //
 // The extra 1/sqrt(128) scale that 3.5 applies to q afterwards is NOT part
 // of this kernel; callers fold it in where they read the values.
+//
+// `out` is compact [rows][numHeads * headDim]; `x` rows are xRowStride
+// elements apart (S26 step 2: one call covers all chunk rows of the wider
+// conv output). The default stride numHeads * headDim reproduces the
+// compact layout.
 // ----------------------------------------------------------------------------
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void qwen_l2norm_perhead(
-    device const half*  x          [[buffer(0)]],  // [rows * numHeads * headDim] FP16
-    device       half*  out        [[buffer(1)]],  // same layout
+    device const half*  x          [[buffer(0)]],  // rows * xRowStride FP16
+    device       half*  out        [[buffer(1)]],  // [rows * numHeads * headDim]
     constant     uint&  headDim    [[buffer(2)]],
     constant     uint&  numHeads   [[buffer(3)]],
     constant     float& eps        [[buffer(4)]],
+    constant     uint&  xRowStride [[buffer(5)]],  // elements between x rows
     uint2 head_row         [[threadgroup_position_in_grid]],
     uint2 tid2             [[thread_position_in_threadgroup]],
     uint2 tsize2           [[threads_per_threadgroup]],
@@ -234,9 +240,10 @@ void qwen_l2norm_perhead(
     const uint row   = head_row.y;
     const uint lid   = tid2.x;
     const uint lsize = tsize2.x;
-    const size_t base = (size_t(row) * numHeads + head) * headDim;
-    device const half* xh = x + base;
-    device       half* yh = out + base;
+    const size_t baseOut = (size_t(row) * numHeads + head) * headDim;
+    const size_t baseX   = size_t(row) * xRowStride + head * headDim;
+    device const half* xh = x + baseX;
+    device       half* yh = out + baseOut;
 
     const float sumSq = qwen_block_sum_sq(xh, headDim, lid, lsize,
                                           simd_lane_id, simd_group_id,

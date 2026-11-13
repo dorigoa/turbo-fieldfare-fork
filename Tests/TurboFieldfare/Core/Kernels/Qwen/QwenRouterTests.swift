@@ -167,6 +167,54 @@ import TurboFieldfareValidationSupport
         #expect(rel < Tolerance.fp16Reduction, "real weights: rel=\(rel)")
     }
 
+    // MARK: - Multi-row dispatch (S26 step 2 prefill batching)
+
+    /// One dispatch over compact [rows][E] logits must match the CPU
+    /// reference on every row, at small and real width.
+    private static func runTopKMultiRow(experts: Int, topK: Int, rows: Int,
+                                        seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-router-rows-e\(experts)-r\(rows)")
+        let logits = (0..<(rows * experts)).map { _ in Float16(rng.uniform(-5.0, 5.0)) }
+
+        let ctx = try MetalContext()
+        let router = try QwenRouter(context: ctx)
+        guard let logitsBuf = Fp16Buffer.make(ctx.device, halves: logits) else {
+            Issue.record("alloc failed")
+            throw BufferAllocFailure()
+        }
+        let idxBuf = try Self.alloc(ctx.device, rows * topK * MemoryLayout<UInt32>.size)
+        let wBuf   = try Self.alloc(ctx.device, rows * topK * MemoryLayout<Float>.size)
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        router.encodeTopK(commandBuffer: cb,
+                          logits: logitsBuf, indices: idxBuf, weights: wBuf,
+                          experts: experts, topK: topK, rows: rows)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let allIndices = Self.readUInt32(idxBuf, rows * topK)
+        let allWeights = Self.readFloat(wBuf, rows * topK)
+        for r in 0..<rows {
+            let ref = QwenHeadRef.softmaxTopK(
+                logits: logits[(r * experts)..<((r + 1) * experts)].map { Float($0) },
+                topK: topK)
+            let rowIndices = Array(allIndices[(r * topK)..<((r + 1) * topK)])
+            #expect(rowIndices == ref.indices,
+                    "row \(r) (E=\(experts)): got \(rowIndices) want \(ref.indices)")
+            let rowWeights = Array(allWeights[(r * topK)..<((r + 1) * topK)])
+            let rel = RelError.compute(actual: rowWeights, reference: ref.weights)
+            #expect(rel < Tolerance.fp16Reduction,
+                    "row \(r) (E=\(experts)) weights: rel=\(rel)")
+        }
+    }
+
+    @Test func routerTopK_multirow_small() throws {
+        try Self.runTopKMultiRow(experts: 16, topK: 4, rows: 3, seed: 0xF04)
+    }
+
+    @Test func routerTopK_multirow_real() throws {
+        try Self.runTopKMultiRow(experts: 256, topK: 8, rows: 5, seed: 0xF05)
+    }
+
     // MARK: - Shared-expert gate: W_sg GEMV (m = 1) + sigmoid
 
     /// Elementwise coverage of `qwen_sigmoid_f16` across a range wide enough

@@ -30,19 +30,23 @@ final class QwenRouter {
         self.psoSigmoid = try context.pipeline("qwen_sigmoid_f16")
     }
 
-    /// Softmax + top-K + renormalization over `experts` logits.
-    /// `logits`: FP16 [experts]; `indices`: UInt32 [topK];
-    /// `weights`: Float [topK].
+    /// Softmax + top-K + renormalization over `experts` logits, `rows`
+    /// compact rows in one dispatch (S26 step 2; rows = 1 is the old
+    /// single-token call, so decode is unchanged).
+    /// `logits`: FP16 [rows][experts]; `indices`: UInt32 [rows][topK];
+    /// `weights`: Float [rows][topK].
     func encodeTopK(commandBuffer: MTLCommandBuffer,
                     logits: MTLBuffer, logitsOffset: Int = 0,
                     indices: MTLBuffer, indicesOffset: Int = 0,
                     weights: MTLBuffer, weightsOffset: Int = 0,
                     experts: Int,
-                    topK: Int) {
+                    topK: Int,
+                    rows: Int = 1) {
         precondition((1...Self.maxExperts).contains(experts),
                      "experts must be 1...\(Self.maxExperts), got \(experts)")
         precondition(topK >= 1 && topK <= Self.maxTopK && topK <= experts,
                      "topK must be 1...min(\(Self.maxTopK), experts), got \(topK) with experts \(experts)")
+        precondition(rows >= 1, "rows must be >= 1, got \(rows)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoTopK)
         enc.setBuffer(logits,  offset: logitsOffset,  index: 0)
@@ -52,7 +56,7 @@ final class QwenRouter {
         var kVar = UInt32(topK)
         enc.setBytes(&eVar, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 4)
-        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: rows, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: Self.maxExperts,
                                                                 height: 1, depth: 1))
         enc.endEncoding()

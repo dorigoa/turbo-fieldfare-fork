@@ -30,6 +30,10 @@ using namespace metal;
 // index). Invalid expert lanes (i >= E) carry a -1e30 sentinel so they never
 // win the max or add to the sum; a selected expert is consumed with -2.0,
 // below every valid softmax probability (all >= 0).
+//
+// Grid height is the row count: prefill packs [rows][E] compact logits and
+// [rows][K] outputs, and one threadgroup per row covers the chunk (S26 step
+// 2). Row 0 reproduces the old single-token call, so decode is unchanged.
 // ----------------------------------------------------------------------------
 constant constexpr uint kQwenRouterMaxExperts = 256;
 constant constexpr uint kQwenRouterMaxTopK    = 8;
@@ -37,19 +41,27 @@ constant constexpr uint kQwenRouterThreads    = 256;
 
 [[kernel, max_total_threads_per_threadgroup(kQwenRouterThreads)]]
 void qwen_router_topk(
-    device const half* logits  [[buffer(0)]],   // [E] FP16 (GEMV output)
-    device       uint* indices [[buffer(1)]],   // [K] selected expert ids
-    device     float*  weights [[buffer(2)]],   // [K] renormalized FP32 weights
+    device const half* logits  [[buffer(0)]],   // rows * E FP16 (GEMV output)
+    device       uint* indices [[buffer(1)]],   // rows * K selected expert ids
+    device     float*  weights [[buffer(2)]],   // rows * K renormalized FP32
     constant     uint& experts [[buffer(3)]],   // E <= 256
     constant     uint& topK    [[buffer(4)]],   // K <= 8, K <= E
-    uint  lid             [[thread_position_in_threadgroup]],
+    uint2 tg_position     [[threadgroup_position_in_grid]],
+    uint2 tid2            [[thread_position_in_threadgroup]],
     uint  simd_lane_id    [[thread_index_in_simdgroup]],
     uint  simd_group_id   [[simdgroup_index_in_threadgroup]],
     uint  simdgroups      [[simdgroups_per_threadgroup]]
 ) {
+    // Position builtins must all be scalar or all the same vector width
+    // (qwen_l2norm_perhead precedent): the row count needs a vector grid.
+    const uint lid = tid2.x;
     threadgroup float p[kQwenRouterMaxExperts];
     threadgroup float partial[kQwenRouterThreads / 32];
     const uint E = min(experts, kQwenRouterMaxExperts);
+
+    logits  += size_t(tg_position.y) * experts;
+    indices += size_t(tg_position.y) * topK;
+    weights += size_t(tg_position.y) * topK;
 
     const float v = (lid < E) ? float(logits[lid]) : -1.0e30f;
     p[lid] = v;

@@ -224,23 +224,22 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
 
         // Per-head L2 on q and k (into dedicated buffers, so `convOutBuffer`
         // stays the raw conv+SiLU output for the `conv_out` tap), then the
-        // 1/sqrt(keyDim) scale folded into q only (3.5). One rows: 1 call
-        // per row: the per-head kernel's xOffset is a base offset, so with
-        // rows > 1 it would stride the wider conv rows by numHeads*headDim
-        // instead of the full qkvChannels (map S20, step 3).
-        let convRowBytes = qkvChannels * MemoryLayout<Float16>.size
-        for t in 0..<rows {
-            norms.encodeL2PerHead(
-                commandBuffer: commandBuffer,
-                x: convOutBuffer, xOffset: t * convRowBytes,
-                out: dnQBuffer, outOffset: t * qkBytes,
-                headDim: UInt32(keyDim), numHeads: keyHeads, rows: 1, eps: epsilon)
-            norms.encodeL2PerHead(
-                commandBuffer: commandBuffer,
-                x: convOutBuffer, xOffset: t * convRowBytes + qkBytes,
-                out: dnKBuffer, outOffset: t * qkBytes,
-                headDim: UInt32(keyDim), numHeads: keyHeads, rows: 1, eps: epsilon)
-        }
+        // 1/sqrt(keyDim) scale folded into q only (3.5). One call covers all
+        // rows: `xRowStride` strides the wider conv rows by the full
+        // qkvChannels (S26 step 2; the old per-row loop with rows: 1 worked
+        // around the compact default stride, map S20 step 3).
+        norms.encodeL2PerHead(
+            commandBuffer: commandBuffer,
+            x: convOutBuffer,
+            out: dnQBuffer,
+            headDim: UInt32(keyDim), numHeads: keyHeads, rows: rows, eps: epsilon,
+            xRowStride: qkvChannels)
+        norms.encodeL2PerHead(
+            commandBuffer: commandBuffer,
+            x: convOutBuffer, xOffset: qkBytes,
+            out: dnKBuffer,
+            headDim: UInt32(keyDim), numHeads: keyHeads, rows: rows, eps: epsilon,
+            xRowStride: qkvChannels)
         deltaPrep.encodeScale(
             commandBuffer: commandBuffer,
             x: dnQBuffer, xOffset: 0, out: dnQBuffer, outOffset: 0,
@@ -299,10 +298,10 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             n: hiddenSize * rows)
 
         // S26 counters: one dispatch each for norm, qkv/z/a/b, conv, scale,
-        // gates, scan, gated norm, out proj, add, plus 2 per row for the
-        // per-head L2 loop (GEMM path; the GEMV fallback is never taken on
-        // this model, map S26).
-        s26Counters?.noteDispatches(layer: L, 12 + 2 * rows)
+        // gates, scan, gated norm, out proj, add, plus the two per-head L2
+        // calls covering all rows (GEMM path; the GEMV fallback is never
+        // taken on this model, map S26; S26 step 2 batched the L2 loop).
+        s26Counters?.noteDispatches(layer: L, 12)
 
         // Test-only internals of this layer under the C7 golden keys, as in
         // the S19 layer: `v` is a slice of the raw `convOutBuffer` at
@@ -552,23 +551,19 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             }
         }
 
-        // One top-K per row: the ids and the recalibrated weights of row
-        // t at t*slots in the [rows][slots] buffers.
-        for t in 0..<rows {
-            router.encodeTopK(
-                commandBuffer: commandBuffer,
-                logits: routerLogitsBuffer,
-                logitsOffset: t * cfg.numExperts * MemoryLayout<Float16>.size,
-                indices: routerTopIdsBuffer,
-                indicesOffset: t * slots * MemoryLayout<UInt32>.size,
-                weights: routerTopWeightsBuffer,
-                weightsOffset: t * slots * MemoryLayout<Float>.size,
-                experts: cfg.numExperts, topK: slots)
-        }
+        // One top-K call for all rows: the ids and the recalibrated weights
+        // of row t at t*slots in the [rows][slots] buffers (compact rows,
+        // S26 step 2).
+        router.encodeTopK(
+            commandBuffer: commandBuffer,
+            logits: routerLogitsBuffer,
+            indices: routerTopIdsBuffer,
+            weights: routerTopWeightsBuffer,
+            experts: cfg.numExperts, topK: slots, rows: rows)
         // S26 counters: post-attention norm + router (one GEMM, or one GEMV
-        // per row on the fallback path) + one top-K per row.
+        // per row on the fallback path) + one top-K call for all rows.
         s26Counters?.noteDispatches(layer: L,
-                                    routerMetadata.path == .fallback ? 1 + 2 * rows : 2 + rows)
+                                    routerMetadata.path == .fallback ? 2 + rows : 3)
 
         // The routed experts are read from the layer file (C5), so the ids
         // must be on the CPU first: commit, read the rows' ids and weights
@@ -640,23 +635,32 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             let blobByExpert = Dictionary(
                 uniqueKeysWithValues: zip(group, blobs.map(\.buffer)))
             commandBuffer = try makeCommandBuffer()
+            // One argument buffer per expert of this group (at most 16),
+            // reused by every row that routes to it (S26 step 2: one per
+            // (row, slot) pair before, ~1025 per layer).
+            var groupArgBuffers: [Int: MTLBuffer] = [:]
+            groupArgBuffers.reserveCapacity(group.count)
+            for id in group {
+                guard let blob = blobByExpert[id],
+                      let argBuffer = moe.makeBlobsArgumentBuffer(
+                          blobs: [blob], slots: 1)
+                else {
+                    throw QwenRunnerError.argumentBufferFailed(name: "routedBlob")
+                }
+                groupArgBuffers[id] = argBuffer
+            }
+            s26Counters?.noteArgumentBuffers(layer: L, group.count)
             // Every (row, slot) pair whose expert is in this group: the
             // one-slot pass writes row t, slot j's activations and
             // projection at (t*slots+j).
             var pairDispatches = 0
-            var pairArgumentBuffers = 0
             for t in 0..<rows {
                 for slot in 0..<slots {
                     let id = idsRaw.load(fromByteOffset: (t * slots + slot) * idBytes,
                                          as: UInt32.self)
-                    guard let blob = blobByExpert[Int(id)] else { continue }
-                    guard let argBuffer = moe.makeBlobsArgumentBuffer(
-                        blobs: [blob], slots: 1)
-                    else {
-                        throw QwenRunnerError.argumentBufferFailed(name: "routedBlob")
-                    }
+                    guard let blob = blobByExpert[Int(id)],
+                          let argBuffer = groupArgBuffers[Int(id)] else { continue }
                     pairDispatches += 2
-                    pairArgumentBuffers += 1
                     let actsOffset = (t * slots + slot) * interBytes
                     let routedOffset = (t * slots + slot) * rowBytes
                     moe.encodeGateUpSilu(
@@ -676,7 +680,6 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
                 }
             }
             s26Counters?.noteDispatches(layer: L, pairDispatches)
-            s26Counters?.noteArgumentBuffers(layer: L, pairArgumentBuffers)
             commandBuffer.commit()
             await commandBuffer.completed()
             groupStart = groupEnd

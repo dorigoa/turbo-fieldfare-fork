@@ -128,13 +128,18 @@ final class QwenNorms {
 
     /// L2 norm (sum-of-squares, not mean) over `rows` rows × `numHeads`
     /// contiguous heads, one dispatch. No weight.
+    /// `out` is compact `[rows][numHeads * headDim]`; `xRowStride` (FP16
+    /// elements) separates consecutive `x` rows — nil means the compact
+    /// stride, so existing single-row and compact callers are unchanged
+    /// (S26 step 2).
     func encodeL2PerHead(commandBuffer: MTLCommandBuffer,
                          x: MTLBuffer, xOffset: Int = 0,
                          out: MTLBuffer, outOffset: Int = 0,
                          headDim: UInt32,
                          numHeads: Int,
                          rows: Int,
-                         eps: Float) {
+                         eps: Float,
+                         xRowStride: Int? = nil) {
         guard rows > 0, numHeads > 0 else { return }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoL2PerHead)
@@ -143,9 +148,11 @@ final class QwenNorms {
         var hd  = headDim
         var nh  = UInt32(numHeads)
         var epsVar = eps
+        var xStrideVar = UInt32(xRowStride ?? numHeads * Int(headDim))
         enc.setBytes(&hd,     length: MemoryLayout<UInt32>.size, index: 2)
         enc.setBytes(&nh,     length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
+        enc.setBytes(&xStrideVar, length: MemoryLayout<UInt32>.size, index: 5)
         dispatch(enc: enc, pso: psoL2PerHead, width: numHeads, height: rows)
         enc.endEncoding()
     }

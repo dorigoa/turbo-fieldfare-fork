@@ -191,12 +191,24 @@ import TurboFieldfareValidationSupport
 
     // MARK: - Per-head L2 norm (DeltaNet q/k renorm, headDim = 128)
 
+    /// `rowStride` (FP16 elements) pads the x rows like the prefill conv
+    /// slice (S26 step 2); `xOffsetElements` skips a leading prefix, like
+    /// the k slice read after q. nil stride keeps the compact layout.
     private static func runL2(headDim: Int, heads: Int, rows: Int,
-                              seed: UInt64) throws {
-        let total = rows * heads * headDim
+                              seed: UInt64,
+                              rowStride: Int? = nil,
+                              xOffsetElements: Int = 0) throws {
+        let rowElems = heads * headDim
+        let stride = rowStride ?? rowElems
+        let total = rows * rowElems
         var rng = SeedTree(seed).key("qwen-l2-h\(headDim)-\(heads)-r\(rows)")
-        let xFp16 = (0..<total).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
-        let xRef  = xFp16.map { Float($0) }
+        let xCount = xOffsetElements + rows * stride
+        let xFp16 = (0..<xCount).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        // The reference reads only the heads' elements of each padded row.
+        let xRef = (0..<rows).flatMap { r in
+            xFp16[(xOffsetElements + r * stride)..<(xOffsetElements + r * stride + rowElems)]
+                .map { Float($0) }
+        }
 
         let ctx = try MetalContext()
         let kernel = try QwenNorms(context: ctx)
@@ -206,9 +218,11 @@ import TurboFieldfareValidationSupport
         }
 
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeL2PerHead(commandBuffer: cb, x: xBuf, out: yBuf,
+        kernel.encodeL2PerHead(commandBuffer: cb, x: xBuf,
+                               xOffset: xOffsetElements * 2, out: yBuf,
                                headDim: UInt32(headDim), numHeads: heads,
-                               rows: rows, eps: eps)
+                               rows: rows, eps: eps,
+                               xRowStride: rowStride)
         cb.commit(); cb.waitUntilCompleted()
 
         let ref = QwenNormRef.perHeadL2Norm(x: xRef, headDim: headDim, eps: eps)
@@ -227,5 +241,21 @@ import TurboFieldfareValidationSupport
         // q and k of DeltaNet: 16 heads × 128 each, decode and prefill.
         try Self.runL2(headDim: 128, heads: 16, rows: 1, seed: 0xD02)
         try Self.runL2(headDim: 128, heads: 16, rows: 3, seed: 0xD03)
+    }
+
+    @Test func qwenL2Norm_perHead_rowStride_small() throws {
+        // Padded x rows and a leading prefix: only the heads' elements of
+        // each row participate (S26 step 2, prefill conv slice).
+        try Self.runL2(headDim: 32, heads: 2, rows: 3, seed: 0xD04,
+                       rowStride: 4 * 32, xOffsetElements: 37)
+    }
+
+    @Test func qwenL2Norm_perHead_rowStride_real() throws {
+        // The prefill conv row: 16 q heads of 128 read from a row of 4096
+        // elements, then the k slice behind q (offset 16*128).
+        try Self.runL2(headDim: 128, heads: 16, rows: 4, seed: 0xD05,
+                       rowStride: 4096)
+        try Self.runL2(headDim: 128, heads: 16, rows: 4, seed: 0xD06,
+                       rowStride: 4096, xOffsetElements: 16 * 128)
     }
 }
