@@ -282,8 +282,18 @@ public struct MultimodalTurnResult: Sendable {
 public actor MultimodalConversation {
     private let model: Model
     private let context: MetalContext
-    private let tokenizer: GFTokenizer
-    private let runner: RealForwardRunner
+    /// The family-specific prompt surface (S25 step 2). Text turns reach the
+    /// tokenizer only through it, so both families share this actor.
+    private let renderer: any ConversationPromptRenderer
+    /// Kept for the vision path (`encodeMultimodalUserContinuation`, a
+    /// `GFTokenizer` member, is reached through a guarded downcast) and for
+    /// the family-agnostic `runRawCompletion`. The `Sendable` conjunct is the
+    /// one both tokenizers already have; `ChatTokenizer` itself does not
+    /// refine it (D13), so the existential would not cross the actor edge.
+    private let tokenizer: any ChatTokenizer & Sendable
+    /// `ContinuableLogitProducer` + `maxContext` + `rewind(to:)` (D3): what
+    /// the turn loop and the KV recovery helpers actually use.
+    private let runner: any LanguageModelRunner
     private let scratch: RawCompletionScratch
     private let visionRuntime: VisionRuntime?
     private let visionRuntimeError: Error?
@@ -313,6 +323,9 @@ public actor MultimodalConversation {
     private var uncommittedBoundary: [Int32] = []
     private var boundaryNeedsReplay = false
 
+    /// Gemma entry point. Unchanged signature and behavior: it adopts the
+    /// prompt surface with the Gemma renderer and forwards to the general
+    /// initializer (S25 step 2).
     public init(model: Model,
                 context: MetalContext,
                 tokenizer: GFTokenizer,
@@ -322,8 +335,37 @@ public actor MultimodalConversation {
                 visionRuntimeError: Error? = nil,
                 visionResidency: VisionResidencyPolicy = .defaultPolicy,
                 maxContext: Int) {
+        self.init(model: model,
+                  context: context,
+                  renderer: GemmaConversationPromptRenderer(tokenizer: tokenizer),
+                  tokenizer: tokenizer,
+                  runner: runner,
+                  scratch: scratch,
+                  visionRuntime: visionRuntime,
+                  visionRuntimeError: visionRuntimeError,
+                  visionResidency: visionResidency,
+                  maxContext: maxContext)
+    }
+
+    /// Family-general entry point (S25 step 2). The prompt surface comes in
+    /// as a `ConversationPromptRenderer`, so Qwen conversations render turns
+    /// with `enableThinking` while this actor stays family-agnostic. Vision
+    /// stays Gemma-only: an image turn additionally needs the tokenizer to be
+    /// a `GFTokenizer` and the runner to be a `MultimodalPrefillRunner`, and
+    /// fails closed (D12) before any model work when either is not.
+    public init(model: Model,
+                context: MetalContext,
+                renderer: any ConversationPromptRenderer,
+                tokenizer: any ChatTokenizer & Sendable,
+                runner: any LanguageModelRunner,
+                scratch: RawCompletionScratch,
+                visionRuntime: VisionRuntime? = nil,
+                visionRuntimeError: Error? = nil,
+                visionResidency: VisionResidencyPolicy = .defaultPolicy,
+                maxContext: Int) {
         self.model = model
         self.context = context
+        self.renderer = renderer
         self.tokenizer = tokenizer
         self.runner = runner
         self.scratch = scratch
@@ -497,9 +539,16 @@ public actor MultimodalConversation {
         let imageCount = parts.filter {
             if case .image = $0 { return true } else { return false }
         }.count
-        if imageCount > 0, visionRuntime == nil {
-            throw MultimodalConversationError.imageUnavailable(
-                reason: visionRuntimeError.map(String.init(describing:)))
+        if imageCount > 0 {
+            // D12 fail-closed before any model work: images additionally need
+            // a runner that can prefill image spans at all, so a Qwen turn
+            // carrying an image is refused here, not by an encode failure.
+            guard visionRuntime != nil, runner is any MultimodalPrefillRunner else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntime == nil
+                        ? visionRuntimeError.map(String.init(describing:))
+                        : "image input is not available for this model")
+            }
         }
 
         let cached = kvTokenIDs.count
@@ -694,9 +743,15 @@ public actor MultimodalConversation {
                 reserve: ConversationGenerationReserve.tokens,
                 maxContext: maxContext)
         }
-        if !lineage.images.isEmpty, visionRuntime == nil {
-            throw MultimodalConversationError.imageUnavailable(
-                reason: visionRuntimeError.map(String.init(describing:)))
+        if !lineage.images.isEmpty {
+            // Same D12 guard as `generate`: a stored image replayed against a
+            // family that cannot prefill image spans fails before the KV moves.
+            guard visionRuntime != nil, runner is any MultimodalPrefillRunner else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntime == nil
+                        ? visionRuntimeError.map(String.init(describing:))
+                        : "image input is not available for this model")
+            }
         }
         generating = true
         defer { finishGeneration() }
@@ -804,13 +859,21 @@ public actor MultimodalConversation {
         guard !images.isEmpty, let visionRuntime else {
             var text = ""
             for part in parts { if case .text(let value) = part { text += value } }
+            // S25 step 2: the two render calls moved into the prompt renderer;
+            // for Gemma they are the identical calls, for Qwen they carry
+            // `enableThinking`.
             let ids = kvTokenIDs.isEmpty
-                ? tokenizer.encode(
-                    try tokenizer.applyChatTemplate(
-                        [GFTokenizer.Message(role: .user, content: text)]),
-                    addBOS: false)
-                : tokenizer.encodeTextContinuation(userContent: text)
+                ? try renderer.firstTurnTokens(text: text)
+                : try renderer.continuationTokens(userText: text)
             return EncodedTurn(effectiveTokenIDs: ids, prefillInput: nil)
+        }
+
+        // The bridge below is a `GFTokenizer` member: an image turn on any
+        // other family is the D12 refusal, kept here as the second fail-closed
+        // net behind the `generate`/`restore` guards.
+        guard let gfTokenizer = tokenizer as? GFTokenizer else {
+            throw MultimodalConversationError.imageUnavailable(
+                reason: "image input is not available for this model")
         }
 
         // Token counts come from geometry, so the turn's shape is known before
@@ -825,7 +888,7 @@ public actor MultimodalConversation {
         // user did.
         let plans = try images.map { try preprocessor.plan(fileURL: $0) }
         let counts = plans.map(\.geometry.softTokenCount)
-        let bridge = try tokenizer.encodeMultimodalUserContinuation(
+        let bridge = try gfTokenizer.encodeMultimodalUserContinuation(
             textAndImages: parts, imageTokenCounts: counts,
             // An empty KV means this is the conversation's first turn, which
             // needs the chat template's opening rather than a continuation's.
