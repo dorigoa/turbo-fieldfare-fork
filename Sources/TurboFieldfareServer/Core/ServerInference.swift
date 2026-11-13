@@ -523,7 +523,7 @@ enum ServerModelSessionError: Error, CustomStringConvertible {
         case .visionUnsupportedForQwen(let path):
             "vision is not available for this model; \(path) cannot be used with a Qwen pack"
         case .qwenChatUnavailable:
-            "Qwen chat serving is not available in this build yet"
+            "the loaded session carries no Qwen tokenizer"
         }
     }
 }
@@ -831,6 +831,14 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     public func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
         if !request.imageFiles.isEmpty || request.multimodalMessages != nil {
+            if family == .qwen35Moe {
+                // D12: a Qwen pack has no image tower and no companion pack.
+                // Refused here, before any token or GPU work, fail-closed:
+                // an image is never accepted and then ignored.
+                throw ServerRequestError.invalid(
+                    message: "image input is not available for this model",
+                    param: "messages", code: "image_not_supported")
+            }
             let softTokens = try imageSoftTokenCounts(request)
             try validateImageTokenBudget(request, softTokens: softTokens)
         }

@@ -16,7 +16,8 @@ struct ServerQwenModelIdentityTests {
     /// A manifest-only directory carrying the pinned Qwen values, valid for
     /// `ManifestReader.load` and therefore for `ServerModelVariant.read`.
     /// No weights are written: the identity comes from the manifest alone.
-    private static func writeQwenManifestDirectory() throws -> URL {
+    /// Shared with `ServerQwenImageRefusalTests`.
+    static func writeQwenManifestDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("server-qwen-identity-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
