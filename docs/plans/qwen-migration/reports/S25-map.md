@@ -137,16 +137,14 @@ Riferimenti `file:riga` e firme esatte. Sostituisce la rilettura dei file grandi
   (target TurboFieldfareValidationSupport).
 - Test esistenti: Tests/TurboFieldfare/Core/Runtime/Generation/{MultimodalConversation
   KVRecovery,ConversationLineageRecord}Tests.swift (l'actor non è costruito direttamente
-  da nessun test); …/Generation/Qwen/QwenChatTokenizerGenerationTests.swift (S21:
-  producer scriptato con `prefillConfig: .off`); Tests/TurboFieldfareDecodeService/
-  DecodeConversation{Gate,Restore}Tests.swift. `runRawCompletion` :273 (Gemma) → :296
-  (any ChatTokenizer). Note S21/S23: token di stop senza `.token`; boundary Qwen =
-  [im_end]; a fine generazione pulita runner == KV → `.resume` legale, rewind mai in
-  continuazione (D6).
+  da nessun test); …/Generation/Qwen/QwenChatTokenizerGenerationTests.swift (S21: producer
+  scriptato con `prefillConfig: .off`); Tests/TurboFieldfareDecodeService/DecodeConversation
+  {Gate,Restore}Tests.swift. `runRawCompletion` :273 (Gemma) → :296 (any ChatTokenizer).
+  Note S21/S23: token di stop senza `.token`; boundary Qwen = [im_end]; a fine generazione
+  pulita runner == KV → `.resume` legale, rewind mai in continuazione (D6).
 
 ## Decisioni (piano Parte 3.8)
-- D6 (802-808): coda sempre ok; ≤2 snapshot a fine prefill; ogni altro rewind errore,
-  il chiamante rifà il prefill completo.
-- D11 (823-828): `<think>` mai nel contenuto; app: "Thinking…" + interruttore (solo Qwen).
-- D12 (829-832): immagini Qwen mai accettate; UI già gate da S24, runtime fail-closed.
-- D13 (833-837): ChatTokenizer; funzioni esistenti stessa firma.
+- D6 (802-808): coda sempre ok; ≤2 snapshot a fine prefill; ogni altro rewind errore →
+  prefill completo. D11 (823-828): `<think>` mai nel contenuto; app: "Thinking…" +
+  interruttore (solo Qwen). D12 (829-832): immagini Qwen mai accettate; UI già gate da
+  S24, runtime fail-closed. D13 (833-837): ChatTokenizer; funzioni esistenti stessa firma.
