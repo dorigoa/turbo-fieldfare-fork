@@ -81,6 +81,18 @@ extension SupportedModelVariant {
         }
     }
 
+    /// Whether this family can take image input (D12, S24).
+    ///
+    /// Qwen3.6 has no image tower: the app disables attachments and says so
+    /// with the same sentence everywhere, rather than accepting an image and
+    /// ignoring it later.
+    public var supportsImages: Bool {
+        switch self {
+        case .int4, .int8: true
+        case .qwen36: false
+        }
+    }
+
     /// The caveat shown before this variant is downloaded, or nil when the
     /// default download needs none.
     ///

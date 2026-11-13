@@ -114,6 +114,17 @@ struct PromptComposerView: View {
                     ? "Start a new chat to make room for images."
                     : "Add images")
                 .accessibilityIdentifier(.composerAttach)
+            } else if !model.modelVariant.supportsImages {
+                // D12, S24: the family carries no image tower at all. Say so
+                // with the same sentence as everywhere else; a companion-pack
+                // hint here would send the user hunting for an install that
+                // can never exist.
+                Label("Image input is not available for this model",
+                      systemImage: "photo.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .labelStyle(.titleAndIcon)
+                    .help("Image support has not been trained into this checkpoint.")
             } else if model.visionRuntimeEnabled {
                 // Says why rather than leaving a gap. With the button simply
                 // gone, the composer offered no account of itself at all, and

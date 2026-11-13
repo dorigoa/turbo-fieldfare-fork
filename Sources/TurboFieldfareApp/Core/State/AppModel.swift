@@ -1405,9 +1405,11 @@ public final class AppModel {
     /// The runtime flag only says this build *can* use images; the companion
     /// pack is what makes it possible for this model. Gating on the flag alone
     /// offered an Add-images button with no tower behind it, and the failure
-    /// only surfaced when the user pressed Generate.
+    /// only surfaced when the user pressed Generate. The family decides first
+    /// (D12, S24): a checkpoint with no image tower never accepts an image at
+    /// any price in page cache.
     public var isImageInputAvailable: Bool {
-        isVisionRuntimeSupported && isVisionPackInstalled
+        modelVariant.supportsImages && isVisionRuntimeSupported && isVisionPackInstalled
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
@@ -2137,6 +2139,15 @@ public final class AppModel {
     }
 
     private func recordVisionAvailabilityError(at textModelDirectory: URL) {
+        // D12, S24: for a family with no image tower, no companion pack can
+        // ever be restored. The pack-centric wording below would describe a
+        // repair that does not exist; say the family reason instead.
+        guard modelVariant.supportsImages else {
+            let message = "Image input is not available for this model."
+            visionAvailabilityAttachmentError = message
+            imageAttachmentError = message
+            return
+        }
         let location: String
         do {
             location = try VisionPackLocation.companionURL(

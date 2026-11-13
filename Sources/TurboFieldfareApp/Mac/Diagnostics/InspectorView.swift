@@ -14,7 +14,11 @@ struct InspectorView: View {
             // fold, where the one screen that must mention it - the empty state
             // before any model exists - could not.
             if showsVisionSection {
-                visionSection
+                if model.modelVariant.supportsImages {
+                    visionSection
+                } else {
+                    visionUnavailableForModelSection
+                }
             }
             memorySection
             generationSection
@@ -37,6 +41,19 @@ struct InspectorView: View {
             isVisionPackInstalled: model.isVisionPackInstalled,
             isCompanionOperationInProgress: model.isVisionCompanionOperationInProgress,
             installState: model.visionInstallState)
+    }
+
+    /// D12, S24: the family itself carries no image tower. The section shows
+    /// the reason instead of hiding: the screen still tells someone the app
+    /// does images, this model does not.
+    private var visionUnavailableForModelSection: some View {
+        Section("Image Support") {
+            Label("Image input is not available for this model",
+                  systemImage: "photo.badge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help("Image support has not been trained into this checkpoint.")
+        }
     }
 
     private var visionSection: some View {
