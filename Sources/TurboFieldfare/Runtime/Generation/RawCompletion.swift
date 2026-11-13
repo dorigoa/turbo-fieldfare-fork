@@ -281,6 +281,29 @@ public func runRawCompletion(producer: any LogitProducer,
                              start: RawCompletionStart = .reset,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
+    try await runRawCompletion(producer: producer, tokenizer: tokenizer as ChatTokenizer,
+                               promptIds: promptIds, multimodalInput: multimodalInput,
+                               config: config, context: context, scratch: scratch,
+                               prefillConfig: prefillConfig, start: start,
+                               shouldStop: shouldStop, onProgress: onProgress)
+}
+
+/// The family-agnostic loop (D13): it asks the tokenizer only for the
+/// `ChatTokenizer` surface, so either family runs the same stop handling,
+/// detokenizer flush ordering, and history append ordering. The
+/// `GFTokenizer` overload above forwards here and keeps its pre-existing
+/// signature and behavior.
+public func runRawCompletion(producer: any LogitProducer,
+                             tokenizer: any ChatTokenizer,
+                             promptIds: [Int32],
+                             multimodalInput: MultimodalPrefillInput? = nil,
+                             config: GenerationConfig,
+                             context: MetalContext,
+                             scratch: RawCompletionScratch,
+                             prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                             start: RawCompletionStart = .reset,
+                             shouldStop: () -> Bool = { false },
+                             onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
     try config.validate()
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
@@ -298,8 +321,8 @@ public func runRawCompletion(producer: any LogitProducer,
     let cachedPromptTokens = try start.cachedPromptTokens(
         promptCount: promptIds.count, producer: producer)
 
-    var detok = GFDetokenizer(tokenizer: tokenizer,
-                              barrierTokenIDs: tokenizer.structuralMarkerIDs)
+    var detok = tokenizer.makeStreamingDetokenizer(
+        barrierTokenIDs: tokenizer.structuralMarkerIDs)
 
     if let context = producer as? any ContextWindowReporting,
        promptIds.count + config.maxNewTokens > context.maxContext {
@@ -356,7 +379,7 @@ public func runRawCompletion(producer: any LogitProducer,
         if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
             if tokenID == tokenizer.endOfTurnID {
                 reason = .endOfTurn
-            } else if tokenID == tokenizer.toolResponseID {
+            } else if tokenizer.toolResultWaitID == tokenID {
                 reason = .toolCalls
             } else {
                 reason = .eos
