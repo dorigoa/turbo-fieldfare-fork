@@ -16,6 +16,10 @@ public struct Args: Equatable, Sendable {
     public var repetitionPenalty: Float
     public var seed: UInt64?
     public var stops: [String]
+    /// Qwen only (D11): when set, the generation prompt starts the turn after
+    /// an empty think block instead of inside one, so the model answers
+    /// without a reasoning block.
+    public var noThinking: Bool
     public var quiet: Bool
     public var expertCacheSlots: Int
     public var expertCachePolicy: RuntimeExpertCachePolicy
@@ -41,6 +45,7 @@ public struct Args: Equatable, Sendable {
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
+                noThinking: Bool = false,
                 quiet: Bool = false,
                 expertCacheSlots: Int = RuntimeConfiguration.production.expertCacheSlots,
                 expertCachePolicy: RuntimeExpertCachePolicy = RuntimeConfiguration.production.expertCachePolicy,
@@ -63,6 +68,7 @@ public struct Args: Equatable, Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
         self.stops = stops
+        self.noThinking = noThinking
         self.quiet = quiet
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
@@ -142,6 +148,9 @@ extension Args {
       --repetition-penalty <f>   Repetition penalty (default 1.0).
       --seed <uint64>            Deterministic sampling seed (default off).
       --stop <string>            Stop substring (repeatable).
+      --no-thinking              Qwen only: start the turn after an empty think
+                                 block, so the model answers without reasoning
+                                 (default: reasoning on, streamed to stderr).
       --quiet                    Suppress the footer: a variant line
                                  (variant=4-bit or variant=8-bit, plus the
                                  model family) and the timing line.
@@ -212,6 +221,7 @@ extension Args {
         var repetitionPenalty: Float = 1.0
         var seed: UInt64?
         var stops: [String] = []
+        var noThinking = false
         var quiet = false
         let runtimeDefaults = RuntimeConfiguration.production
         var expertCacheSlots = runtimeDefaults.expertCacheSlots
@@ -296,6 +306,9 @@ extension Args {
                 seed = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
+            case "--no-thinking":
+                noThinking = true
+                index += 1
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
@@ -391,6 +404,7 @@ extension Args {
                              repetitionPenalty: repetitionPenalty,
                              seed: seed,
                              stops: stops,
+                             noThinking: noThinking,
                              quiet: quiet,
                              expertCacheSlots: expertCacheSlots,
                              expertCachePolicy: expertCachePolicy,

@@ -24,15 +24,25 @@ func runQwenFamily(args: Args,
         guard let tokenizer = chatTokenizer as? QwenTokenizer else {
             return errored(stderr, "tokenizer does not match the model family", 1)
         }
+        // D11 / U3: reasoning is on by default; `--no-thinking` ends the
+        // generation prompt after an empty think block instead of inside one.
+        // The split only exists in chat mode, where the generation prompt
+        // carries the think frame; a raw prompt streams verbatim, the way
+        // the S8 golden and the Gemma raw mode do.
+        let enableThinking = !args.noThinking
+        let chatMode: Bool
         var promptIds: [Int32]
         switch input {
         case .raw(let text):
+            chatMode = false
             // Qwen has no BOS token; `encode` ignores `addBOS` by design.
             promptIds = tokenizer.encode(text, addBOS: false)
         case .messages(let messages):
+            chatMode = true
             // The S10 Qwen chat format, rendered through the pinned
             // `chat_template.jinja` with the generation prompt attached.
-            let rendered = try tokenizer.applyChatTemplate(messages)
+            let rendered = try tokenizer.applyChatTemplate(
+                messages, enableThinking: enableThinking)
             promptIds = tokenizer.encode(rendered, addBOS: false)
         case .multimodal:
             return errored(stderr, "image input is not available for this model", 2)
@@ -78,6 +88,20 @@ func runQwenFamily(args: Args,
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = try qwenGenerationConfig(args: args, maxNewTokens: effectiveMaxNew)
 
+        // The S11 parser splits the chat stream (D11): reasoning never
+        // reaches stdout; it streams to stderr through the callback. The
+        // CLI has no tool surface, so no tool is allowed: a tool-call block
+        // the model emits anyway is a closed failure, and the run stops at
+        // it. Chat mode only — a raw prompt has no think frame to split.
+        let decoder = chatMode
+            ? QwenAssistantDecoder(allowedTools: [], insideReasoning: enableThinking)
+            : nil
+        if let decoder {
+            let reasoningSink = QwenReasoningSink(stderr: stderr)
+            decoder.onReasoning = { text in reasoningSink.write(text) }
+        }
+        var decoderError: (any Error)?
+
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: chatTokenizer,
@@ -86,16 +110,51 @@ func runQwenFamily(args: Args,
             config: config,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            prefillConfig: runtime.prefillConfig,
+            shouldStop: { decoderError != nil }) { progress in
                 switch progress {
                 case .prefill:
                     break
                 case .token(_, _, let delta):
-                    if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+                    guard !delta.isEmpty, decoderError == nil else { break }
+                    if let decoder {
+                        do {
+                            for event in try decoder.consume(delta) {
+                                if case .content(let text) = event, !text.isEmpty {
+                                    stdout.write(Data(text.utf8))
+                                }
+                            }
+                        } catch {
+                            decoderError = error
+                        }
+                    } else {
+                        stdout.write(Data(delta.utf8))
+                    }
                 case .tail(let tail):
-                    stdout.write(Data(tail.utf8))
+                    guard decoderError == nil else { break }
+                    if let decoder {
+                        do {
+                            // The detokenizer's held remainder is the last
+                            // fragment of the stream; the finish flush is
+                            // after it, in that order.
+                            var events = try decoder.consume(tail)
+                            events += try decoder.finish()
+                            for event in events {
+                                if case .content(let text) = event, !text.isEmpty {
+                                    stdout.write(Data(text.utf8))
+                                }
+                            }
+                        } catch {
+                            decoderError = error
+                        }
+                    } else {
+                        stdout.write(Data(tail.utf8))
+                    }
                 }
             }
+        if let error = decoderError {
+            return errored(stderr, "\(error)", 1)
+        }
 
         if !args.quiet {
             // The loaded model's own record, not the pre-load read: the footer
@@ -118,6 +177,19 @@ func runQwenFamily(args: Args,
         return RunResult(exitCode: 130)
     } catch {
         return errored(stderr, "\(error)", 1)
+    }
+}
+
+/// The `@Sendable` reasoning callback writes through here; the file handle
+/// it holds is owned by the run that installed it.
+final class QwenReasoningSink: @unchecked Sendable {
+    private let stderr: FileHandle
+
+    init(stderr: FileHandle) { self.stderr = stderr }
+
+    func write(_ text: String) {
+        guard !text.isEmpty else { return }
+        stderr.write(Data(text.utf8))
     }
 }
 
