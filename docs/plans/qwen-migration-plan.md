@@ -164,8 +164,8 @@ ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza
 progressi (nuovi commit o file modificati; o 20 tentativi in tutto) e dopo
 ogni sezione ⛔. Se il modello chiude il turno con solo ragionamento, lo
 script continua la stessa sessione invece di aprirne una nuova. Se la scheda chiede
-una sessione per passo (S19, S20, S26), ogni passo è un tentativo con il
-contesto vuoto.
+una sessione per passo (S19, S20, S25, S26), ogni passo è un tentativo con
+il contesto vuoto.
 Le istruzioni complete sono in testa allo script.
 
 ## 1.4 Riprendere una sezione interrotta
@@ -1938,35 +1938,106 @@ delle impostazioni (`grep -rln "variant" Sources/TurboFieldfareApp/MacPresentati
 **Obiettivo.** Una chat con Qwen nell'app funziona: più turni, ragionamento,
 cronologia separata per modello.
 
-**Requisiti.** Modello reale: no (le prove le fa l'utente).
+**Requisiti.** Modello reale: no (le prove le fa l'utente). Report da leggere:
+S21, S23 e S24 (solo "Note per le sezioni successive").
 
-**Leggi.** D6, D11, D13; in `Runtime/Generation/MultimodalConversation.swift`
-(con `grep -n`) dove usa `runner`, `tokenizer` e `model`; in
-`Sources/TurboFieldfareApp/Core/Inference/RealInferenceClient.swift` le righe
-360–470 e 660–690; `Core/Inference/AppConversation.swift`;
-`Core/State/AppModelHistory.swift` e `Core/History/ConversationRecord.swift`
-(con `grep -n variant`).
+**Una sessione per passo.** I file da conoscere sono grandi
+(`MultimodalConversation.swift` 852 righe, `RealInferenceClient.swift` 1042,
+`AppModelHistory.swift` 1135): la mappa `reports/S25-map.md` del passo 1
+sostituisce la loro rilettura. Dopo il commit e il push di ogni passo, aggiungi
+alla mappa ciò che il passo successivo deve sapere e chiudi la sessione con una
+riga di riepilogo. Dal passo 2 in poi leggi solo la scheda, il report, la mappa
+e gli intervalli di righe che la mappa indica; mai un file grande per intero.
+
+**Leggi.** Ogni passo dice cosa leggere; D6, D11, D12, D13 quando il passo li
+nomina. Per SwiftUI valgono le regole di AGENTS.md: `@StoredState`,
+`PreviewProvider`, niente attributi `State` diretti né macro `Preview`.
 
 **Puoi modificare.** `MultimodalConversation.swift` (generalizzazione, con
-l'inizializzatore esistente invariato); `Sources/TurboFieldfareApp/`,
-`Sources/TurboFieldfareDecodeService/`, `Sources/TurboFieldfareDecodeProtocol/`;
-test in `Tests/TurboFieldfareApp/`, `Tests/TurboFieldfareDecodeService/`,
-`Tests/TurboFieldfare/Core/Runtime/Generation/`.
+l'inizializzatore esistente invariato) e un file nuovo accanto,
+`Runtime/Generation/ConversationPromptRenderer.swift`;
+`Sources/TurboFieldfareApp/`, `Sources/TurboFieldfareDecodeService/`,
+`Sources/TurboFieldfareDecodeProtocol/`; test in `Tests/TurboFieldfareApp/`,
+`Tests/TurboFieldfareDecodeService/`, `Tests/TurboFieldfare/Core/Runtime/Generation/`;
+la mappa `docs/plans/qwen-migration/reports/S25-map.md`. Il runtime di Gemma,
+CLI e server non si toccano. Un campo nuovo nel protocollo di decodifica è
+opzionale: un messaggio senza quel campo si legge come oggi.
 
 **Passi.**
 
-1. `MultimodalConversation` accetta `any ChatTokenizer` e un protocollo di
-   runner (`reset`, `rewind`, `continuationPosition`, prefill) che entrambi i
-   runner adottano; le immagini restano possibili solo se il runner è
-   `MultimodalPrefillRunner`. Con Gemma il comportamento non cambia.
-2. `RealInferenceClient` usa la factory; Qwen si carica nel decode service.
-3. Ragionamento: indicatore "Thinking…" durante il blocco `<think>`, contenuto
-   visibile come oggi; interruttore nelle impostazioni (solo Qwen) che diventa
-   `enable_thinking`.
-4. Cronologia: una chat registrata con un altro modello non si continua, come
-   già succede tra varianti.
-5. Test con `ScriptedLogitProducer`; controlli Ruby SwiftUI; app costruita.
-   Nel report, l'elenco delle prove che l'utente deve fare nell'app.
+1. Mappa, senza codice Swift. Scrivi `reports/S25-map.md`, al massimo 150
+   righe, con `file:riga` e firme esatte:
+   - `MultimodalConversation.swift`: l'inizializzatore (riga ~316); ogni uso di
+     `tokenizer`, `runner`, `model`, `GFTokenizer`, `RealForwardRunner`; dove
+     rende il prompt (`applyChatTemplate`, `encodeTextContinuation`,
+     `encodeMultimodalUserContinuation`, righe ~800–830); dove chiama
+     `rewind` e `reset` (righe ~180–225, ~590–625) e cosa succede se
+     `rewind` lancia un errore.
+   - `RealInferenceClient.swift`: caricamento (`Model.load`, `RealForwardRunner(`,
+     `loadTokenizer`, righe ~430–500); le due creazioni di
+     `MultimodalConversation` (righe ~376 e ~674); dove i delta di testo
+     diventano eventi per l'app.
+   - `DecodeProtocol.swift`: `DecodeGenerationRequest` (campi di sampling) e
+     gli eventi che portano il testo; in `DecodeService/Entry.swift` come il
+     servizio usa il client.
+   - L'app: dove stanno le impostazioni di sampling (per il nuovo
+     interruttore), dove la HUD mostra lo stato della generazione (per
+     "Thinking…"), come la cronologia rifiuta di continuare una chat di
+     un'altra variante (`grep -n variant` in `ConversationRecord.swift` e
+     `AppModelHistory.swift`), chi scrive il campo `thinking` di
+     `ConversationRecord` (righe ~195–196).
+   - Le API Qwen da usare: `LanguageModelRunner` e
+     `LanguageModelRunnerFactory` (S21), `ChatTokenizer`, `QwenTokenizer`
+     (`applyChatTemplate`, `encodeTextContinuation` con `enableThinking`),
+     `QwenAssistantDecoder` e `onReasoning` (S11), `QwenRewindError` (S20).
+
+   Leggi: i report indicati sopra; `grep -n` e intervalli brevi dei file
+   elencati.
+2. Prompt per famiglia. Nel file nuovo, un protocollo
+   `ConversationPromptRenderer` con quello che `MultimodalConversation` chiede
+   al tokenizer per il primo turno e per la continuazione, adottato da Gemma
+   (stesse chiamate di oggi) e da Qwen (con `enableThinking`).
+   `MultimodalConversation` riceve un inizializzatore nuovo con il renderer,
+   `any ChatTokenizer` e `any LanguageModelRunner`; quello esistente resta e
+   chiama il nuovo. Le immagini restano possibili solo con un runner
+   `MultimodalPrefillRunner`: con Qwen, un turno con immagini è un errore D12
+   prima di qualunque lavoro. Test: i test esistenti di
+   `MultimodalConversation` verdi senza modifiche; nuovi test con
+   `ScriptedLogitProducer` e tokenizer Qwen: due turni, il secondo continua
+   la cache senza `reset`. Leggi: la mappa; D13, D12.
+3. `rewind` con Qwen (D6). Dove `MultimodalConversation` chiama `rewind`
+   (stop-string, errori, Stop), `QwenRewindError.rewindUnsupported` non deve
+   rompere la conversazione: `reset` e rigioco dei token registrati, come già
+   fa il ripristino di una chat. Test con un runner finto che adotta
+   `LanguageModelRunner` e lancia `rewindUnsupported`: dopo il rewind
+   mancato, la posizione corrisponde ai token registrati e il turno
+   successivo funziona. Leggi: la mappa; D6.
+4. Caricamento nel decode service. `RealInferenceClient` carica con la
+   factory (`make` e `loadTokenizer(family:forModelDirectory:)`) e crea la
+   conversazione con l'inizializzatore nuovo; con Gemma tutto come oggi.
+   Immagini con Qwen: errore D12 prima di qualunque lavoro sul modello. Test:
+   i test dell'app e del decode service restano verdi; un test della scelta
+   per famiglia con un manifest Qwen di prova, senza modello. Leggi: la mappa.
+5. Ragionamento nella pipeline. Con Qwen il testo dentro `<think>` non arriva
+   mai al contenuto visibile (D11), con `QwenAssistantDecoder`; l'app riceve
+   uno stato "sta ragionando" finché il blocco è aperto. Un campo opzionale
+   `enableThinking` in `DecodeGenerationRequest` (assente = acceso) arriva
+   fino al renderer del passo 2. Test: andata e ritorno del protocollo con e
+   senza il campo; con `ScriptedLogitProducer`, il ragionamento resta fuori
+   dal testo e lo stato si spegne a `</think>`. Leggi: la mappa; D11.
+6. Ragionamento nell'interfaccia: indicatore "Thinking…" mentre lo stato del
+   passo 5 è acceso; interruttore nelle impostazioni, visibile solo con Qwen
+   caricato, che diventa `enableThinking`. Con Gemma l'interfaccia non
+   cambia. Test di presentazione; `ruby Scripts/check_swiftui_macros.rb
+   --self-test` e `ruby Scripts/tests/swift_macro_probe_test.rb` con
+   `LC_ALL=en_US.UTF-8`. Leggi: la mappa; le regole SwiftUI di AGENTS.md.
+7. Cronologia: una chat registrata con un altro modello non si continua, come
+   già succede tra varianti (la variante `qwen36` di S24 potrebbe già
+   bastare: verificalo prima di aggiungere qualcosa). Test: una chat Gemma
+   con Qwen caricato, e viceversa, si apre in sola lettura. Leggi: la mappa.
+8. Chiusura: app costruita (`swift build -c release` e `Scripts/build_app.sh`),
+   controlli Ruby, suite completa. Nel report, l'elenco delle prove che
+   l'utente deve fare nell'app con Qwen e con Gemma. Poi 2.9.
 
 **Fatto quando.** Test verdi; app costruita; elenco delle prove nel report.
 
