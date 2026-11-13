@@ -30,7 +30,20 @@ extension SupportedModelVariant {
     /// has been downloaded. The decode service, which loads a real directory,
     /// reads the manifest instead.
     public var modelFootprint: ModelFootprint {
-        .forProfile(quantProfile)
+        switch self {
+        case .int4, .int8: .forProfile(quantProfile)
+        case .qwen36: .qwen36Provisional
+        }
+    }
+
+    /// The architecture whose geometry admission uses for this variant: the
+    /// pinned constants of its checkpoint, so the KV term counts the family's
+    /// own full-attention layers (S24).
+    public var admissionArchConfig: ArchConfig {
+        switch self {
+        case .int4, .int8: .gemma4_26B_A4B
+        case .qwen36: .qwen36_35B_A3B
+        }
     }
 
     /// The caveat shown before this variant is downloaded, or nil when the

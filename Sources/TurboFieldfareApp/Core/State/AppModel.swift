@@ -402,6 +402,10 @@ public final class AppModel {
     /// What admission charges the current variant beyond its KV cache.
     public var modelFootprint: ModelFootprint { modelVariant.modelFootprint }
 
+    /// The architecture admission uses for the current variant: its pinned
+    /// checkpoint constants, so the KV term counts the family's own layers.
+    public var admissionArchConfig: ArchConfig { modelVariant.admissionArchConfig }
+
     /// What the Context picker may offer on this Mac.
     ///
     /// Never empty: a variant this Mac cannot run at any context keeps showing
@@ -410,7 +414,8 @@ public final class AppModel {
     public var contextOptions: [AppContextLengthOption] {
         let available = AppContextLengthOption.available(on: hostMemoryBytes,
                                                          expertCacheSlots: runtimeOptions.expertCacheSlots,
-                                                         footprint: modelFootprint)
+                                                         footprint: modelFootprint,
+                                                         config: admissionArchConfig)
         guard available.isEmpty else { return available }
         return [AppContextLengthOption(rawValue: maxContextTokens) ?? .fourK]
     }
@@ -421,15 +426,16 @@ public final class AppModel {
     /// test rather than by looking at the window. Nil when every size is
     /// offered — there is then nothing to explain.
     public nonisolated static func contextOptionsNote(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                                                      footprint: ModelFootprint = .affine4Measured) -> String? {
+                                                      footprint: ModelFootprint = .affine4Measured,
+                                                      config: ArchConfig = .gemma4_26B_A4B) -> String? {
         let hidden = AppContextLengthOption.allCases.filter {
             $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                            footprint: footprint) != .available
+                            footprint: footprint, config: config) != .available
         }
         guard !hidden.isEmpty else { return nil }
         return hidden
             .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                      footprint: footprint) }
+                                      footprint: footprint, config: config) }
             .joined(separator: " ")
     }
 
@@ -439,7 +445,8 @@ public final class AppModel {
         guard modelVariantMemoryRefusal == nil else { return nil }
         return Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes,
                                        expertCacheSlots: runtimeOptions.expertCacheSlots,
-                                       footprint: modelFootprint)
+                                       footprint: modelFootprint,
+                                       config: admissionArchConfig)
     }
 
     /// Why this Mac cannot load the current variant at any context, or nil
@@ -456,12 +463,13 @@ public final class AppModel {
         expertCacheSlots: Int = 16
     ) -> String? {
         let footprint = variant.modelFootprint
+        let config = variant.admissionArchConfig
         guard AppContextLengthOption.available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                               footprint: footprint).isEmpty else { return nil }
+                                               footprint: footprint, config: config).isEmpty else { return nil }
         let smallest = AppContextLengthOption.allCases[0]
         return "The \(variant.shortLabel) model can't be loaded on this Mac. "
             + smallest.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                       footprint: footprint)
+                                       footprint: footprint, config: config)
     }
 
     public var modelVariantMemoryRefusal: String? {
@@ -479,16 +487,16 @@ public final class AppModel {
         _ tokens: Int,
         hostMemoryBytes: UInt64,
         expertCacheSlots: Int = 16,
-        footprint: ModelFootprint = .affine4Measured
+        footprint: ModelFootprint = .affine4Measured,
+        config: ArchConfig = .gemma4_26B_A4B
     ) -> (tokens: Int, notice: String?) {
-        let config = ArchConfig.gemma4_26B_A4B
         guard case .needsMemory = ContextAdmission.availability(
             config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
             footprint: footprint) else {
             return (tokens, nil)
         }
         let fallback = AppContextLengthOption.largestAvailable(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                                               footprint: footprint)
+                                                               footprint: footprint, config: config)
         let need = ContextAdmission.needDescription(config: config,
                                                     maxContext: tokens,
                                                     hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
@@ -512,7 +520,7 @@ public final class AppModel {
             return (tokens, nil)
         }
         return admittedContext(tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                               footprint: variant.modelFootprint)
+                               footprint: variant.modelFootprint, config: variant.admissionArchConfig)
     }
 
     public var isRunning: Bool { runState == .running }
@@ -1636,12 +1644,12 @@ public final class AppModel {
         // the moment a command buffer binds it, so a host that cannot hold it
         // does not find out part-way through a load: it is killed.
         if case .needsMemory = ContextAdmission.availability(
-            config: ArchConfig.gemma4_26B_A4B,
+            config: admissionArchConfig,
             maxContext: maxContext,
             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
             footprint: modelFootprint) {
             loadState = .failed(.modelLoadFailed(
-                ContextAdmission.needDescription(config: ArchConfig.gemma4_26B_A4B,
+                ContextAdmission.needDescription(config: admissionArchConfig,
                                                  maxContext: maxContext,
                                                  hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
                                                  footprint: modelFootprint)))
