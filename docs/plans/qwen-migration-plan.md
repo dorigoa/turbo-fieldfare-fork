@@ -160,8 +160,10 @@ Ogni sezione gira in una sessione nuova (contesto vuoto), con lo stesso prompt
 di questo passo 3. Se una sezione si interrompe a metà, lo script la riprende
 con il prompt di 1.4 finché fa progressi; se Claude CLI finisce con un errore
 (per esempio del server del modello), aspetta un minuto prima di riprovare. Si
-ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza nuovi
-commit (o 20 tentativi in tutto) e dopo ogni sezione ⛔. Se la scheda chiede
+ferma quando una sezione diventa `Bloccata`, dopo 3 riprese di fila senza
+progressi (nuovi commit o file modificati; o 20 tentativi in tutto) e dopo
+ogni sezione ⛔. Se il modello chiude il turno con solo ragionamento, lo
+script continua la stessa sessione invece di aprirne una nuova. Se la scheda chiede
 una sessione per passo (S19, S20, S26), ogni passo è un tentativo con il
 contesto vuoto.
 Le istruzioni complete sono in testa allo script.
