@@ -6,11 +6,11 @@ per i passi 2-5 leggere solo gli intervalli indicati qui.
 
 ## Costi del prefill (file:riga, dopo il passo 1)
 
-1. **Lettura expert a gruppi + attesa (passo 4)** — `+Prefill` :627-684:
-   loop dei gruppi di ≤16 (union degli id del blocco); `fetchRoutedExperts`
-   :627 **seriale** (pread ~1,77 MB/expert con GPU ferma); commit+await
-   :683-684 dopo ogni gruppo; union ~90-120 expert a 256 token → 6-8 gruppi
-   per layer per span. Decode: un solo fetch + commit/await prima.
+1. **Lettura expert a gruppi + attesa (passo 4)** — risolto al passo 4
+   (de45c58): gruppi da ≤8 (metà dei 16 slot), fetch del gruppo successivo
+   sovrapposto alla GPU del gruppo corrente (`+Prefill` :616-753, vedi
+   "Aggiunte passo 4"). Resta: commit+await per gruppo e readback id
+   :576-577.
 2. **Arg buffer per coppia (token, slot)** — risolto al passo 2: uno per
    expert del gruppo (`groupArgBuffers` :641-654), shared uno per call.
 3. **Chiamate `rows: 1` (passo 5)** — risolto al passo 2 per topK e L2 q/k.
@@ -70,12 +70,11 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
 
 ## Intervalli da leggere per passo (dopo il passo 1; righi aggiornati al 2)
 
-- Passi 2-3 (fatti, 90d60ae e db27c44): vedi le "Aggiunte" in fondo.
-- Passo 4 (overlap): `+Prefill` :576-686 (readback id :576-577, poi loop
-  gruppi: fetch :627, arg buffer :641-654, commit+await :683-684);
-  ModelExpertIO (firme sopra).
-- Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :657-686 (loop
-  coppie); kernel D4 in `Metal/Qwen/` + wrapper in `Kernels/Qwen/`.
+- Passi 2-4 (fatti, 90d60ae, db27c44 e de45c58): vedi le "Aggiunte" in
+  fondo.
+- Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :697-753 (loop
+  coppie monoriga dentro il nuovo loop gruppi); kernel D4 in `Metal/Qwen/`
+  + wrapper in `Kernels/Qwen/`.
 
 ## Aggiunte passo 2 (commit 90d60ae, hash identici)
 
@@ -103,6 +102,26 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   12,83 invariato. Prossimo: passo 4 (overlap fetch gruppo N+1 con GPU
   gruppo N, due metà da 8 slot).
 
+## Aggiunte passo 4 (commit de45c58, hash identici)
+
+- Loop gruppi `+Prefill` :616-753: gruppi da `cacheSlotCount/2` = 8
+  (`fetchGroups` :629). Il fetch del gruppo i+1 parte subito dopo il commit
+  del CB del gruppo i con `planRoutedExpertsIfPossible(avoidingSlots:
+  Set(plan.assignedSlots))` + `fetchRoutedExperts(plan:)` in un `Task`
+  (`startFetch` :638): i miss finiscono solo in slot non letti dalla GPU,
+  gli hit non si riscrivono mai. Il piano di i+2 nasce solo dopo
+  l'await del CB di i (`inFlightGroupBuffer`, await in testa ad ogni
+  iterazione; l'ultimo CB si chiude :749-753 prima dello shared expert).
+  Fallback seriale se il piano non sta (impossibile con gruppi da 8 su 16
+  slot; usato solo per errori inattesi). `adviseRoutedExperts` non serve:
+  il fetch è già un giro in anticipo. Decode e shared expert non toccati.
+- Misure 4096/128: **78,8 tok/s** (72,5 dopo p3), gruppi/span 505 (erano
+  262), command buffer/span ~546, expertFetch 0,175 s/span ormai nascosto
+  (muro−GPU ~0,20 s/span); 512/128 (cache fredda) **85,0** (71,4). Decode
+  12,83 invariato, hash passo 1 identici. GPU busy ~87%: MoE coppie
+  monoriga = voce dominante → **passo 5 conviene**. Prossimo: GEMM per
+  colonne (C5 in alto, kernel D4 nuovi).
+
 ## Aggiunte passo 1 (misure di partenza; tabella completa nel report S26)
 
 - Baseline: hash in `scratch/S26/baseline.json` (greedy passo 0 = hash p0 ✓,
@@ -118,3 +137,7 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   hash identici, 73,0 tok/s a 4096, decode invariato.
 - Riepilogo passo 3 (db27c44): 40 blob shared persistenti (+70,8 MB);
   hash identici, 72,5 tok/s (rumore), decode 12,83; prossimo: passo 4.
+- Riepilogo passo 4 (de45c58): fetch gruppo i+1 sovrapposto alla GPU del
+  gruppo i (2 metà da 8 slot, avoidingSlots); hash identici, 78,8 tok/s a
+  4096/128, decode 12,83; prossimo: passo 5 (GEMM per colonne, ne vale la
+  pena: GPU 87%, coppie monoriga dominate).
