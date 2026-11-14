@@ -613,31 +613,89 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
         // layout); the routed slot buffers start at the blob beginning.
         let offsets = QwenMoE.expertOffsets(hidden: hidden, inter: inter)
 
-        // Routed experts of the chunk's id union, in groups of at most 16:
-        // the layer's pread slot count, beyond which the streamer
-        // precondition-fails and a later fetch can overwrite the earlier
-        // slots while the GPU still uses them (map S20 step 4). Each group
-        // is fetched, run and awaited before the next one.
-        var groupStart = 0
-        while groupStart < union.count {
-            let groupEnd = min(groupStart + 16, union.count)
-            let group = Array(union[groupStart..<groupEnd])
-            // S26 counters: the serial expert read (pread) of this group.
-            let fetchStart = ContinuousClock.now
-            let blobs = try await model.fetchRoutedExperts(layer: L, experts: group)
-            if let counters = s26Counters {
-                let fetched = ContinuousClock.now - fetchStart
-                counters.noteExpertFetch(layer: L,
-                                         seconds: Double(fetched.components.seconds)
-                                             + Double(fetched.components.attoseconds) * 1e-18)
-                counters.noteGroup(layer: L, experts: group.count)
+        // Routed experts of the chunk's id union, in groups of at most half
+        // the layer's pread slot count (S26 step 4: read and compute in
+        // parallel). While the GPU executes the current group's command
+        // buffer, the CPU reads the next group on the streamer's background
+        // queue through planRoutedExperts(avoidingSlots:) +
+        // fetchRoutedExperts(plan:): the plan places its misses only in
+        // slots the in-flight group does not use, and its hits are existing
+        // slots it never rewrites, so a slot the GPU is still reading is
+        // never written. The group after that is planned only once the
+        // current group's buffer has completed, which frees its slots for
+        // eviction (the S20 step 4 rule kept; before S26 the groups were
+        // the full slot count and every fetch ran with the GPU idle).
+        let cacheSlotCount = model.routedExpertCacheSlotCount(layer: L) ?? 16
+        let fetchGroups: [[Int]] = stride(from: 0, to: union.count,
+                                          by: max(1, cacheSlotCount / 2)).map {
+            Array(union[$0..<min($0 + max(1, cacheSlotCount / 2), union.count)])
+        }
+        // The next group's fetch, started to overlap the GPU window of the
+        // group before it (nil when no plan could place its misses, see
+        // below): the result carries the views, the fetch's wall seconds
+        // and the slots its blobs occupy.
+        var nextFetch: Task<([TensorView], Double, Set<Int>), any Error>?
+        func startFetch(_ group: [Int], avoiding: Set<Int>)
+            -> Task<([TensorView], Double, Set<Int>), any Error>? {
+            guard let plan = try? model.planRoutedExpertsIfPossible(
+                layer: L, experts: group, avoidingSlots: avoiding)
+            else { return nil }
+            return Task {
+                let started = ContinuousClock.now
+                let views = try await model.fetchRoutedExperts(plan: plan)
+                let spent = ContinuousClock.now - started
+                return (views,
+                        Double(spent.components.seconds)
+                            + Double(spent.components.attoseconds) * 1e-18,
+                        Set(plan.assignedSlots))
             }
+        }
+        // First group: the streamer's slots are all free (the span before
+        // this layer's MoE drains every window).
+        nextFetch = startFetch(fetchGroups[0], avoiding: [])
+        var inFlightGroupBuffer: MTLCommandBuffer?
+        for (groupIndex, group) in fetchGroups.enumerated() {
+            // This group's blobs: read while the GPU ran the previous
+            // group, or while it was idle, for the first group.
+            let blobs: [TensorView]
+            let usedSlots: Set<Int>
+            if let task = nextFetch {
+                let fetched = try await task.value
+                blobs = fetched.0
+                usedSlots = fetched.2
+                s26Counters?.noteExpertFetch(layer: L, seconds: fetched.1)
+            } else {
+                // Serial fallback (a half-slot group cannot fail to place,
+                // so this is only for unexpected plan refusals): close the
+                // previous window first, then replan over all slots exactly
+                // as the S20 loop did; every slot stays out of reach of the
+                // next plan, keeping the rest of the layer serial too.
+                if let previous = inFlightGroupBuffer {
+                    await previous.completed()
+                    inFlightGroupBuffer = nil
+                }
+                let fetchStart = ContinuousClock.now
+                blobs = try await model.fetchRoutedExperts(layer: L, experts: group)
+                let fetched = ContinuousClock.now - fetchStart
+                s26Counters?.noteExpertFetch(layer: L,
+                                             seconds: Double(fetched.components.seconds)
+                                                 + Double(fetched.components.attoseconds) * 1e-18)
+                usedSlots = Set(0..<cacheSlotCount)
+            }
+            s26Counters?.noteGroup(layer: L, experts: group.count)
+
+            // Close the previous group's GPU window: its slots become
+            // evictable for the plan started just after the commit below.
+            if let previous = inFlightGroupBuffer {
+                await previous.completed()
+            }
+
             let blobByExpert = Dictionary(
                 uniqueKeysWithValues: zip(group, blobs.map(\.buffer)))
             commandBuffer = try makeCommandBuffer()
-            // One argument buffer per expert of this group (at most 16),
-            // reused by every row that routes to it (S26 step 2: one per
-            // (row, slot) pair before, ~1025 per layer).
+            // One argument buffer per expert of this group, reused by
+            // every row that routes to it (S26 step 2: one per (row, slot)
+            // pair before, ~1025 per layer).
             var groupArgBuffers: [Int: MTLBuffer] = [:]
             groupArgBuffers.reserveCapacity(group.count)
             for id in group {
@@ -681,8 +739,17 @@ extension QwenHybridForwardRunner: ChunkedPrefillRunner {
             }
             s26Counters?.noteDispatches(layer: L, pairDispatches)
             commandBuffer.commit()
-            await commandBuffer.completed()
-            groupStart = groupEnd
+            // The GPU now reads `usedSlots`: plan and fetch the next group
+            // around them while it runs.
+            if groupIndex + 1 < fetchGroups.count {
+                nextFetch = startFetch(fetchGroups[groupIndex + 1], avoiding: usedSlots)
+            }
+            inFlightGroupBuffer = commandBuffer
+        }
+        // Close the last group's window before the shared expert and the
+        // next span, as the S20 loop did after every group.
+        if let last = inFlightGroupBuffer {
+            await last.completed()
         }
 
         // Shared expert and residual, per row, on a fresh command buffer.
