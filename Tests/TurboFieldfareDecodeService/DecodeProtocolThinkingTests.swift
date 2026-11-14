@@ -32,6 +32,53 @@ import TurboFieldfareDecodeProtocol
                                          from: encoded).enableThinking == nil)
     }
 
+    @Test("the reasoning budget round-trips when set and is absent from the wire when nil")
+    func reasoningBudgetRoundTrip() throws {
+        for tokens in [256, 1_024, 4_096] {
+            let request = DecodeGenerationRequest(prompt: "hi", maxNewTokens: 8,
+                                                  maxContextTokens: 512,
+                                                  temperature: 0.2,
+                                                  reasoningBudgetTokens: tokens)
+            let decoded = try JSONDecoder().decode(
+                DecodeGenerationRequest.self,
+                from: try JSONEncoder().encode(request))
+            #expect(decoded.reasoningBudgetTokens == tokens)
+        }
+        let untouched = DecodeGenerationRequest(prompt: "hi", maxNewTokens: 8,
+                                                maxContextTokens: 512,
+                                                temperature: 0.2)
+        let encoded = try JSONEncoder().encode(untouched)
+        // Reasoning depth (D11): absent, not null, for the same reason as the switch above — a
+        // peer that predates the cap sends exactly this message, and the
+        // service reads absence as unbounded reasoning.
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("reasoningBudgetTokens"))
+        #expect(try JSONDecoder().decode(DecodeGenerationRequest.self,
+                                         from: encoded).reasoningBudgetTokens == nil)
+    }
+
+    /// The two fields are independent on the wire: a message may carry either,
+    /// both or neither, and a reader of one must not need the other.
+    @Test("the switch and the budget cross the wire independently")
+    func thinkingAndBudgetAreIndependent() throws {
+        let request = DecodeGenerationRequest(prompt: "hi", maxNewTokens: 8,
+                                              maxContextTokens: 512,
+                                              temperature: 0.2,
+                                              enableThinking: true,
+                                              reasoningBudgetTokens: 256)
+        let decoded = try JSONDecoder().decode(
+            DecodeGenerationRequest.self, from: try JSONEncoder().encode(request))
+        #expect(decoded.enableThinking == true)
+        #expect(decoded.reasoningBudgetTokens == 256)
+
+        let switchOnly = DecodeGenerationRequest(prompt: "hi", maxNewTokens: 8,
+                                                 maxContextTokens: 512,
+                                                 temperature: 0.2,
+                                                 enableThinking: false)
+        let switchJSON = try JSONEncoder().encode(switchOnly)
+        #expect(!String(decoding: switchJSON, as: UTF8.self)
+            .contains("reasoningBudgetTokens"))
+    }
+
     @Test("a thinking transition is its own kind and other events omit the field")
     func thinkingEventWire() throws {
         let on = DecodeServiceEvent(kind: .thinking, generationID: UUID(),

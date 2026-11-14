@@ -246,7 +246,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         generationID: generationID,
                         conversationEpoch: request.conversationEpoch,
                         turnIndex: request.turnIndex,
-                        enableThinking: request.enableThinking)
+                        enableThinking: request.enableThinking,
+                        reasoningBudgetTokens: request.reasoningBudgetTokens)
                     try write(.generate(command), to: handles.input,
                               expecting: handles.responses)
 

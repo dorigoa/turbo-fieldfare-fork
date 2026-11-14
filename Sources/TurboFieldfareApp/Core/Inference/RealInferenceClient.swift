@@ -600,6 +600,24 @@ actor RealInferenceSession {
         }
     }
 
+    /// The turn's reasoning cap (D11), or nil for an unbounded one.
+    ///
+    /// Three things have to hold before a cap exists, and all three are read
+    /// here rather than at the call sites: the family must have a thinking
+    /// frame at all (only the Qwen tokenizer can build the frame's tokens), the
+    /// turn must have opened one — `enableThinking == false` renders a prompt
+    /// with the block already closed, so there is nothing to cut short — and
+    /// the request must actually carry a budget. A request without one runs
+    /// exactly as it did before the cap existed.
+    nonisolated static func reasoningBudget(for request: AppGenerationRequest,
+                                            tokenizer: (any ChatTokenizer)?)
+        -> ReasoningBudget? {
+        guard let qwen = tokenizer as? QwenTokenizer,
+              request.enableThinking != false,
+              let tokens = request.reasoningBudgetTokens else { return nil }
+        return qwen.reasoningBudget(tokens: tokens)
+    }
+
     static func forceLogitsHead(for request: AppGenerationRequest) -> Bool {
         !request.isPureGreedy
     }
@@ -745,6 +763,7 @@ actor RealInferenceSession {
             multimodalInput: multimodalInput,
             config: config, context: ctx, scratch: scratch,
             prefillConfig: prefillConfig,
+            reasoningBudget: Self.reasoningBudget(for: request, tokenizer: tokenizer),
             shouldStop: {
                 // A poisoned decoder is poisoned for good: stop like the CLI's
                 // Qwen path does, and let the recorded error fail the turn.
@@ -898,6 +917,8 @@ actor RealInferenceSession {
                 config: Self.generationConfig(
                     for: request, maxNewTokens: request.maxNewTokens),
                 prefillConfig: prefillConfig,
+                reasoningBudget: Self.reasoningBudget(for: request,
+                                                      tokenizer: tokenizer),
                 checkCancellation: { try Task.checkCancellation() },
                 shouldStop: stopFlagReader(),
                 onThinking: onThinking,

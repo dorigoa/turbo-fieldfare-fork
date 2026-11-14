@@ -100,6 +100,13 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// behaviour rather than a silently muted one. Ignored by families whose
     /// template has no thinking frame.
     public var enableThinking: Bool?
+    /// How many tokens this turn may spend inside its Qwen thinking block
+    /// before the runtime closes it and the model has to answer. Optional for
+    /// the same reason as `enableThinking` above: absent means unbounded, which
+    /// is what every peer predating the cap, and every client that has no depth
+    /// control, used to get. Ignored by families whose template has no thinking
+    /// frame, and by a turn that opens no block.
+    public var reasoningBudgetTokens: Int?
 
     public init(prompt: String,
                 imageAttachments: [DecodeImageAttachment]? = nil,
@@ -110,7 +117,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 generationID: UUID = UUID(),
                 conversationEpoch: UUID? = nil,
                 turnIndex: Int? = nil,
-                enableThinking: Bool? = nil) {
+                enableThinking: Bool? = nil,
+                reasoningBudgetTokens: Int? = nil) {
         self.conversationEpoch = conversationEpoch
         self.turnIndex = turnIndex
         self.prompt = prompt
@@ -124,6 +132,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
         self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
     }
 }
 
