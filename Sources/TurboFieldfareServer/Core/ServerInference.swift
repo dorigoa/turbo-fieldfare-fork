@@ -1175,6 +1175,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             scratch: scratch,
             prefillConfig: prefillConfig,
             start: completionStart,
+            // Reasoning depth (D11): only a Qwen turn that opened its thinking block has one to
+            // bound, and only when the request asked for a depth. Everything
+            // else passes nil, the unbounded decode this server always ran.
+            reasoningBudget: request.enableThinking
+                ? request.reasoningBudgetTokens
+                    .flatMap { qwenTokenizer?.reasoningBudget(tokens: $0) }
+                : nil,
             shouldStop: { shouldStop }) { progress in
                 guard decodingError == nil else { return }
                 do {

@@ -195,6 +195,12 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     /// nil or a Qwen request whose shape the validator checks against the
     /// family.
     public let chatTemplateKwargs: JSONValue?
+    /// `reasoning_effort`, the depth of reasoning asked of a family that has a
+    /// thinking phase (D11). Qwen-only, and declared only so Qwen can read it:
+    /// for every other family the sweep refuses it exactly as it did when the
+    /// key was unsupported outright, so Gemma clients see the answer they
+    /// always saw. Kept as the raw string; the validator maps it to a level.
+    public let reasoningEffort: String?
 
     /// Lets the key sweep in `init(from:)` know which family will answer:
     /// the decision whether `chat_template_kwargs` is unknown belongs to the
@@ -217,6 +223,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case frequencyPenalty = "frequency_penalty"
         case responseFormat = "response_format"
         case chatTemplateKwargs = "chat_template_kwargs"
+        case reasoningEffort = "reasoning_effort"
     }
 
     /// Top-level keys accepted and ignored because they are caller-side
@@ -251,6 +258,18 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         "functions",
         "function_call",
     ]
+
+    /// The unsupported keys for the family that will answer.
+    ///
+    /// `reasoning_effort` is the one member a family can take back: Qwen has a
+    /// reasoning phase to bound, so it reads the key (D11). Every other family
+    /// keeps refusing it with `unsupported_value`, from the same set and in the
+    /// same sorted position, so no Gemma refusal changes wording or param.
+    static func unsupportedKeys(for family: ModelFamily) -> Set<String> {
+        family == .qwen35Moe
+            ? unsupportedKeys.subtracting(["reasoning_effort"])
+            : unsupportedKeys
+    }
 
     /// Refusals that can point at the supported replacement. Every other
     /// member of `unsupportedKeys` is refused with the plain form.
@@ -295,7 +314,10 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
             .map(\.stringValue)
         // Sorted throughout so the answer never depends on the order the keys
         // arrived in.
-        if let unsupported = written.filter(Self.unsupportedKeys.contains).sorted().first {
+        // Read before the unsupported sweep, which is now family-aware.
+        let family = (decoder.userInfo[Self.modelFamilyUserInfoKey] as? ModelFamily) ?? .gemma4
+        if let unsupported = written
+            .filter(Self.unsupportedKeys(for: family).contains).sorted().first {
             throw ServerRequestError.invalid(
                 message: Self.unsupportedKeyMessages[unsupported]
                     ?? "\(unsupported) is not supported",
@@ -306,7 +328,6 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         // can read it; for every other family it must land in the unknown
         // list, and in the same position the pre-Qwen sweep gave it, so the
         // refusal text is exactly the one Gemma clients have always seen.
-        let family = (decoder.userInfo[Self.modelFamilyUserInfoKey] as? ModelFamily) ?? .gemma4
         var unknownNames = written
             .filter { CodingKeys(stringValue: $0) == nil && !Self.toleratedKeys.contains($0) }
         if family != .qwen35Moe, written.contains("chat_template_kwargs") {
@@ -351,6 +372,8 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
             JSONValue.self, forKey: .responseFormat)
         chatTemplateKwargs = try container.decodeIfPresent(
             JSONValue.self, forKey: .chatTemplateKwargs)
+        reasoningEffort = try container.decodeIfPresent(
+            String.self, forKey: .reasoningEffort)
     }
 }
 
@@ -454,6 +477,11 @@ public struct ValidatedChatRequest: Sendable {
     /// think block (D11, from `chat_template_kwargs.enable_thinking`; U3:
     /// on by default). Never consulted for Gemma: Gemma has no such frame.
     public let enableThinking: Bool
+    /// Tokens this request may spend reasoning before the runtime closes the
+    /// thinking block and the model answers (from `reasoning_effort`, D11).
+    /// nil leaves the reasoning unbounded, which is every request that does not
+    /// ask for a depth and every family without a thinking frame.
+    public let reasoningBudgetTokens: Int?
     /// Every staging directory this request's image files live in. The parser
     /// and the validator's store each stage under their own lease, and a
     /// request may carry files from both, so dropping either would delete
@@ -470,7 +498,8 @@ public struct ValidatedChatRequest: Sendable {
         includeUsage: Bool,
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
-        enableThinking: Bool = true
+        enableThinking: Bool = true,
+        reasoningBudgetTokens: Int? = nil
     ) {
         self.messages = messages
         self.multimodalMessages = multimodalMessages
@@ -482,6 +511,7 @@ public struct ValidatedChatRequest: Sendable {
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
         self.attachmentLeases = []
     }
 
@@ -496,6 +526,7 @@ public struct ValidatedChatRequest: Sendable {
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
         enableThinking: Bool,
+        reasoningBudgetTokens: Int?,
         attachmentLeases: [ServerAttachmentLease]
     ) {
         self.messages = messages
@@ -508,6 +539,7 @@ public struct ValidatedChatRequest: Sendable {
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
         self.attachmentLeases = attachmentLeases
     }
 }
@@ -634,6 +666,37 @@ public enum OpenAIRequestValidator {
             }
         }
 
+        // Reasoning depth (D11): `reasoning_effort` is the depth of Qwen's reasoning, enforced
+        // as a token budget during decode because the pinned chat template has
+        // no such variable — its only knob is the boolean `enable_thinking`.
+        // The sweep has already refused the key for every other family, so the
+        // family guard here is belt and braces for a validator reached
+        // directly; the level guard names the three levels rather than letting
+        // an OpenAI value this server has no budget for pass silently.
+        var reasoningBudgetTokens: Int?
+        if let effort = request.reasoningEffort {
+            guard family == .qwen35Moe else {
+                throw invalid("reasoning_effort is not supported",
+                              "reasoning_effort", "unsupported_value")
+            }
+            guard let depth = ReasoningDepth(rawValue: effort) else {
+                throw invalid(
+                    "reasoning_effort must be one of "
+                        + ReasoningDepth.allCases.map(\.rawValue).joined(separator: ", "),
+                    "reasoning_effort", "unsupported_value")
+            }
+            // A depth for a turn that does no reasoning bounds nothing, and
+            // quietly dropping either one would leave the caller believing a
+            // control they sent took effect.
+            guard enableThinking else {
+                throw invalid(
+                    "reasoning_effort cannot be combined with "
+                        + #"chat_template_kwargs {"enable_thinking": false}"#,
+                    "reasoning_effort", "invalid_value")
+            }
+            reasoningBudgetTokens = depth.budgetTokens
+        }
+
         // D10/U4: the sampling defaults are the family's reference
         // generation. Gemma's long-standing 0.2/64/0.95 is untouched; Qwen
         // answers with the checkpoint's 1.0/20/0.95, the same figures the
@@ -700,6 +763,7 @@ public enum OpenAIRequestValidator {
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
                                     enableThinking: enableThinking,
+                                    reasoningBudgetTokens: reasoningBudgetTokens,
                                     attachmentLeases: validatedMessages.leases)
     }
 

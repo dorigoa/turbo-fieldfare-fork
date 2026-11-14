@@ -217,4 +217,76 @@ struct ServerQwenRequestFamilyTests {
         #expect(validated.generationConfig.topK == 8)
         #expect(validated.generationConfig.topP == 0.5)
     }
+
+    // MARK: - reasoning_effort
+
+    /// The three levels map to the shared budgets, so the server, the CLI and
+    /// the app mean the same token counts by the same words.
+    @Test(arguments: ReasoningDepth.allCases)
+    func reasoningEffortMapsToTheSharedBudget(_ depth: ReasoningDepth) throws {
+        let validated = try OpenAIRequestValidator.validate(
+            Self.decode(Self.body(#""reasoning_effort":"\#(depth.rawValue)""#),
+                        family: .qwen35Moe),
+            modelID: "m",
+            family: .qwen35Moe)
+        #expect(validated.reasoningBudgetTokens == depth.budgetTokens)
+        #expect(validated.enableThinking)
+    }
+
+    /// A request that asks for no depth is unbounded, which is the decode this
+    /// server has always run.
+    @Test func withoutReasoningEffortTheRequestIsUnbounded() throws {
+        let validated = try OpenAIRequestValidator.validate(
+            Self.decode(Self.body, family: .qwen35Moe),
+            modelID: "m",
+            family: .qwen35Moe)
+        #expect(validated.reasoningBudgetTokens == nil)
+    }
+
+    /// Gemma has no reasoning phase, so its answer is the one it always gave:
+    /// the key is refused as unsupported, not as a typo, and the message,
+    /// param and code are unchanged.
+    @Test func reasoningEffortStaysRefusedForGemma() {
+        let rejection = decodeRejection(Self.body(#""reasoning_effort":"low""#),
+                                        family: .gemma4)
+        #expect(rejection?.message == "reasoning_effort is not supported")
+        #expect(rejection?.param == "reasoning_effort")
+        #expect(rejection?.code == "unsupported_value")
+    }
+
+    /// An OpenAI level this server has no budget for is refused rather than
+    /// quietly treated as one of the three.
+    @Test func reasoningEffortRefusesLevelsWithNoBudget() {
+        for value in ["minimal", "none", "xhigh", "LOW", ""] {
+            let rejection = validationRejection(
+                Self.body(#""reasoning_effort":"\#(value)""#),
+                decodeFamily: .qwen35Moe,
+                validateFamily: .qwen35Moe)
+            #expect(rejection?.param == "reasoning_effort")
+            #expect(rejection?.code == "unsupported_value")
+            #expect(rejection?.message.contains("low, medium, high") == true)
+        }
+    }
+
+    /// A depth for a turn that does no reasoning bounds nothing: refused,
+    /// rather than silently dropping one of the two controls.
+    @Test func reasoningEffortAndThinkingOffAreMutuallyExclusive() {
+        let rejection = validationRejection(
+            Self.body(#""reasoning_effort":"low","chat_template_kwargs":{"enable_thinking":false}"#),
+            decodeFamily: .qwen35Moe,
+            validateFamily: .qwen35Moe)
+        #expect(rejection?.param == "reasoning_effort")
+        #expect(rejection?.code == "invalid_value")
+    }
+
+    /// Every other unsupported key stays unsupported for Qwen too: only
+    /// `reasoning_effort` was taken back.
+    @Test func otherUnsupportedKeysStayRefusedForQwen() {
+        for key in ["logit_bias", "verbosity", "modalities", "top_logprobs"] {
+            let rejection = decodeRejection(Self.body(#""\#(key)":{}"#),
+                                            family: .qwen35Moe)
+            #expect(rejection?.message == "\(key) is not supported")
+            #expect(rejection?.code == "unsupported_value")
+        }
+    }
 }
