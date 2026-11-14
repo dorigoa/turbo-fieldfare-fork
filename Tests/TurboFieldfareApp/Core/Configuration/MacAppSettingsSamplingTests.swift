@@ -198,6 +198,73 @@ import Testing
         #expect(raw["thinkingEnabledQwen36"] == nil)
     }
 
+    /// Reasoning depth (D11): a settings file written before the depth existed reads as the
+    /// family default, and Gemma reads unbounded — the no-cap value its turns
+    /// have always had.
+    @Test func aFileWithoutTheDepthReadsTheFamilyDefault() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        try Data("""
+        {"version":4,"selectedModelPath":"/models/gemma4.gturbo",\
+        "contextTokens":8192,"expertCacheSlots":16,"temperature":0.5,\
+        "topKEnabled":false,"topK":40,"topPEnabled":true,"topP":0.9,\
+        "prefillEnabled":true}
+        """.utf8).write(to: file)
+
+        let settings = try #require(try MacAppSettingsFileStore.load(at: file))
+        #expect(settings.reasoningDepthQwen36 == nil)
+        #expect(settings.reasoningDepth(for: .qwen36) == AppReasoningDepth.familyDefault)
+        #expect(settings.reasoningDepth(for: .int4) == .unbounded)
+        #expect(settings.reasoningDepth(for: .int8) == .unbounded)
+    }
+
+    /// A depth away from the default stores its own key and survives a round
+    /// trip; back at the default the key goes away, so an install left as it
+    /// ships keeps following a later change of that default.
+    @Test func aQwenDepthChangeRoundTripsAndTheDefaultStaysUnsaved() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        var settings = MacAppSettings()
+        settings.setReasoningDepth(.unbounded, for: .qwen36)
+        try MacAppSettingsFileStore.save(settings, at: file)
+
+        let read = try #require(try MacAppSettingsFileStore.load(at: file))
+        #expect(read.reasoningDepthQwen36 == .unbounded)
+        #expect(read.reasoningDepth(for: .qwen36) == .unbounded)
+        #expect(read.reasoningDepth(for: .int4) == .unbounded)
+        let raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(raw["reasoningDepthQwen36"] as? String == "unbounded")
+
+        settings.setReasoningDepth(AppReasoningDepth.familyDefault, for: .qwen36)
+        #expect(settings.reasoningDepthQwen36 == nil)
+        // Gemma has no depth to store, so writes for it are dropped.
+        settings.setReasoningDepth(.low, for: .int4)
+        settings.setReasoningDepth(.low, for: .int8)
+        #expect(settings.reasoningDepthQwen36 == nil)
+        #expect(settings.reasoningDepth(for: .int4) == .unbounded)
+    }
+
+    /// A depth a newer build wrote reads as absence — the family default —
+    /// rather than taking the whole settings file down with it.
+    @Test func anUnknownDepthReadsAsTheFamilyDefault() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(MacAppSettings.fileName)
+        try Data("""
+        {"version":4,"selectedModelPath":"/models/gemma4.gturbo",\
+        "contextTokens":8192,"expertCacheSlots":16,"temperature":0.5,\
+        "topKEnabled":false,"topK":40,"topPEnabled":true,"topP":0.9,\
+        "prefillEnabled":true,"reasoningDepthQwen36":"exhaustive"}
+        """.utf8).write(to: file)
+
+        let settings = try #require(try MacAppSettingsFileStore.load(at: file))
+        #expect(settings.reasoningDepthQwen36 == nil)
+        #expect(settings.reasoningDepth(for: .qwen36) == AppReasoningDepth.familyDefault)
+        #expect(settings.temperature == 0.5, "one unreadable key lost the rest of the file")
+    }
+
     private func makeRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("settings-sampling-\(UUID().uuidString)", isDirectory: true)

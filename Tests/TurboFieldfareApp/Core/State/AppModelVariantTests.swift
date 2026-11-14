@@ -499,6 +499,66 @@ import TurboFieldfare
         #expect(try model.makeRequest().enableThinking == false)
     }
 
+    /// Reasoning depth (D11): the depth becomes a token budget only for the frame family, only
+    /// while the frame is open, and `unbounded` sends nothing — so Gemma's
+    /// request keeps reading exactly as it did before the cap existed.
+    @MainActor @Test func theDepthBecomesABudgetOnlyForAnOpenQwenFrame() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(model.modelVariant == .int4)
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "Gemma's request grew a budget the pre-cap reader never sent")
+
+        await model.setModelVariant(.qwen36)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        // The shipped default is a bounded depth: S27 measured this checkpoint
+        // spending a whole budget inside a block it never closed.
+        #expect(model.reasoningDepth == AppReasoningDepth.familyDefault)
+        #expect(try model.makeRequest().reasoningBudgetTokens
+            == AppReasoningDepth.familyDefault.budgetTokens)
+
+        model.reasoningDepth = .low
+        #expect(try model.makeRequest().reasoningBudgetTokens
+            == ReasoningDepth.low.budgetTokens)
+
+        model.reasoningDepth = .unbounded
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "unbounded sent a budget")
+
+        // A closed frame has nothing to bound, whatever the depth says.
+        model.reasoningDepth = .high
+        model.thinkingEnabled = false
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "a turn that does no reasoning carried a reasoning budget")
+    }
+
+    /// The depth travels with its family exactly as the switch does, and
+    /// Gemma never grows a key for a control it cannot show.
+    @MainActor @Test func aDepthChangeStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.reasoningDepth == AppReasoningDepth.familyDefault)
+        model.reasoningDepth = .high
+
+        await model.setModelVariant(.int4)
+        #expect(model.reasoningDepth == .unbounded,
+                "Gemma inherited a depth from Qwen")
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.reasoningDepth == .high, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.reasoningDepthQwen36 == .high)
+        #expect(saved.reasoningDepth(for: .int4) == .unbounded)
+    }
+
     // MARK: - Helpers
 
     private static let fakeInstallers: @Sendable (AppModelVariant) -> any AppModelInstallerClient = {

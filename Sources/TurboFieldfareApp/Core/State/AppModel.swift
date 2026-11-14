@@ -61,6 +61,10 @@ public final class AppModel {
     /// always holds its default; the switch on screen belongs to `modelVariant`
     /// and a variant change saves and restores it the way sampling is.
     private var savedThinkingEnabled: [AppModelVariant: Bool]
+    /// Each family's reasoning depth as saved for the run (D11), keyed like
+    /// `savedSampling`. Only Qwen has a depth to save; the Gemma slot always
+    /// holds `unbounded`, the no-cap value its turns have always used.
+    private var savedReasoningDepth: [AppModelVariant: AppReasoningDepth]
     /// Which checkpoint the app installs and loads. Settable only through
     /// `setModelVariant`, because changing it moves the model location, the
     /// download, the installed-model probe and memory admission together.
@@ -126,6 +130,11 @@ public final class AppModel {
     /// the sampling above; a family without a frame shows no switch and sends
     /// no value, so what reaches Gemma never changes.
     public var thinkingEnabled: Bool = true
+    /// How deeply this family may reason before answering (D11). The screen
+    /// value for `modelVariant`, saved per family like the switch above; a
+    /// family without a thinking frame shows no control and sends no budget,
+    /// so what reaches Gemma never changes.
+    public var reasoningDepth: AppReasoningDepth = AppReasoningDepth.familyDefault
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var showPromptExamples: Bool = true
     public private(set) var textSize: AppTextSize = .standard
@@ -383,6 +392,14 @@ public final class AppModel {
         }
         self.savedThinkingEnabled = savedThinkingEnabled
         self.thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
+        // The depth is read per family exactly as the switch is.
+        var savedReasoningDepth: [AppModelVariant: AppReasoningDepth] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedReasoningDepth[family] = settings.reasoningDepth(for: family)
+        }
+        self.savedReasoningDepth = savedReasoningDepth
+        self.reasoningDepth = savedReasoningDepth[Self.samplingKey(for: variant)]
+            ?? AppReasoningDepth.familyDefault
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.textSize = settings.textSize
@@ -1180,6 +1197,9 @@ public final class AppModel {
         // sliders do (S25 step 6).
         savedThinkingEnabled[Self.samplingKey(for: modelVariant)] = thinkingEnabled
         thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
+        savedReasoningDepth[Self.samplingKey(for: modelVariant)] = reasoningDepth
+        reasoningDepth = savedReasoningDepth[Self.samplingKey(for: variant)]
+            ?? AppReasoningDepth.familyDefault
         modelVariant = variant
         installer = installerFactory(variant)
         // Admission moves with the variant: a context the old one could back
@@ -2542,6 +2562,10 @@ public final class AppModel {
                 ? thinkingEnabled
                 : savedThinkingEnabled[family] ?? true
             settings.setThinkingEnabled(thinking, for: family)
+            let depth = Self.samplingKey(for: modelVariant) == family
+                ? reasoningDepth
+                : savedReasoningDepth[family] ?? AppReasoningDepth.familyDefault
+            settings.setReasoningDepth(depth, for: family)
         }
         return settings
     }
@@ -3190,7 +3214,12 @@ public final class AppModel {
             // D11 (S25 step 6): only a family with a thinking frame sends a
             // value; Gemma's request keeps reading exactly as before, with
             // the field absent.
-            enableThinking: isThinkingControlAvailable ? thinkingEnabled : nil)
+            enableThinking: isThinkingControlAvailable ? thinkingEnabled : nil,
+            // Reasoning depth (D11): only a family with a frame sends a budget, and only a turn
+            // that opens one. `unbounded` sends nil, which is the turn every
+            // surface ran before the cap existed.
+            reasoningBudgetTokens: isThinkingControlAvailable && thinkingEnabled
+                ? reasoningDepth.budgetTokens : nil)
         try request.validate(requireModelDirectory: true)
         return request
     }

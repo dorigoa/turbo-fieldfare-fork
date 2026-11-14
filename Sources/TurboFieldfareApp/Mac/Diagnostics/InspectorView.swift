@@ -441,6 +441,24 @@ struct InspectorView: View {
                 Text("When on, the model reasons before answering and the status says Thinking. The reasoning never becomes part of the reply.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                // Reasoning depth (D11): the depth only means something while the model reasons,
+                // so it follows the switch rather than standing beside it.
+                if model.thinkingEnabled {
+                    LabeledContent("Reasoning depth") {
+                        Picker("Reasoning depth", selection: $model.reasoningDepth) {
+                            ForEach(AppReasoningDepth.allCases) { depth in
+                                Text(depth.label).tag(depth)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier(.inspectorReasoningDepth)
+                    }
+                    Text("How many tokens the model may spend reasoning before it has to answer. When the budget runs out the reasoning is closed off and the reply begins. Unbounded lets it reason until the response limit, which on this model can use up the whole reply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .disabled(model.isRunning || model.loadState.isLoading

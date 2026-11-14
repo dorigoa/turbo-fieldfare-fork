@@ -55,6 +55,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// the same reading as the optional sampling keys above. Gemma has no
     /// thinking frame, so it has no such key.
     var thinkingEnabledQwen36: Bool?
+    /// How deeply Qwen3.6 may reason before it answers (D11). Absent means the
+    /// user never moved it from the family default, read the same way as the
+    /// keys above. Gemma has no reasoning phase, so it has no such key.
+    var reasoningDepthQwen36: AppReasoningDepth?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -85,6 +89,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topPEnabledQwen36
         case topPQwen36
         case thinkingEnabledQwen36
+        case reasoningDepthQwen36
     }
 
     init(version: Int = currentVersion,
@@ -114,7 +119,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topKQwen36: Int? = nil,
          topPEnabledQwen36: Bool? = nil,
          topPQwen36: Double? = nil,
-         thinkingEnabledQwen36: Bool? = nil) {
+         thinkingEnabledQwen36: Bool? = nil,
+         reasoningDepthQwen36: AppReasoningDepth? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -143,6 +149,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topPEnabledQwen36 = topPEnabledQwen36
         self.topPQwen36 = topPQwen36
         self.thinkingEnabledQwen36 = thinkingEnabledQwen36
+        self.reasoningDepthQwen36 = reasoningDepthQwen36
     }
 
     init(from decoder: Decoder) throws {
@@ -219,6 +226,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topPEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topPEnabledQwen36)
         topPQwen36 = try container.decodeIfPresent(Double.self, forKey: .topPQwen36)
         thinkingEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabledQwen36)
+        // A depth this build does not know — written by a newer one — reads as
+        // absence, which is the family default, on the same terms as
+        // `modelVariant` below: one unreadable preference must not take the
+        // whole settings file down with it.
+        if container.contains(.reasoningDepthQwen36) {
+            reasoningDepthQwen36 = try? container.decodeIfPresent(
+                AppReasoningDepth.self, forKey: .reasoningDepthQwen36)
+        }
     }
 
     /// The sampling to run `variant` with: what its family saved, or the
@@ -285,6 +300,28 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4, .int8: break
         case .qwen36: thinkingEnabledQwen36 = enabled ? nil : false
+        }
+    }
+
+    /// How deeply `variant` may reason before answering (D11). Only families
+    /// with a thinking frame have a depth to read; Gemma answers `unbounded`,
+    /// which is the no-cap value its turns have always run with.
+    func reasoningDepth(for variant: SupportedModelVariant) -> AppReasoningDepth {
+        switch variant {
+        case .int4, .int8: .unbounded
+        case .qwen36: reasoningDepthQwen36 ?? AppReasoningDepth.familyDefault
+        }
+    }
+
+    /// Stores `variant`'s depth. The family default is remembered as absence,
+    /// so an install left as it ships keeps following a later change of that
+    /// default — the same rule as the sampling and thinking keys above.
+    mutating func setReasoningDepth(_ depth: AppReasoningDepth,
+                                    for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8: break
+        case .qwen36:
+            reasoningDepthQwen36 = depth == AppReasoningDepth.familyDefault ? nil : depth
         }
     }
 
