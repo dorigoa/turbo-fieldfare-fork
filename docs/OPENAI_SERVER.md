@@ -134,6 +134,15 @@ The differences from Gemma:
   `content`. Send `"chat_template_kwargs": {"enable_thinking": false}` to answer
   without it; that object accepts only the boolean `enable_thinking`. Under
   Gemma the field is still an unrecognized request field.
+- **Reasoning depth.** `reasoning_effort` takes `low`, `medium` or `high` and
+  caps the tokens the model may spend reasoning at 256, 1,024 or 4,096. When
+  the budget runs out the runtime closes the thinking block and the model
+  answers; omitting the field leaves the reasoning unbounded, as it was before
+  the field was accepted. The chat template has no such parameter, so this is
+  enforced during decode, not in the prompt — the cached prefix is the same
+  either way. Any other value returns `unsupported_value`, combining it with
+  `enable_thinking: false` returns `invalid_value`, and under Gemma, which has
+  no reasoning phase, the field still returns `unsupported_value`.
 - **Tool calls.** Tools are rendered by the model's own chat template, and the
   model's XML tool calls come back in the OpenAI `tool_calls` field with
   `finish_reason` `tool_calls`. A call to a tool the request did not declare
@@ -309,9 +318,11 @@ Unknown top-level request fields return HTTP 400 with `code`
 `unknown_parameter` and the field name in `param`, so a misspelled option is
 refused rather than silently ignored. `response_format` is accepted only as
 `{"type": "text"}`; `json_object` and `json_schema` return
-`unsupported_value`, as do `logit_bias`, `top_logprobs`, `reasoning_effort`,
+`unsupported_value`, as do `logit_bias`, `top_logprobs`,
 `verbosity`, `modalities`, `audio`, `prediction`, `web_search_options`, and
-the legacy `functions` and `function_call`. `response_format` must be an object; any
+the legacy `functions` and `function_call`. `reasoning_effort` is read only
+under Qwen3.6 (see [Qwen3.6](#qwen36)) and returns `unsupported_value` for
+every other family. `response_format` must be an object; any
 other JSON value returns `invalid_value`. `user`, `store`, `metadata`,
 `service_tier`, `prompt_cache_key`, and `safety_identifier` are accepted and
 ignored. A top-level field set to `null` is treated as absent. Fields inside

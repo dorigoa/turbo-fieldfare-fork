@@ -17,6 +17,7 @@ The Mac app and CLI expose these generation controls:
 | Top-K | Off or 1...256 | `--top-k` | Gemma 64, Qwen3.6 20 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 for both families | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
 | Reasoning | Thinking switch, Qwen3.6 only | `--no-thinking` | Reasoning on | Qwen3.6 thinks before it answers. The CLI streams the reasoning to stderr and keeps the answer on stdout; the flag starts the turn after an empty think block instead. Gemma has no reasoning phase and ignores the control. |
+| Reasoning depth | Reasoning depth menu, Qwen3.6 only: Low, Medium, High, Unbounded | `--reasoning-depth low\|medium\|high` | App: Medium; CLI and server: unbounded | Caps the tokens Qwen3.6 may spend reasoning: Low 256, Medium 1,024, High 4,096. When the budget runs out the runtime closes the thinking block and the model answers, instead of reasoning until the response limit. Unbounded is the pre-cap behaviour. The server takes the same levels as `reasoning_effort`. Not combinable with reasoning off, which has no depth to bound. Gemma ignores the control. |
 
 With positive temperature, a CLI Top-P below `1` requires Top-K between `1`
 and `256`. To disable both truncation controls, pass `--top-k 0 --top-p 1`.
@@ -25,9 +26,20 @@ reload. They are interactive product settings, not the fixed community
 benchmark protocol.
 
 Reasoning spends generated tokens, so with Qwen3.6 a low `--max-new` can end
-the turn inside the thinking block and return no answer at all. Raise the limit
-or pass `--no-thinking` when a bounded answer matters more than the reasoning:
-1,024 tokens was not enough for any of the three community benchmark prompts.
+the turn inside the thinking block and return no answer at all. 1,024 tokens
+was not enough for any of the three community benchmark prompts. There are
+three ways out, in increasing order of how much reasoning they keep: pass
+`--no-thinking` for no reasoning at all, set a reasoning depth so the runtime
+closes the block and the model answers within the budget, or raise `--max-new`
+and leave the reasoning unbounded.
+
+A depth is a cap on the model's own reasoning, not on the frame: the closing
+marker the runtime writes does not count against the budget, though it does
+count against `--max-new` like any other token. A block the model closes by
+itself is left alone — the cap fires at most once per turn, and never after the
+model's own close. `--max-new` still wins: if the response limit is reached on
+the same token the budget would be, the turn ends there with no answer, so a
+depth only helps when `--max-new` leaves room after it.
 
 ## Runtime settings
 

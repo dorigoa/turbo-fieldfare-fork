@@ -175,6 +175,14 @@ Four things differ from Gemma:
   low `--max-new` can end the turn inside the thinking block and leave no
   answer: 1,024 tokens was not enough for any of the three community benchmark
   prompts.
+- **Reasoning depth.** `--reasoning-depth low|medium|high` bounds how much the
+  model may spend reasoning — 256, 1,024 or 4,096 tokens. When the budget runs
+  out the runtime closes the thinking block and the model answers, rather than
+  reasoning until `--max-new` is gone. The CLI and the server leave reasoning
+  unbounded unless asked; the Mac app ships at Medium, because its response
+  limit defaults to the whole remaining context. On the server the same levels
+  arrive as `reasoning_effort`. See
+  [Runtime controls](docs/RUNTIME_CONTROLS.md).
 - **Sampling defaults.** Temperature `1.0`, Top-K `20`, Top-P `0.95`, the
   checkpoint's own reference values, against Gemma's `0.2`, `64` and `0.95`.
   Values you pass are used as given.
