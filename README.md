@@ -30,7 +30,7 @@ This is a fork of Andrey Mikhaylov’s excellent project.
 
 After testing (and using even in production) his inference engine on my laptop, it convinced me so much that I decided that Andrey’s code was mature enough to be considered stable (at least for my needs); so I decided to make two significant changes in my forked code:
  - Added support for the 8-bit gemma-4-26b-a4b; this might seem to go against the project’s philosophy, but on my 32 GB M5 Air – which I bought new in the sales – it was worth a try given the large amount of memory available. Of course, the generation speed drops from 20 to 10 tps, but it’s fine for projects that aren’t too large or demanding. I asked help from a friend that is a good Swift program... only ideas and small code snippets are from myself (I am an old and useless C programmer :-( ).
- - Added support for the 4-bit ‘qwen3.6-35b-a3b’ model (work in progress on the branch); for this I had to involve Opus5.5, who drew up a detailed plan; I then fed the plan to my local LLM (Qwen3.8-Flash-Next running on Strata/PC), and it's currently about 40 per cent of the way through the entire task...
+ - Added support for the 4-bit ‘qwen3.6-35b-a3b’ model.
  
 I will do my utmost to incorporate the most significant changes made to the original project into this fork (provided they do not conflict with my requirements or with the two main changes I have made).
 
