@@ -166,3 +166,13 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   gruppo i (2 metà da 8 slot, avoidingSlots); hash identici, 78,8 tok/s a
   4096/128, decode 12,83; prossimo: passo 5 (GEMM per colonne, ne vale la
   pena: GPU 87%, coppie monoriga dominate).
+
+## Aggiunte passo 6 (chiusura)
+
+- Misure finali (hash passo 1 riverificati identici): 87,3 / 79,0 / 102,1 /
+  82,7 tok/s (512/4096 × chunk 128/256), decode 12,82; tabella prima/dopo e
+  proposta default 256 token per Qwen nel report (non applicata:
+  `defaultChunked` è condiviso con Gemma, serve override per famiglia).
+- Suite completa: verde tranne i 7 problemi baseline S1 in
+  `TurboFieldfareMacPresentationTests`. Sezione chiusa, nessuna misura
+  MoE residua da fare.
