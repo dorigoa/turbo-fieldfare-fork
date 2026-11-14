@@ -16,8 +16,15 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         "\(tokens / 1_024)K"
     }
 
-    /// The architecture every figure on this type is derived from. The menu
-    /// only ever offers contexts for the model the app ships with.
+    /// The architecture the parameterless members below derive their figures
+    /// from, which is Gemma's because it was the only family when they were
+    /// written. Nothing in the app reaches them any more: the picker reads
+    /// `menuLabel(config:)` with the loaded model's `admissionArchConfig`, and
+    /// every admission call passes its own `config`, because the KV geometry
+    /// is per family — Qwen3.6 keeps a cache in ten of its forty layers and
+    /// holds recurrent state in the rest (S24). They survive for the tests
+    /// that pin the Gemma figures, so a reader should not take this constant
+    /// for what the menu shows.
     private static let architecture = ArchConfig.gemma4_26B_A4B
 
     /// Delegated rather than recomputed: the menu label, the loader's refusal,
