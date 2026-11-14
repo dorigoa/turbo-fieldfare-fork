@@ -1,8 +1,8 @@
 # Benchmarks
 
 This page records TurboFieldfare measurements on an 8 GB M2 MacBook Air, a
-24 GB M5 Pro and, for the 8-bit variant, a 32 GB M5 MacBook Air. Each number
-belongs to the workload shown. Prompt length,
+24 GB M5 Pro, a 32 GB M5 MacBook Air for the 8-bit variant, and a 36 GB M4 Max
+for Qwen3.6 beside Gemma 4. Each number belongs to the workload shown. Prompt length,
 generated length, cache state, and hardware all change throughput, so ranges
 across workloads are not run-to-run variation.
 
@@ -19,6 +19,8 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
 | 32 GB M5, TurboFieldfare 8-bit | 7.65-9.69 tok/s | ~3.4-3.5 GiB footprint |
 | 32 GB M5, TurboFieldfare 4-bit | 15.86-17.95 tok/s | ~2.1 GiB footprint |
+| 36 GB M4 Max, Gemma 4 4-bit | 39.38-44.85 tok/s | ~2.2 GiB footprint |
+| 36 GB M4 Max, Qwen3.6 4-bit | 14.15-27.73 tok/s | ~1.7 GiB footprint at 4K |
 
 Rows for different hosts, runtimes, or model variants come from different
 workloads and are not one series.
@@ -127,6 +129,50 @@ Without the KV cache and the slots above 16, the 8-bit runtime measured
 3.5 GiB for that part; see [Runtime controls](RUNTIME_CONTROLS.md#context-length-and-memory).
 A 32 GB host never comes under memory pressure, so these rows do not show how
 the 8-bit model behaves on a 16 GB Mac.
+
+## M4 Max measured decode, Gemma 4 and Qwen3.6
+
+Both families on one host, following the
+[community protocol](COMMUNITY_BENCHMARKS.md) exactly: a discarded warmup and
+one measured run per case, fresh processes, `--max-new 1024 --max-context 4096
+--temperature 0.2 --top-k 64 --top-p 0.95` with the protocol's seeds, no
+experimental controls. Host: Mac16,9, Apple M4 Max, 14 cores, 36 GB, AC power,
+Low Power Mode off. Full records are in the
+[S27 report](plans/qwen-migration/reports/S27.md).
+
+Gemma 4 26B-A4B, 4-bit:
+
+| Case | Prompt | Generated | Decode | Rate | Stop |
+| --- | ---: | ---: | ---: | ---: | --- |
+| short-explanation | 61 | 492 | 10.97 s | 44.845 tok/s | endOfTurn |
+| medium-review | 430 | 731 | 17.45 s | 41.901 tok/s | endOfTurn |
+| long-synthesis | 3,015 | 589 | 14.96 s | 39.378 tok/s | endOfTurn |
+
+Qwen3.6 35B-A3B, 4-bit, with `--no-thinking`:
+
+| Case | Prompt | Generated | Decode | Rate | Stop |
+| --- | ---: | ---: | ---: | ---: | --- |
+| short-explanation | 62 | 497 | 17.93 s | 27.725 tok/s | endOfTurn |
+| medium-review | 426 | 710 | 28.31 s | 25.082 tok/s | endOfTurn |
+| long-synthesis | 2,940 | 585 | 41.34 s | 14.151 tok/s | endOfTurn |
+
+Qwen3.6 needs `--no-thinking` to produce a protocol-valid row. With reasoning
+on, which is its default, all three cases spend the whole 1,024-token budget
+inside a think block that never closes, so they end at `stop=maxTokens` with no
+answer written at all. Those runs decode at 13.76-25.36 tok/s, but the protocol
+requires `endOfTurn` on every measured footer, so they are not results.
+
+Qwen3.6's rate falls further with prompt length than Gemma's does, from 27.7 to
+14.2 tok/s between 62 and 2,940 prompt tokens against Gemma's 44.8 to 39.4.
+That is consistent with the two geometries — ten full-attention layers over the
+whole context against twenty-five ring-capped sliding-window layers — but one
+measured run per case does not separate it from run-to-run variation.
+
+Peak physical footprint on the same host, with a 3,015-token prompt and 256
+generated tokens at 16 slots: Gemma 4-bit 2.210 GiB at a 4K context; Qwen3.6
+1.696 GiB at 4K, 2.245 GiB at 32K and 4.111 GiB at 128K. Net of the computed
+KV term, Qwen's non-KV residual is constant at 1.611-1.620 GiB, so the context
+accounts for all of its growth.
 
 ## Same-host MLX comparison
 
