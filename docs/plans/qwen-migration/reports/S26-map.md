@@ -72,9 +72,8 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
 
 - Passi 2-4 (fatti, 90d60ae, db27c44 e de45c58): vedi le "Aggiunte" in
   fondo.
-- Passo 5 (GEMM expert): sezione C5 sopra; `+Prefill` :697-753 (loop
-  coppie monoriga dentro il nuovo loop gruppi); kernel D4 in `Metal/Qwen/`
-  + wrapper in `Kernels/Qwen/`.
+- Passo 5 (GEMM expert): FATTO E SALTATO, vedi «Aggiunte passo 5» sotto
+  (non rileggere C5 per riprovarci: il path MPP viola C8).
 
 ## Aggiunte passo 2 (commit 90d60ae, hash identici)
 
@@ -121,6 +120,32 @@ somma pesata in `routedOut[t][j]` nello stesso ordine di S19.
   12,83 invariato, hash passo 1 identici. GPU busy ~87%: MoE coppie
   monoriga = voce dominante → **passo 5 conviene**. Prossimo: GEMM per
   colonne (C5 in alto, kernel D4 nuovi).
+
+## Aggiunte passo 5 (TENTATO E SALTATO; nessun commit)
+
+- Implementato il path a colonne per gli expert routed: kernel nuovi D4
+  (`qwen_moe_gather_rows`, `qwen_moe_silu_mul`, `qwen_moe_scatter_rows` in
+  `qwen_moe.metal`), wrapper `encodeGatherRows/encodeSiluMul/
+  encodeScatterRows`, buffer scratch nel runner, loop gruppi con
+  gather → gate/up (`encodePrefillProjection` + `shifted` per gli offset
+  C5) → SiLU·mul in-place → down → scatter su `routedOut[t][slot]` (somma
+  pesata della residual invariata). Kernel test verdi (4/4, riferimento
+  CPU, piccole + dimensioni reali). Tentativo completo in
+  `scratch/s26-step5-attempt/` (patch + test).
+- **Risultato: soglie C8 fuori portata.** Il kernel di controllo MPP
+  dequantizza i pesi INT4 in FP16 (`tensorops.metal:80`
+  `half(fma(q,scale,bias))`), il GEMV per coppia usa FP32: errore di peso
+  ~5e-4 per riga → MoE layer 0 vs golden 0,99822 (prima 0,99997), hidden
+  layer 3 0,903 (prima 0,99909), logit p0 vs golden 0,414, top-1 8/12.
+  Amplificazione nota dai quasi-pareggi top-8 (problema 1 di S20, ~50×
+  più forte). Il path a colonne NON è recuperabile con MPP `.control`;
+  `.apple10V1` richiede m ≥ 64 (gli expert ne hanno ~10) e gli stessi
+  pesi FP16. Anelli di salvataggio: GEMV multi-riga nuovo (aritmetica
+  identica ai GEMV, non è il GEMM della scheda — non provato).
+- Revert completo a de45c58: hash passo 1 ripristinati e riverificati
+  (`scratch/logs/S26-step5-verify.log`, tutti identici). Il prefill
+  resta a 78,8 tok/s a 4096/128. Per il passo 6: la tabella "dopo" è
+  quella del passo 4; nessuna misura nuova da fare sul path MoE.
 
 ## Aggiunte passo 1 (misure di partenza; tabella completa nel report S26)
 
