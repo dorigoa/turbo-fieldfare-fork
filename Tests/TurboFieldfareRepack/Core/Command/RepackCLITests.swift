@@ -24,6 +24,32 @@ struct RepackCLITests {
         #expect(result.stderr.contains("unknown variant int6"))
     }
 
+    /// S6 lifted the S4 refusal: `--variant qwen36` now runs the real repack
+    /// path. Pinning the CLI here without touching the network: a resume
+    /// without saved state fails before any request, like the 8-bit probe.
+    @Test func qwen36ResumeWithoutStateFailsBeforeNetwork() throws {
+        let output = temporaryOutput("qwen36-missing-resume")
+        defer { clean(output) }
+        let result = try run(["--output", output, "--resume", "--variant", "qwen36"])
+
+        #expect(result.status == 1)
+        #expect(result.stderr.contains("no resumable install state exists"))
+        #expect(!FileManager.default.fileExists(atPath: output))
+    }
+
+    /// The help lists the new pin and still marks only 4-bit as the default.
+    @Test func helpListsQwen36AndKeepsFourBitAsTheDefault() throws {
+        let result = try run(["--help"])
+        #expect(result.status == 0)
+        #expect(result.stdout.contains("--variant int4|int8|qwen36"))
+        let lines = result.stdout.split(separator: "\n")
+        let int4Line = try #require(lines.first { $0.hasPrefix("  int4 ") })
+        #expect(int4Line.contains(", default)"))
+        let qwenLine = try #require(lines.first { $0.hasPrefix("  qwen36 ") })
+        #expect(qwenLine.contains("Qwen3.6 35B-A3B 4-bit"))
+        #expect(!qwenLine.contains("default"))
+    }
+
     @Test func conflictingVariantsAreRejected() throws {
         let output = temporaryOutput("variant-twice")
         defer { clean(output) }

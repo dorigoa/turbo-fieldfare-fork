@@ -279,6 +279,32 @@ public func runRawCompletion(producer: any LogitProducer,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
                              start: RawCompletionStart = .reset,
+                             reasoningBudget: ReasoningBudget? = nil,
+                             shouldStop: () -> Bool = { false },
+                             onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
+    try await runRawCompletion(producer: producer, tokenizer: tokenizer as ChatTokenizer,
+                               promptIds: promptIds, multimodalInput: multimodalInput,
+                               config: config, context: context, scratch: scratch,
+                               prefillConfig: prefillConfig, start: start,
+                               reasoningBudget: reasoningBudget,
+                               shouldStop: shouldStop, onProgress: onProgress)
+}
+
+/// The family-agnostic loop (D13): it asks the tokenizer only for the
+/// `ChatTokenizer` surface, so either family runs the same stop handling,
+/// detokenizer flush ordering, and history append ordering. The
+/// `GFTokenizer` overload above forwards here and keeps its pre-existing
+/// signature and behavior.
+public func runRawCompletion(producer: any LogitProducer,
+                             tokenizer: any ChatTokenizer,
+                             promptIds: [Int32],
+                             multimodalInput: MultimodalPrefillInput? = nil,
+                             config: GenerationConfig,
+                             context: MetalContext,
+                             scratch: RawCompletionScratch,
+                             prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                             start: RawCompletionStart = .reset,
+                             reasoningBudget: ReasoningBudget? = nil,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
     try config.validate()
@@ -298,8 +324,8 @@ public func runRawCompletion(producer: any LogitProducer,
     let cachedPromptTokens = try start.cachedPromptTokens(
         promptCount: promptIds.count, producer: producer)
 
-    var detok = GFDetokenizer(tokenizer: tokenizer,
-                              barrierTokenIDs: tokenizer.structuralMarkerIDs)
+    var detok = tokenizer.makeStreamingDetokenizer(
+        barrierTokenIDs: tokenizer.structuralMarkerIDs)
 
     if let context = producer as? any ContextWindowReporting,
        promptIds.count + config.maxNewTokens > context.maxContext {
@@ -331,12 +357,24 @@ public func runRawCompletion(producer: any LogitProducer,
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
     var trailingInvisibleTokens = 0
+    // The reasoning cap (`ReasoningBudgetGuard` records the four semantic
+    // decisions). `forced` holds the closing frame between the step that
+    // reached the cap and the steps that feed it into the stream: a forced
+    // token takes the sampled token's place for one iteration, so it reaches
+    // the detokenizer, the progress callback, `history` and the producer by
+    // exactly the path a sampled token does. Nothing is forced when no budget
+    // is passed, which is every Gemma turn and every unbounded Qwen turn.
+    var budgetGuard = ReasoningBudgetGuard(budget: reasoningBudget)
+    var forced: [Int32] = []
 
     while true {
         try Task.checkCancellation()
 
         let tokenID: Int32
-        if generated == 0, let seed = prefillSeed {
+        let isForced = !forced.isEmpty
+        if isForced {
+            tokenID = forced.removeFirst()
+        } else if generated == 0, let seed = prefillSeed {
             switch seed {
             case .greedyToken(let token):
                 tokenID = Int32(bitPattern: token)
@@ -356,7 +394,7 @@ public func runRawCompletion(producer: any LogitProducer,
         if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
             if tokenID == tokenizer.endOfTurnID {
                 reason = .endOfTurn
-            } else if tokenID == tokenizer.toolResponseID {
+            } else if tokenizer.toolResultWaitID == tokenID {
                 reason = .toolCalls
             } else {
                 reason = .eos
@@ -390,6 +428,13 @@ public func runRawCompletion(producer: any LogitProducer,
         try await producer.produce(token: tokenID, position: position, into: scratch.logits)
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+        // Only after the token is committed, and only for a token the model
+        // sampled: asking before the stop checks above would queue a frame for
+        // a turn that is already over, and counting the frame's own tokens
+        // would let it consume the budget it exists to end. `delta` rather than
+        // `visible`, because the stop matcher's held text is about stop
+        // strings, not about whether the block closed.
+        if !isForced { forced = budgetGuard.push(tokenID: tokenID, text: delta) }
     }
 
     return RawDecodeResult(prefillTokens: promptIds.count,

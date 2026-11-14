@@ -1,0 +1,571 @@
+import Testing
+import Foundation
+import Metal
+@testable import TurboFieldfare
+import TurboFieldfareValidationSupport
+
+/// Compares the S16 gated attention kernels (`qwen_split_qg`,
+/// `qwen_rope_partial`, `qwen_kv_write`, `qwen_attention`, `qwen_attn_gate`)
+/// against the CPU references in `QwenAttentionRef`.
+///
+/// Real shapes per plan 3.2/3.5: 16 query heads of 256 (query+gate 512 in
+/// the q_proj output), 2 KV heads of 256 (GQA ratio 8), partial RoPE on the
+/// first 64 dims with theta 1e7, the KV cache in the D5 FP16 layout
+/// [position][kvHead][256], causal GQA with scale 1/16 and FP32 softmax,
+/// plus the output gate sigmoid(gate) * attn.
+/// Tolerances per contract C8.
+@Suite struct QwenAttentionTests {
+
+    private static let queryHeads = 16
+    private static let kvHeads = 2
+    private static let headDim = 256            // 3.2: head_dim = 256
+    private static let rotatedPairs = 32        // 3.5: first 64 dims
+    private static let ropeTheta: Float = 1e7   // 3.2: partial theta = 1e7
+    private static let eps: Float = 1e-6        // C4 rmsNormEps
+
+    // MARK: - Helpers
+
+    private struct BufferAllocFailure: Error {}
+
+    /// BF16 norm-weight buffer + the FP32 values the CPU reference sees.
+    private static func weightBuffer(_ ctx: MetalContext, _ values: [Float])
+        throws -> (MTLBuffer, [Float]) {
+        let bits = values.map { Quantization.bf16Bits($0) }
+        guard let buf = ctx.device.makeBuffer(length: bits.count * 2,
+                                              options: .storageModeShared) else {
+            Issue.record("weight alloc failed")
+            throw BufferAllocFailure()
+        }
+        let ptr = buf.contents().bindMemory(to: UInt16.self, capacity: bits.count)
+        for i in 0..<bits.count { ptr[i] = bits[i] }
+        return (buf, bits.map { Quantization.bf16ToFloat($0) })
+    }
+
+    private static func maxAbsDiff(_ a: [Float], _ b: [Float]) -> Float {
+        zip(a, b).map { abs($0 - $1) }.max() ?? 0
+    }
+
+    // MARK: - Query/gate split
+
+    /// The split is a pure element copy: GPU output must be bit-exact.
+    private static func runSplit(rows: Int, queryHeads: Int, headDim: Int,
+                                 seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-split-r\(rows)-h\(queryHeads)-d\(headDim)")
+        let n = rows * queryHeads * 2 * headDim
+        let qgFp16 = (0..<n).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let qgRef = qgFp16.map { Float($0) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let qgBuf = Fp16Buffer.make(ctx.device, halves: qgFp16),
+              let qBuf = Fp16Buffer.make(ctx.device, count: n / 2),
+              let gateBuf = Fp16Buffer.make(ctx.device, count: n / 2) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeSplitQG(commandBuffer: cb, qg: qgBuf, q: qBuf, gate: gateBuf,
+                           queryHeads: queryHeads, headDim: headDim, rows: rows)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.splitQG(qg: qgRef, rows: rows,
+                                           queryHeads: queryHeads, headDim: headDim)
+        let qOut = Fp16Buffer.read(qBuf, count: n / 2)
+        let gateOut = Fp16Buffer.read(gateBuf, count: n / 2)
+        #expect(maxAbsDiff(qOut, ref.q) == 0, "q must be a bit-exact slice")
+        #expect(maxAbsDiff(gateOut, ref.gate) == 0, "gate must be a bit-exact slice")
+    }
+
+    @Test func split_qg_small() throws {
+        try Self.runSplit(rows: 3, queryHeads: 4, headDim: 128, seed: 0xB01)
+    }
+
+    @Test func split_qg_real() throws {
+        // Real geometry: 16 heads of 512 (query + gate) per token.
+        try Self.runSplit(rows: 3, queryHeads: Self.queryHeads, headDim: Self.headDim,
+                          seed: 0xB02)
+        try Self.runSplit(rows: 1, queryHeads: Self.queryHeads, headDim: Self.headDim,
+                          seed: 0xB03)
+    }
+
+    // MARK: - q_norm / k_norm wiring (S12 kernel on the split slices)
+
+    /// Split, then `QwenNorms.encodePerHead` on the query heads and on the
+    /// raw k projection (the q_norm/k_norm the 3.5 spec demands), compared
+    /// against `QwenNormRef.perHeadRMSNorm` with the plain (shifted) weight.
+    private static func runNorms(rows: Int, queryHeads: Int, kvHeads: Int,
+                                 headDim: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-attnnorm-r\(rows)-h\(queryHeads)-d\(headDim)")
+        let qg = (0..<rows * queryHeads * 2 * headDim).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let kRaw = (0..<rows * kvHeads * headDim).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        let norms = try QwenNorms(context: ctx)
+        let (wQ, wQRef) = try weightBuffer(ctx, (0..<headDim).map { _ in rng.uniform(0.5, 1.5) })
+        let (wK, wKRef) = try weightBuffer(ctx, (0..<headDim).map { _ in rng.uniform(0.5, 1.5) })
+        guard let qgBuf = Fp16Buffer.make(ctx.device, halves: qg),
+              let kBuf = Fp16Buffer.make(ctx.device, halves: kRaw),
+              let qBuf = Fp16Buffer.make(ctx.device, count: rows * queryHeads * headDim),
+              let gateBuf = Fp16Buffer.make(ctx.device, count: rows * queryHeads * headDim),
+              let qNormBuf = Fp16Buffer.make(ctx.device, count: rows * queryHeads * headDim),
+              let kNormBuf = Fp16Buffer.make(ctx.device, count: rows * kvHeads * headDim) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeSplitQG(commandBuffer: cb, qg: qgBuf, q: qBuf, gate: gateBuf,
+                           queryHeads: queryHeads, headDim: headDim, rows: rows)
+        norms.encodePerHead(commandBuffer: cb, x: qBuf, weight: wQ, out: qNormBuf,
+                            headDim: UInt32(headDim), numHeads: queryHeads,
+                            rows: rows, eps: eps, mode: .plain)
+        norms.encodePerHead(commandBuffer: cb, x: kBuf, weight: wK, out: kNormBuf,
+                            headDim: UInt32(headDim), numHeads: kvHeads,
+                            rows: rows, eps: eps, mode: .plain)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let split = QwenAttentionRef.splitQG(qg: qg.map { Float($0) }, rows: rows,
+                                             queryHeads: queryHeads, headDim: headDim)
+        let qRef = QwenNormRef.perHeadRMSNorm(x: split.q, weight: wQRef,
+                                              headDim: headDim, eps: eps,
+                                              onePlusW: false)
+        let kRef = QwenNormRef.perHeadRMSNorm(x: kRaw.map { Float($0) }, weight: wKRef,
+                                              headDim: headDim, eps: eps,
+                                              onePlusW: false)
+        let qOut = Fp16Buffer.read(qNormBuf, count: rows * queryHeads * headDim)
+        let kOut = Fp16Buffer.read(kNormBuf, count: rows * kvHeads * headDim)
+        let qRel = RelError.compute(actual: qOut, reference: qRef)
+        let kRel = RelError.compute(actual: kOut, reference: kRef)
+        #expect(qRel < Tolerance.fp16Reduction, "q_norm relErr=\(qRel)")
+        #expect(kRel < Tolerance.fp16Reduction, "k_norm relErr=\(kRel)")
+    }
+
+    @Test func qkNorms_small() throws {
+        try Self.runNorms(rows: 2, queryHeads: 4, kvHeads: 2, headDim: 128,
+                          seed: 0xB10)
+    }
+
+    @Test func qkNorms_real() throws {
+        try Self.runNorms(rows: 3, queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                          headDim: Self.headDim, seed: 0xB11)
+    }
+
+    // MARK: - Partial RoPE
+
+    /// In-place rotation vs the reference: rotated dims within
+    /// `fp16Reduction`, dims past the rotated block bit-exact.
+    private static func runRope(rows: Int, heads: Int, headDim: Int,
+                                positionBase: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed)
+            .key("qwen-rope-r\(rows)-h\(heads)-d\(headDim)-p\(positionBase)")
+        let n = rows * heads * headDim
+        let xFp16 = (0..<n).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let buf = Fp16Buffer.make(ctx.device, halves: xFp16) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeRopePartial(commandBuffer: cb, data: buf,
+                               positionBase: UInt32(positionBase),
+                               headDim: headDim, numHeads: heads, rows: rows,
+                               rotatedPairs: rotatedPairs, theta: ropeTheta)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.partialRoPE(x: xFp16.map { Float($0) },
+                                               rows: rows, heads: heads,
+                                               headDim: headDim,
+                                               positionBase: positionBase,
+                                               rotatedPairs: rotatedPairs,
+                                               theta: ropeTheta)
+        let out = Fp16Buffer.read(buf, count: n)
+        let rel = RelError.compute(actual: out, reference: ref)
+        #expect(rel < Tolerance.fp16Reduction,
+                "rope r\(rows) h\(heads) d\(headDim) p\(positionBase): relErr=\(rel)")
+
+        var maxUntouched: Float = 0
+        for r in 0..<rows {
+            for h in 0..<heads {
+                for d in (2 * rotatedPairs)..<headDim {
+                    let i = (r * heads + h) * headDim + d
+                    maxUntouched = max(maxUntouched, abs(out[i] - Float(xFp16[i])))
+                }
+            }
+        }
+        #expect(maxUntouched == 0, "dims past the rotated block must be untouched")
+    }
+
+    @Test func rope_small() throws {
+        try Self.runRope(rows: 3, heads: 4, headDim: 128, positionBase: 0, seed: 0xB20)
+        // Non-zero base: token r must use position positionBase + r.
+        try Self.runRope(rows: 3, heads: 4, headDim: 128, positionBase: 7, seed: 0xB21)
+    }
+
+    @Test func rope_real() throws {
+        // Real geometry q 16×256 and k 2×256, first 64 dims, theta 1e7.
+        try Self.runRope(rows: 5, heads: Self.queryHeads, headDim: Self.headDim,
+                         positionBase: 0, seed: 0xB22)
+        try Self.runRope(rows: 5, heads: Self.kvHeads, headDim: Self.headDim,
+                         positionBase: 4095, seed: 0xB23)
+    }
+
+    // MARK: - KV cache write (D5 layout, strides as parameters)
+
+    /// The write is a pure element copy: the whole cache (prefill + written
+    /// rows + untouched tail) must match the reference bit-exactly.
+    private static func runKVWrite(rows: Int, kvHeads: Int, headDim: Int,
+                                   kvStart: Int, posStride: Int, headStride: Int,
+                                   seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-kvw-r\(rows)-h\(kvHeads)-d\(headDim)-p\(kvStart)")
+        let positions = kvStart + rows
+        let cacheCount = positions * posStride
+        var preK = [Float16](repeating: 0, count: cacheCount)
+        var preV = [Float16](repeating: 0, count: cacheCount)
+        // Prefill every head slot of every position so untouched slots are
+        // checked against random values, not zeros.
+        for p in 0..<positions {
+            for h in 0..<kvHeads {
+                let base = p * posStride + h * headStride
+                for d in 0..<headDim {
+                    preK[base + d] = Float16(rng.uniform(-1.0, 1.0))
+                    preV[base + d] = Float16(rng.uniform(-1.0, 1.0))
+                }
+            }
+        }
+        let k = (0..<rows * kvHeads * headDim).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let v = (0..<rows * kvHeads * headDim).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let kBuf = Fp16Buffer.make(ctx.device, halves: k),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: v),
+              let cacheKBuf = Fp16Buffer.make(ctx.device, halves: preK),
+              let cacheVBuf = Fp16Buffer.make(ctx.device, halves: preV) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeKVWrite(commandBuffer: cb, k: kBuf, v: vBuf,
+                           kvK: cacheKBuf, kvV: cacheVBuf,
+                           rows: rows, kvHeads: kvHeads, headDim: headDim,
+                           kvStart: UInt32(kvStart),
+                           posStride: posStride, headStride: headStride)
+        cb.commit(); cb.waitUntilCompleted()
+
+        var refK = preK.map { Float($0) }
+        var refV = preV.map { Float($0) }
+        QwenAttentionRef.writeKV(k: k.map { Float($0) }, v: v.map { Float($0) },
+                                 cacheK: &refK, cacheV: &refV,
+                                 rows: rows, kvHeads: kvHeads, headDim: headDim,
+                                 kvStart: kvStart, posStride: posStride,
+                                 headStride: headStride)
+        let outK = Fp16Buffer.read(cacheKBuf, count: cacheCount)
+        let outV = Fp16Buffer.read(cacheVBuf, count: cacheCount)
+        #expect(maxAbsDiff(outK, refK) == 0, "K cache must match bit-exactly")
+        #expect(maxAbsDiff(outV, refV) == 0, "V cache must match bit-exactly")
+    }
+
+    @Test func kvWrite_small() throws {
+        // Plain D5 layout (posStride = kvHeads * headDim), write mid-cache.
+        try Self.runKVWrite(rows: 3, kvHeads: 2, headDim: 128, kvStart: 5,
+                            posStride: 2 * 128, headStride: 128, seed: 0xB30)
+    }
+
+    @Test func kvWrite_real() throws {
+        // Plain D5 layout at real geometry, appending at position 0.
+        try Self.runKVWrite(rows: 4, kvHeads: Self.kvHeads, headDim: Self.headDim,
+                            kvStart: 0,
+                            posStride: Self.kvHeads * Self.headDim,
+                            headStride: Self.headDim,
+                            seed: 0xB31)
+    }
+
+    @Test func kvWrite_stridedCache() throws {
+        // Capacity-strided cache: positions 8 * headDim apart (twice the
+        // plain stride) near the 4096-position end, real 2 KV heads of 256.
+        try Self.runKVWrite(rows: 3, kvHeads: Self.kvHeads, headDim: Self.headDim,
+                            kvStart: 4093,
+                            posStride: 2 * Self.kvHeads * Self.headDim,
+                            headStride: Self.headDim,
+                            seed: 0xB32)
+    }
+
+    // MARK: - Causal GQA attention
+
+    /// Realistic head distribution: L2-normalized then scaled back to unit
+    /// per-dimension RMS — what q/k actually look like after q_norm/k_norm +
+    /// RoPE (score std ~ 1 after the 1/sqrt(headDim) scale).
+    private static func realisticHeads(rng: inout SplitMix64, rows: Int,
+                                       heads: Int, dim: Int) -> [Float16] {
+        var out = [Float16]()
+        let target = Float(Double(dim).squareRoot())
+        for _ in 0..<rows * heads {
+            let x = (0..<dim).map { _ in rng.uniform(-2.0, 2.0) }
+            let norm = max(x.reduce(0) { $0 + $1 * $1 }.squareRoot(), 1e-6)
+            let scale = target / norm
+            out += x.map { Float16($0 * scale) }
+        }
+        return out
+    }
+
+    /// One attention run: GPU vs the two-pass CPU reference,
+    /// `fp16ChainedReduction` tolerance (softmax chain) per C8.
+    private static func runAttention(queryHeads: Int, kvHeads: Int, headDim: Int,
+                                     queryTokens: Int, kvStart: Int,
+                                     seed: UInt64) throws {
+        var rng = SeedTree(seed)
+            .key("qwen-attn-q\(queryHeads)-kv\(kvHeads)-d\(headDim)-T\(queryTokens)-s\(kvStart)")
+        let cachePositions = kvStart + queryTokens
+        let posStride = kvHeads * headDim
+        let headStride = headDim
+        let qFp16 = realisticHeads(rng: &rng, rows: queryTokens,
+                                   heads: queryHeads, dim: headDim)
+        let kCache = realisticHeads(rng: &rng, rows: cachePositions,
+                                    heads: kvHeads, dim: headDim)
+        let vCache = (0..<cachePositions * kvHeads * headDim)
+            .map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
+              let kBuf = Fp16Buffer.make(ctx.device, halves: kCache),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: vCache),
+              let outBuf = Fp16Buffer.make(ctx.device, count: qFp16.count) else {
+            Issue.record("alloc failed"); return
+        }
+        let scale = Float(1.0 / Double(headDim).squareRoot())
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeAttention(commandBuffer: cb, q: qBuf, kvK: kBuf, kvV: vBuf,
+                             out: outBuf,
+                             queryHeads: queryHeads, kvHeads: kvHeads,
+                             headDim: headDim, queryTokens: queryTokens,
+                             kvStart: UInt32(kvStart),
+                             posStride: posStride, headStride: headStride,
+                             scale: scale)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.attention(
+            q: qFp16.map { Float($0) },
+            cacheK: kCache.map { Float($0) },
+            cacheV: vCache.map { Float($0) },
+            posStride: posStride, headStride: headStride,
+            queryTokens: queryTokens, queryHeads: queryHeads, kvHeads: kvHeads,
+            headDim: headDim, kvStart: kvStart, scale: scale)
+        let out = Fp16Buffer.read(outBuf, count: qFp16.count)
+        let rel = RelError.compute(actual: out, reference: ref)
+        print("attn q\(queryHeads)/kv\(kvHeads) d\(headDim) T\(queryTokens) "
+              + "kvStart\(kvStart): relErr=\(rel)")
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "attn q\(queryHeads)/kv\(kvHeads) d\(headDim) T\(queryTokens) kvStart\(kvStart): relErr=\(rel)")
+    }
+
+    @Test func attention_small() throws {
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 1, kvStart: 0, seed: 0xB40)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 1, kvStart: 3, seed: 0xB41)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 5, kvStart: 0, seed: 0xB42)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 128,
+                              queryTokens: 5, kvStart: 7, seed: 0xB43)
+    }
+
+    @Test func attention_real() throws {
+        // Real geometry 16/2 heads of 256, scale 1/16: decode, short prefill,
+        // long prefill.
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 1, kvStart: 10,
+                              seed: 0xB44)
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 7, kvStart: 0,
+                              seed: 0xB45)
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 300, kvStart: 0,
+                              seed: 0xB46)
+    }
+
+    @Test func attention_cache4096() throws {
+        // Decode at position 4096 with a full 4096-position cache (the D5
+        // attention context size).
+        try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                              headDim: Self.headDim, queryTokens: 1, kvStart: 4096,
+                              seed: 0xB47)
+    }
+
+    // MARK: - Output gate
+
+    /// One gate run: GPU vs the FP32 CPU reference.
+    private static func runGate(rows: Int, heads: Int, headDim: Int,
+                                seed: UInt64) throws {
+        var rng = SeedTree(seed).key("qwen-gate-r\(rows)-h\(heads)-d\(headDim)")
+        let n = rows * heads * headDim
+        // attn: O(1) values like a softmax-weighted average; gate: the raw
+        // second half of q_proj, spread across the sigmoid's transition.
+        let attn = (0..<n).map { _ in Float16(rng.uniform(-4.0, 4.0)) }
+        let gate = (0..<n).map { _ in Float16(rng.uniform(-8.0, 8.0)) }
+
+        let ctx = try MetalContext()
+        let attnK = try QwenAttention(context: ctx)
+        guard let attnBuf = Fp16Buffer.make(ctx.device, halves: attn),
+              let gateBuf = Fp16Buffer.make(ctx.device, halves: gate),
+              let outBuf = Fp16Buffer.make(ctx.device, count: n) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        attnK.encodeGate(commandBuffer: cb, attn: attnBuf, gate: gateBuf,
+                         out: outBuf, count: n)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = QwenAttentionRef.gate(attn: attn.map { Float($0) },
+                                        gate: gate.map { Float($0) })
+        let out = Fp16Buffer.read(outBuf, count: n)
+        let rel = RelError.compute(actual: out, reference: ref)
+        print("gate r\(rows) h\(heads) d\(headDim): relErr=\(rel)")
+        #expect(rel < Tolerance.fp16Reduction,
+                "gate r\(rows) h\(heads) d\(headDim): relErr=\(rel)")
+    }
+
+    @Test func gate_small() throws {
+        try Self.runGate(rows: 3, heads: 4, headDim: 128, seed: 0xB50)
+    }
+
+    @Test func gate_real() throws {
+        // Real geometry: 16 heads of 256, short prefill and a 300-token one.
+        try Self.runGate(rows: 7, heads: Self.queryHeads, headDim: Self.headDim,
+                         seed: 0xB51)
+        try Self.runGate(rows: 300, heads: Self.queryHeads,
+                         headDim: Self.headDim, seed: 0xB52)
+    }
+
+    // MARK: - Full chain
+
+    /// The whole mixer on one command buffer — splitQG → q_norm/k_norm
+    /// (S12) → partial RoPE → KV write → causal GQA attention → output gate —
+    /// against the CPU references composed the same way. The cache starts
+    /// pre-filled (random but fixed) and both sides overwrite positions
+    /// [kvStart, kvStart+rows) with the new K/V, so attention sees the
+    /// identical cache. `fp16ChainedReduction` tolerance per C8.
+    private static func runChain(rows: Int, queryHeads: Int, kvHeads: Int,
+                                 headDim: Int, kvStart: Int,
+                                 seed: UInt64) throws {
+        var rng = SeedTree(seed)
+            .key("qwen-chain-r\(rows)-q\(queryHeads)-kv\(kvHeads)-d\(headDim)-s\(kvStart)")
+        let posStride = kvHeads * headDim
+        let headStride = headDim
+        let cachePositions = kvStart + rows
+        let qh = queryHeads, kh = kvHeads, hd = headDim
+
+        let qgFp16 = (0..<rows * qh * 2 * hd).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let kRaw = (0..<rows * kh * hd).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let vRaw = (0..<rows * kh * hd).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let cacheK = realisticHeads(rng: &rng, rows: cachePositions, heads: kh, dim: hd)
+        let cacheV = (0..<cachePositions * kh * hd)
+            .map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+
+        let ctx = try MetalContext()
+        let attn = try QwenAttention(context: ctx)
+        let norms = try QwenNorms(context: ctx)
+        let (wQ, wQRef) = try weightBuffer(ctx, (0..<hd).map { _ in rng.uniform(0.5, 1.5) })
+        let (wK, wKRef) = try weightBuffer(ctx, (0..<hd).map { _ in rng.uniform(0.5, 1.5) })
+        let qn = rows * qh * hd
+        guard let qgBuf = Fp16Buffer.make(ctx.device, halves: qgFp16),
+              let kBuf = Fp16Buffer.make(ctx.device, halves: kRaw),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: vRaw),
+              let ckBuf = Fp16Buffer.make(ctx.device, halves: cacheK),
+              let cvBuf = Fp16Buffer.make(ctx.device, halves: cacheV),
+              let qBuf = Fp16Buffer.make(ctx.device, count: qn),
+              let qNormBuf = Fp16Buffer.make(ctx.device, count: qn),
+              let kNormBuf = Fp16Buffer.make(ctx.device, count: rows * kh * hd),
+              let gateBuf = Fp16Buffer.make(ctx.device, count: qn),
+              let outBuf = Fp16Buffer.make(ctx.device, count: qn) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        attn.encodeSplitQG(commandBuffer: cb, qg: qgBuf, q: qBuf, gate: gateBuf,
+                           queryHeads: qh, headDim: hd, rows: rows)
+        norms.encodePerHead(commandBuffer: cb, x: qBuf, weight: wQ, out: qNormBuf,
+                            headDim: UInt32(hd), numHeads: qh,
+                            rows: rows, eps: eps, mode: .plain)
+        norms.encodePerHead(commandBuffer: cb, x: kBuf, weight: wK, out: kNormBuf,
+                            headDim: UInt32(hd), numHeads: kh,
+                            rows: rows, eps: eps, mode: .plain)
+        attn.encodeRopePartial(commandBuffer: cb, data: qNormBuf,
+                               positionBase: UInt32(kvStart), headDim: hd,
+                               numHeads: qh, rows: rows,
+                               rotatedPairs: rotatedPairs, theta: ropeTheta)
+        attn.encodeRopePartial(commandBuffer: cb, data: kNormBuf,
+                               positionBase: UInt32(kvStart), headDim: hd,
+                               numHeads: kh, rows: rows,
+                               rotatedPairs: rotatedPairs, theta: ropeTheta)
+        attn.encodeKVWrite(commandBuffer: cb, k: kNormBuf, v: vBuf,
+                           kvK: ckBuf, kvV: cvBuf,
+                           rows: rows, kvHeads: kh, headDim: hd,
+                           kvStart: UInt32(kvStart),
+                           posStride: posStride, headStride: headStride)
+        attn.encodeAttention(commandBuffer: cb, q: qNormBuf, kvK: ckBuf, kvV: cvBuf,
+                             out: qBuf,
+                             queryHeads: qh, kvHeads: kh, headDim: hd,
+                             queryTokens: rows, kvStart: UInt32(kvStart),
+                             posStride: posStride, headStride: headStride,
+                             scale: Float(1.0 / Double(hd).squareRoot()))
+        attn.encodeGate(commandBuffer: cb, attn: qBuf, gate: gateBuf,
+                        out: outBuf, count: qn)
+        cb.commit(); cb.waitUntilCompleted()
+
+        // CPU chain over the same FP16 inputs.
+        let split = QwenAttentionRef.splitQG(qg: qgFp16.map { Float($0) },
+                                             rows: rows, queryHeads: qh, headDim: hd)
+        var qRef = QwenNormRef.perHeadRMSNorm(x: split.q, weight: wQRef,
+                                              headDim: hd, eps: eps, onePlusW: false)
+        var kRef = QwenNormRef.perHeadRMSNorm(x: kRaw.map { Float($0) }, weight: wKRef,
+                                              headDim: hd, eps: eps, onePlusW: false)
+        qRef = QwenAttentionRef.partialRoPE(x: qRef, rows: rows, heads: qh,
+                                            headDim: hd, positionBase: kvStart,
+                                            rotatedPairs: rotatedPairs, theta: ropeTheta)
+        kRef = QwenAttentionRef.partialRoPE(x: kRef, rows: rows, heads: kh,
+                                            headDim: hd, positionBase: kvStart,
+                                            rotatedPairs: rotatedPairs, theta: ropeTheta)
+        var ckRef = cacheK.map { Float($0) }
+        var cvRef = cacheV.map { Float($0) }
+        QwenAttentionRef.writeKV(k: kRef, v: vRaw.map { Float($0) },
+                                 cacheK: &ckRef, cacheV: &cvRef,
+                                 rows: rows, kvHeads: kh, headDim: hd,
+                                 kvStart: kvStart,
+                                 posStride: posStride, headStride: headStride)
+        let attnRef = QwenAttentionRef.attention(
+            q: qRef, cacheK: ckRef, cacheV: cvRef,
+            posStride: posStride, headStride: headStride,
+            queryTokens: rows, queryHeads: qh, kvHeads: kh, headDim: hd,
+            kvStart: kvStart, scale: Float(1.0 / Double(hd).squareRoot()))
+        let chainRef = QwenAttentionRef.gate(attn: attnRef, gate: split.gate)
+
+        let out = Fp16Buffer.read(outBuf, count: qn)
+        let rel = RelError.compute(actual: out, reference: chainRef)
+        print("chain r\(rows) q\(qh) kv\(kh) d\(hd) kvStart\(kvStart): relErr=\(rel)")
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "chain r\(rows) q\(qh) kv\(kh) d\(hd) kvStart\(kvStart): relErr=\(rel)")
+    }
+
+    @Test func chain_small() throws {
+        try Self.runChain(rows: 2, queryHeads: 4, kvHeads: 2, headDim: 128,
+                          kvStart: 3, seed: 0xB60)
+    }
+
+    @Test func chain_real() throws {
+        // Real geometry: prefill of 5 tokens at position 17 and a decode.
+        try Self.runChain(rows: 5, queryHeads: Self.queryHeads,
+                          kvHeads: Self.kvHeads, headDim: Self.headDim,
+                          kvStart: 17, seed: 0xB61)
+        try Self.runChain(rows: 1, queryHeads: Self.queryHeads,
+                          kvHeads: Self.kvHeads, headDim: Self.headDim,
+                          kvStart: 10, seed: 0xB62)
+    }
+
+    @Test func chain_cache4096() throws {
+        // Decode at position 4096 with a full 4096-position cache.
+        try Self.runChain(rows: 1, queryHeads: Self.queryHeads,
+                          kvHeads: Self.kvHeads, headDim: Self.headDim,
+                          kvStart: 4096, seed: 0xB63)
+    }
+}

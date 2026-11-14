@@ -150,14 +150,67 @@ use the directory passed with `--model`, read its variant from the manifest,
 size the memory check for it, and report it. A build from before the 8-bit
 variant refuses an 8-bit installation when it loads it.
 
+### Qwen3.6 35B-A3B
+
+TurboFieldfare also runs a second model family, Qwen3.6 35B-A3B, from the
+pinned 4-bit MLX quantization
+[`mlx-community/Qwen3.6-35B-A3B-4bit`](https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit).
+It installs 47 files totalling 19.6 GB and runs on an 8 GB Mac or larger. Where
+Gemma 4 interleaves sliding-window attention, Qwen3.6 mixes ten full-attention
+layers with thirty linear DeltaNet layers that carry recurrent state instead of
+a KV cache; see [System design](docs/SYSTEM_DESIGN.md#the-qwen36-hybrid-stack).
+
+Install it in its own directory, beside any Gemma installation:
+
+```bash
+swift run -c release TurboFieldfareRepack --variant qwen36 --output scratch/qwen36.gturbo
+```
+
+Then use it exactly as a Gemma directory, by passing it to `--model`. The CLI,
+the server and the app read the family and the variant from the manifest and
+report them:
+
+```bash
+swift run -c release TurboFieldfareCLI \
+  --model scratch/qwen36.gturbo \
+  --chat-prompt "Name three primary colors." \
+  --max-new 256
+```
+
+Four things differ from Gemma:
+
+- **Reasoning.** Qwen3.6 thinks before it answers, and reasoning is on by
+  default. The CLI streams it to stderr and keeps the answer on stdout; pass
+  `--no-thinking` to answer without it. Reasoning spends generated tokens, so a
+  low `--max-new` can end the turn inside the thinking block and leave no
+  answer: 1,024 tokens was not enough for any of the three community benchmark
+  prompts.
+- **Reasoning depth.** `--reasoning-depth low|medium|high` bounds how much the
+  model may spend reasoning — 256, 1,024 or 4,096 tokens. When the budget runs
+  out the runtime closes the thinking block and the model answers, rather than
+  reasoning until `--max-new` is gone. The CLI and the server leave reasoning
+  unbounded unless asked; the Mac app ships at Medium, because its response
+  limit defaults to the whole remaining context. On the server the same levels
+  arrive as `reasoning_effort`. See
+  [Runtime controls](docs/RUNTIME_CONTROLS.md).
+- **Sampling defaults.** Temperature `1.0`, Top-K `20`, Top-P `0.95`, the
+  checkpoint's own reference values, against Gemma's `0.2`, `64` and `0.95`.
+  Values you pass are used as given.
+- **Images.** Not available. A request carrying an image is refused rather than
+  answered as though the image had not been sent.
+- **Prompt reuse.** The server reuses a cached prefix only when a request
+  continues it exactly; anything else runs a full prefill. See the
+  [server guide](docs/OPENAI_SERVER.md#qwen36).
+
 ### Prompting the model
 
 The Mac app treats what you type as an instruction and handles Gemma's chat
 formatting automatically. Just describe the task and include any context the
 model needs.
 
-Generation defaults to temperature `0.2`, Top-K `64`, and Top-P `0.95`. Set
-temperature to `0` for deterministic greedy output. The model can still repeat
+Generation defaults to temperature `0.2`, Top-K `64`, and Top-P `0.95` for
+Gemma, and to `1.0`, `20` and `0.95` for Qwen3.6, each checkpoint's own
+reference values. Set temperature to `0` for deterministic greedy output. The model can still repeat
 itself or give incorrect answers, so check important results.
 
 The app and CLI support user and model messages plus optional system guidance;

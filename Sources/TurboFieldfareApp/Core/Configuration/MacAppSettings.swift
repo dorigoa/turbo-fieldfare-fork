@@ -38,6 +38,27 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// location, so an older build reading this file still finds its model
     /// where it left it and never loads a checkpoint it cannot run.
     var selectedModelPathInt8: String?
+    /// Where the Qwen3.6 model lives, remembered the same way.
+    var selectedModelPathQwen36: String?
+    /// Sampling saved for Qwen3.6, remembered the same way. Absent means the
+    /// user has never moved it from that family's own defaults, so every
+    /// launch follows `defaultSampling` again (U4, S24). The Gemma keys above
+    /// are not optional because they predate variants: Gemma's own values have
+    /// always been stored, changed or not.
+    var temperatureQwen36: Double?
+    var topKEnabledQwen36: Bool?
+    var topKQwen36: Int?
+    var topPEnabledQwen36: Bool?
+    var topPQwen36: Double?
+    /// Whether Qwen3.6 runs with its thinking frame open (D11, S25). Absent
+    /// means the user never moved it from the family default, which is on —
+    /// the same reading as the optional sampling keys above. Gemma has no
+    /// thinking frame, so it has no such key.
+    var thinkingEnabledQwen36: Bool?
+    /// How deeply Qwen3.6 may reason before it answers (D11). Absent means the
+    /// user never moved it from the family default, read the same way as the
+    /// keys above. Gemma has no reasoning phase, so it has no such key.
+    var reasoningDepthQwen36: AppReasoningDepth?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -61,6 +82,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case loadModelOnLaunch
         case modelVariant
         case selectedModelPathInt8
+        case selectedModelPathQwen36
+        case temperatureQwen36
+        case topKEnabledQwen36
+        case topKQwen36
+        case topPEnabledQwen36
+        case topPQwen36
+        case thinkingEnabledQwen36
+        case reasoningDepthQwen36
     }
 
     init(version: Int = currentVersion,
@@ -83,7 +112,15 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
          modelVariant: SupportedModelVariant = .int4,
-         selectedModelPathInt8: String? = nil) {
+         selectedModelPathInt8: String? = nil,
+         selectedModelPathQwen36: String? = nil,
+         temperatureQwen36: Double? = nil,
+         topKEnabledQwen36: Bool? = nil,
+         topKQwen36: Int? = nil,
+         topPEnabledQwen36: Bool? = nil,
+         topPQwen36: Double? = nil,
+         thinkingEnabledQwen36: Bool? = nil,
+         reasoningDepthQwen36: AppReasoningDepth? = nil) {
         self.version = version
         self.selectedModelPath = selectedModelPath
         self.migratedHistorySources = migratedHistorySources
@@ -105,6 +142,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.loadModelOnLaunch = loadModelOnLaunch
         self.modelVariant = modelVariant
         self.selectedModelPathInt8 = selectedModelPathInt8
+        self.selectedModelPathQwen36 = selectedModelPathQwen36
+        self.temperatureQwen36 = temperatureQwen36
+        self.topKEnabledQwen36 = topKEnabledQwen36
+        self.topKQwen36 = topKQwen36
+        self.topPEnabledQwen36 = topPEnabledQwen36
+        self.topPQwen36 = topPQwen36
+        self.thinkingEnabledQwen36 = thinkingEnabledQwen36
+        self.reasoningDepthQwen36 = reasoningDepthQwen36
     }
 
     init(from decoder: Decoder) throws {
@@ -172,6 +217,112 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         selectedModelPathInt8 = try container.decodeIfPresent(
             String.self,
             forKey: .selectedModelPathInt8)
+        selectedModelPathQwen36 = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedModelPathQwen36)
+        temperatureQwen36 = try container.decodeIfPresent(Double.self, forKey: .temperatureQwen36)
+        topKEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topKEnabledQwen36)
+        topKQwen36 = try container.decodeIfPresent(Int.self, forKey: .topKQwen36)
+        topPEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .topPEnabledQwen36)
+        topPQwen36 = try container.decodeIfPresent(Double.self, forKey: .topPQwen36)
+        thinkingEnabledQwen36 = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabledQwen36)
+        // A depth this build does not know — written by a newer one — reads as
+        // absence, which is the family default, on the same terms as
+        // `modelVariant` below: one unreadable preference must not take the
+        // whole settings file down with it.
+        if container.contains(.reasoningDepthQwen36) {
+            reasoningDepthQwen36 = try? container.decodeIfPresent(
+                AppReasoningDepth.self, forKey: .reasoningDepthQwen36)
+        }
+    }
+
+    /// The sampling to run `variant` with: what its family saved, or the
+    /// family's own defaults where the user has never changed anything (U4).
+    func sampling(for variant: SupportedModelVariant) -> AppSamplingValues {
+        switch variant {
+        case .int4, .int8:
+            return AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                     topPEnabled: topPEnabled, topP: topP)
+        case .qwen36:
+            guard let temperature = temperatureQwen36, let topKEnabled = topKEnabledQwen36,
+                  let topK = topKQwen36, let topPEnabled = topPEnabledQwen36,
+                  let topP = topPQwen36 else { return variant.defaultSampling }
+            return AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                     topPEnabled: topPEnabled, topP: topP)
+        }
+    }
+
+    /// Saves `values` as `variant`'s sampling. Where Qwen ends up exactly at
+    /// its family defaults the saved overrides are dropped, so a state the
+    /// user never moved stays able to follow a later change of the defaults
+    /// (S24); the Gemma keys have no such notion — they were always stored.
+    mutating func setSampling(_ values: AppSamplingValues, for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8:
+            temperature = values.temperature
+            topKEnabled = values.topKEnabled
+            topK = values.topK
+            topPEnabled = values.topPEnabled
+            topP = values.topP
+        case .qwen36:
+            guard values != variant.defaultSampling else {
+                temperatureQwen36 = nil
+                topKEnabledQwen36 = nil
+                topKQwen36 = nil
+                topPEnabledQwen36 = nil
+                topPQwen36 = nil
+                return
+            }
+            temperatureQwen36 = values.temperature
+            topKEnabledQwen36 = values.topKEnabled
+            topKQwen36 = values.topK
+            topPEnabledQwen36 = values.topPEnabled
+            topPQwen36 = values.topP
+        }
+    }
+
+    /// Whether `variant` runs its generations with a thinking frame (D11,
+    /// S25). Only families that have one answer: Qwen3.6 reads its saved key,
+    /// where absent means the family default of on; Gemma has no frame, so it
+    /// always says yes — the same answer as an unset key.
+    func thinkingEnabled(for variant: SupportedModelVariant) -> Bool {
+        switch variant {
+        case .int4, .int8: true
+        case .qwen36: thinkingEnabledQwen36 ?? true
+        }
+    }
+
+    /// Stores `variant`'s thinking choice. Only Qwen3.6 has a frame to store
+    /// one for; its default is remembered as absence, so a family left as it
+    /// ships keeps following a later change of that default, exactly like the
+    /// sampling override above.
+    mutating func setThinkingEnabled(_ enabled: Bool, for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8: break
+        case .qwen36: thinkingEnabledQwen36 = enabled ? nil : false
+        }
+    }
+
+    /// How deeply `variant` may reason before answering (D11). Only families
+    /// with a thinking frame have a depth to read; Gemma answers `unbounded`,
+    /// which is the no-cap value its turns have always run with.
+    func reasoningDepth(for variant: SupportedModelVariant) -> AppReasoningDepth {
+        switch variant {
+        case .int4, .int8: .unbounded
+        case .qwen36: reasoningDepthQwen36 ?? AppReasoningDepth.familyDefault
+        }
+    }
+
+    /// Stores `variant`'s depth. The family default is remembered as absence,
+    /// so an install left as it ships keeps following a later change of that
+    /// default — the same rule as the sampling and thinking keys above.
+    mutating func setReasoningDepth(_ depth: AppReasoningDepth,
+                                    for variant: SupportedModelVariant) {
+        switch variant {
+        case .int4, .int8: break
+        case .qwen36:
+            reasoningDepthQwen36 = depth == AppReasoningDepth.familyDefault ? nil : depth
+        }
     }
 
     /// The saved location of `variant`'s install, if one was ever chosen.
@@ -179,6 +330,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath
         case .int8: selectedModelPathInt8
+        case .qwen36: selectedModelPathQwen36
         }
     }
 
@@ -186,6 +338,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         switch variant {
         case .int4: selectedModelPath = path
         case .int8: selectedModelPathInt8 = path
+        case .qwen36: selectedModelPathQwen36 = path
         }
     }
 
@@ -193,9 +346,27 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     func isValid() -> Bool {
         Self.isValidModelPath(selectedModelPath)
             && Self.isValidModelPath(selectedModelPathInt8)
+            && Self.isValidModelPath(selectedModelPathQwen36)
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
+            && (1...256).contains(topK)
+            && topP.isFinite && (0.01...1).contains(topP)
+            && Self.isValidQwenSampling(temperatureQwen36, topKEnabledQwen36, topKQwen36,
+                                        topPEnabledQwen36, topPQwen36)
+    }
+
+    /// An override is written as a complete set by `setSampling`; a file with
+    /// only part of it names values no slider could have produced, which is
+    /// the same case as any other invalid value.
+    private static func isValidQwenSampling(_ temperature: Double?, _ topKEnabled: Bool?,
+                                            _ topK: Int?, _ topPEnabled: Bool?,
+                                            _ topP: Double?) -> Bool {
+        let present = [temperature != nil, topKEnabled != nil, topK != nil,
+                       topPEnabled != nil, topP != nil]
+        guard (present.allSatisfy { $0 } || present.allSatisfy { !$0 }) else { return false }
+        guard let temperature, let topK, let topP else { return true }
+        return temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
     }

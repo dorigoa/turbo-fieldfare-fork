@@ -189,6 +189,25 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     /// value of any other shape has to reach the validator as a request error
     /// rather than reading as malformed JSON.
     public let responseFormat: JSONValue?
+    /// The `chat_template_kwargs` block, kept raw (D11). It is a Qwen-only
+    /// chat-template escape hatch: the sweep refuses it for every other
+    /// family exactly as an undeclared key, so what reaches here is either
+    /// nil or a Qwen request whose shape the validator checks against the
+    /// family.
+    public let chatTemplateKwargs: JSONValue?
+    /// `reasoning_effort`, the depth of reasoning asked of a family that has a
+    /// thinking phase (D11). Qwen-only, and declared only so Qwen can read it:
+    /// for every other family the sweep refuses it exactly as it did when the
+    /// key was unsupported outright, so Gemma clients see the answer they
+    /// always saw. Kept as the raw string; the validator maps it to a level.
+    public let reasoningEffort: String?
+
+    /// Lets the key sweep in `init(from:)` know which family will answer:
+    /// the decision whether `chat_template_kwargs` is unknown belongs to the
+    /// family, and the sweep runs before any typed field could say so.
+    /// Absent means Gemma, the behavior from before Qwen.
+    static let modelFamilyUserInfoKey = CodingUserInfoKey(
+        rawValue: "com.turbofieldfare.server.modelFamily")!
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -203,6 +222,8 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
         case responseFormat = "response_format"
+        case chatTemplateKwargs = "chat_template_kwargs"
+        case reasoningEffort = "reasoning_effort"
     }
 
     /// Top-level keys accepted and ignored because they are caller-side
@@ -237,6 +258,18 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         "functions",
         "function_call",
     ]
+
+    /// The unsupported keys for the family that will answer.
+    ///
+    /// `reasoning_effort` is the one member a family can take back: Qwen has a
+    /// reasoning phase to bound, so it reads the key (D11). Every other family
+    /// keeps refusing it with `unsupported_value`, from the same set and in the
+    /// same sorted position, so no Gemma refusal changes wording or param.
+    static func unsupportedKeys(for family: ModelFamily) -> Set<String> {
+        family == .qwen35Moe
+            ? unsupportedKeys.subtracting(["reasoning_effort"])
+            : unsupportedKeys
+    }
 
     /// Refusals that can point at the supported replacement. Every other
     /// member of `unsupportedKeys` is refused with the plain form.
@@ -281,16 +314,26 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
             .map(\.stringValue)
         // Sorted throughout so the answer never depends on the order the keys
         // arrived in.
-        if let unsupported = written.filter(Self.unsupportedKeys.contains).sorted().first {
+        // Read before the unsupported sweep, which is now family-aware.
+        let family = (decoder.userInfo[Self.modelFamilyUserInfoKey] as? ModelFamily) ?? .gemma4
+        if let unsupported = written
+            .filter(Self.unsupportedKeys(for: family).contains).sorted().first {
             throw ServerRequestError.invalid(
                 message: Self.unsupportedKeyMessages[unsupported]
                     ?? "\(unsupported) is not supported",
                 param: unsupported,
                 code: "unsupported_value")
         }
-        let unknown = written
+        // `chat_template_kwargs` is a declared key only so the Qwen family
+        // can read it; for every other family it must land in the unknown
+        // list, and in the same position the pre-Qwen sweep gave it, so the
+        // refusal text is exactly the one Gemma clients have always seen.
+        var unknownNames = written
             .filter { CodingKeys(stringValue: $0) == nil && !Self.toleratedKeys.contains($0) }
-            .sorted()
+        if family != .qwen35Moe, written.contains("chat_template_kwargs") {
+            unknownNames.append("chat_template_kwargs")
+        }
+        let unknown = unknownNames.sorted()
         if let first = unknown.first {
             throw ServerRequestError.invalid(
                 message: "unrecognized request field\(unknown.count == 1 ? "" : "s") "
@@ -327,6 +370,10 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
             Float.self, forKey: .frequencyPenalty)
         responseFormat = try container.decodeIfPresent(
             JSONValue.self, forKey: .responseFormat)
+        chatTemplateKwargs = try container.decodeIfPresent(
+            JSONValue.self, forKey: .chatTemplateKwargs)
+        reasoningEffort = try container.decodeIfPresent(
+            String.self, forKey: .reasoningEffort)
     }
 }
 
@@ -426,6 +473,15 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
+    /// Whether the Qwen chat template opens the generation prompt inside a
+    /// think block (D11, from `chat_template_kwargs.enable_thinking`; U3:
+    /// on by default). Never consulted for Gemma: Gemma has no such frame.
+    public let enableThinking: Bool
+    /// Tokens this request may spend reasoning before the runtime closes the
+    /// thinking block and the model answers (from `reasoning_effort`, D11).
+    /// nil leaves the reasoning unbounded, which is every request that does not
+    /// ask for a depth and every family without a thinking frame.
+    public let reasoningBudgetTokens: Int?
     /// Every staging directory this request's image files live in. The parser
     /// and the validator's store each stage under their own lease, and a
     /// request may carry files from both, so dropping either would delete
@@ -441,7 +497,9 @@ public struct ValidatedChatRequest: Sendable {
         stream: Bool,
         includeUsage: Bool,
         generationConfig: GenerationConfig,
-        maximumCompletionTokens: Int
+        maximumCompletionTokens: Int,
+        enableThinking: Bool = true,
+        reasoningBudgetTokens: Int? = nil
     ) {
         self.messages = messages
         self.multimodalMessages = multimodalMessages
@@ -452,6 +510,8 @@ public struct ValidatedChatRequest: Sendable {
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
         self.attachmentLeases = []
     }
 
@@ -465,6 +525,8 @@ public struct ValidatedChatRequest: Sendable {
         includeUsage: Bool,
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
+        enableThinking: Bool,
+        reasoningBudgetTokens: Int?,
         attachmentLeases: [ServerAttachmentLease]
     ) {
         self.messages = messages
@@ -476,6 +538,8 @@ public struct ValidatedChatRequest: Sendable {
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
         self.attachmentLeases = attachmentLeases
     }
 }
@@ -503,16 +567,19 @@ private enum OpenAIToolName {
 
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
-                                modelID: String) throws -> ValidatedChatRequest {
+                                modelID: String,
+                                family: ModelFamily = .gemma4) throws -> ValidatedChatRequest {
         try validate(
             request,
             modelID: modelID,
+            family: family,
             preStagedImages: [:],
             attachmentLease: nil)
     }
 
     static func validate(_ request: OpenAIChatRequest,
                          modelID: String,
+                         family: ModelFamily = .gemma4,
                          preStagedImages: [String: ServerStagedImage],
                          attachmentLease: ServerAttachmentLease?) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
@@ -561,7 +628,80 @@ public enum OpenAIRequestValidator {
             throw invalid(#"response_format must be an object such as {"type": "text"}"#,
                           "response_format", "invalid_value")
         }
-        let temperature = request.temperature ?? 0.2
+
+        // D11: `chat_template_kwargs` is Qwen's chat-template escape hatch,
+        // and its only usable knob is `enable_thinking`. The sweep refuses
+        // the key itself for every other family before any of this runs; a
+        // validator reached directly, without that sweep, answers the same
+        // refusal. For Qwen any key other than `enable_thinking` is
+        // refused: the template's other internal settings are this server's
+        // to fix, not the caller's to pick.
+        var enableThinking = true
+        if let kwargs = request.chatTemplateKwargs {
+            guard family == .qwen35Moe else {
+                throw ServerRequestError.invalid(
+                    message: "unrecognized request field \"chat_template_kwargs\"",
+                    param: "chat_template_kwargs",
+                    code: "unknown_parameter")
+            }
+            switch kwargs {
+            case .object(let fields):
+                if let foreign = fields.keys.filter({ $0 != "enable_thinking" }).sorted().first {
+                    throw invalid(
+                        "chat_template_kwargs field "
+                            + boundedQuoted(foreign, maxLength: 64) + " is not recognized",
+                        "chat_template_kwargs", "unsupported_value")
+                }
+                if let flag = fields["enable_thinking"] {
+                    guard case .bool(let thinking) = flag else {
+                        throw invalid("chat_template_kwargs.enable_thinking must be a boolean",
+                                      "chat_template_kwargs", "invalid_value")
+                    }
+                    enableThinking = thinking
+                }
+            default:
+                throw invalid(
+                    #"chat_template_kwargs must be an object such as {"enable_thinking": false}"#,
+                    "chat_template_kwargs", "invalid_value")
+            }
+        }
+
+        // Reasoning depth (D11): `reasoning_effort` is the depth of Qwen's reasoning, enforced
+        // as a token budget during decode because the pinned chat template has
+        // no such variable — its only knob is the boolean `enable_thinking`.
+        // The sweep has already refused the key for every other family, so the
+        // family guard here is belt and braces for a validator reached
+        // directly; the level guard names the three levels rather than letting
+        // an OpenAI value this server has no budget for pass silently.
+        var reasoningBudgetTokens: Int?
+        if let effort = request.reasoningEffort {
+            guard family == .qwen35Moe else {
+                throw invalid("reasoning_effort is not supported",
+                              "reasoning_effort", "unsupported_value")
+            }
+            guard let depth = ReasoningDepth(rawValue: effort) else {
+                throw invalid(
+                    "reasoning_effort must be one of "
+                        + ReasoningDepth.allCases.map(\.rawValue).joined(separator: ", "),
+                    "reasoning_effort", "unsupported_value")
+            }
+            // A depth for a turn that does no reasoning bounds nothing, and
+            // quietly dropping either one would leave the caller believing a
+            // control they sent took effect.
+            guard enableThinking else {
+                throw invalid(
+                    "reasoning_effort cannot be combined with "
+                        + #"chat_template_kwargs {"enable_thinking": false}"#,
+                    "reasoning_effort", "invalid_value")
+            }
+            reasoningBudgetTokens = depth.budgetTokens
+        }
+
+        // D10/U4: the sampling defaults are the family's reference
+        // generation. Gemma's long-standing 0.2/64/0.95 is untouched; Qwen
+        // answers with the checkpoint's 1.0/20/0.95, the same figures the
+        // CLI uses (S22).
+        let temperature = request.temperature ?? (family == .qwen35Moe ? 1.0 : 0.2)
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
@@ -571,7 +711,7 @@ public enum OpenAIRequestValidator {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? 64
+        let topK = request.topK ?? (family == .qwen35Moe ? 20 : 64)
         guard (1...256).contains(topK) else {
             throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
         }
@@ -622,6 +762,8 @@ public enum OpenAIRequestValidator {
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
+                                    enableThinking: enableThinking,
+                                    reasoningBudgetTokens: reasoningBudgetTokens,
                                     attachmentLeases: validatedMessages.leases)
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import TurboFieldfare
 
 struct ParsedChatRequestBody {
     let json: Data
@@ -69,11 +70,16 @@ final class StreamingChatRequestBody {
     /// serve images must refuse them here — before any byte is staged — not
     /// after the request has queued behind a generation.
     private let visionCapability: String
+    /// The loaded family. Qwen has no image path at all (D12), so its
+    /// refusal names the model rather than a missing companion pack.
+    private let family: ModelFamily
 
     init(attachmentRoot: URL = ServerAttachmentDirectory.root,
-         visionCapability: String = "ready") {
+         visionCapability: String = "ready",
+         family: ModelFamily = .gemma4) {
         self.attachmentRoot = attachmentRoot
         self.visionCapability = visionCapability
+        self.family = family
     }
 
     func feed(_ buffer: inout ByteBuffer) throws {
@@ -252,6 +258,13 @@ final class StreamingChatRequestBody {
             let header = String(decoding: state.decodedPrefix, as: UTF8.self)
                 .lowercased()
             if header.hasPrefix("data:image/") {
+                // D12: the same 400 the session's guard answers, raised here
+                // before any byte is staged.
+                if family == .qwen35Moe {
+                    throw ServerRequestError.invalid(
+                        message: "image input is not available for this model",
+                        param: "messages", code: "image_not_supported")
+                }
                 guard visionCapability == "ready" else {
                     throw ServerRequestError.invalid(
                         message: visionCapability == "disabled"

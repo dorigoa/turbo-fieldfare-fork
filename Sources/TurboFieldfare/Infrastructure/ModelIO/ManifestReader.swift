@@ -46,6 +46,19 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let routedExpert: ManifestQuantSlot
 }
 
+/// The optional `qwen35` manifest block (C4), as the runtime reads it.
+public struct ManifestQwen35: Decodable, Equatable, Sendable {
+    public let linearNumKeyHeads: Int
+    public let linearNumValueHeads: Int
+    public let linearKeyHeadDim: Int
+    public let linearValueHeadDim: Int
+    public let linearConvKernel: Int
+    public let rmsNormEps: Double
+    public let normWeightsShifted: Bool
+    public let attentionOutputGate: Bool
+    public let sharedExpertGate: Bool
+}
+
 public struct Manifest: Decodable, Equatable, Sendable {
     public let magic: String
     public let versionMajor: Int
@@ -59,6 +72,10 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let expertsPerLayer: Int
     public let numLayers: Int
     public let expertStride: UInt64
+    /// `ModelFamily` raw value, `nil` for Gemma (D1). The format codec has
+    /// already rejected any family this build does not know.
+    public let modelFamily: String?
+    public let qwen35: ManifestQwen35?
 }
 
 public enum ManifestReader {
@@ -126,16 +143,67 @@ public enum ManifestReader {
             throw ModelError.indexCorrupt(
                 detail: "manifest requests removed TurboQuant KV runtime support")
         }
-        try validateArch(m.arch, expected: expected)
-        if let quant = m.quant {
-            try validateQuant(quant)
-        } else if expected.numLayers == ArchConfig.gemma4_26B_A4B.numLayers,
-                  expected.hiddenSize == ArchConfig.gemma4_26B_A4B.hiddenSize {
-            throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
+        if try modelFamily(of: m) != nil {
+            // D2: a Qwen manifest is validated against the pinned Qwen
+            // constants only; the Gemma default in `expecting` is ignored.
+            try validateArch(m.arch, expected: ArchConfig.qwen36_35B_A3B)
+            guard let qwen35 = m.qwen35 else {
+                throw ModelError.indexCorrupt(
+                    detail: "manifest.qwen35 is required for model family "
+                        + "\(ModelFamily.qwen35Moe.rawValue)")
+            }
+            try validateQwen35(qwen35)
+            if let quant = m.quant {
+                try validateQuant(quant)
+            } else {
+                throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
+            }
+        } else {
+            try validateArch(m.arch, expected: expected)
+            if let quant = m.quant {
+                try validateQuant(quant)
+            } else if expected.numLayers == ArchConfig.gemma4_26B_A4B.numLayers,
+                      expected.hiddenSize == ArchConfig.gemma4_26B_A4B.hiddenSize {
+                throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
+            }
         }
         for f in requiredFiles {
             if m.files[f] == nil { throw ModelError.missingFile(name: f) }
         }
+    }
+
+    /// `nil` for a Gemma manifest (the key is absent — the pre-Qwen default),
+    /// `.qwen35Moe` for a Qwen manifest. The format codec rejects any other
+    /// value before this point; the guard here keeps `validate` safe even
+    /// when called with a hand-built manifest.
+    private static func modelFamily(of m: Manifest) throws -> ModelFamily? {
+        guard let name = m.modelFamily else { return nil }
+        guard ModelFamily(rawValue: name) == .qwen35Moe else {
+            throw ModelError.indexCorrupt(
+                detail: "manifest.modelFamily \"\(name)\" is not a supported model family")
+        }
+        return .qwen35Moe
+    }
+
+    private static func validateQwen35(_ q: ManifestQwen35,
+                                       expected e: QwenHybridConfig = .qwen36_35B_A3B) throws {
+        func check<T: Equatable & CustomStringConvertible>(
+            _ field: String, _ actual: T, _ expected: T) throws {
+            if actual != expected {
+                throw ModelError.archMismatch(field: field,
+                                              expected: "\(expected)",
+                                              actual: "\(actual)")
+            }
+        }
+        try check("qwen35.linearNumKeyHeads",   q.linearNumKeyHeads,   e.linearNumKeyHeads)
+        try check("qwen35.linearNumValueHeads", q.linearNumValueHeads, e.linearNumValueHeads)
+        try check("qwen35.linearKeyHeadDim",    q.linearKeyHeadDim,    e.linearKeyHeadDim)
+        try check("qwen35.linearValueHeadDim",  q.linearValueHeadDim,  e.linearValueHeadDim)
+        try check("qwen35.linearConvKernel",    q.linearConvKernel,    e.linearConvKernel)
+        try check("qwen35.rmsNormEps",          q.rmsNormEps,          e.rmsNormEps)
+        try check("qwen35.normWeightsShifted",  q.normWeightsShifted,  e.normWeightsShifted)
+        try check("qwen35.attentionOutputGate", q.attentionOutputGate, e.attentionOutputGate)
+        try check("qwen35.sharedExpertGate",    q.sharedExpertGate,    e.sharedExpertGate)
     }
 
     private static func validateQuant(_ quant: ManifestQuant) throws {
@@ -246,6 +314,20 @@ private extension ManifestQuant {
     }
 }
 
+private extension ManifestQwen35 {
+    init(wire: GTurboManifestQwen35V1) {
+        self.init(linearNumKeyHeads: wire.linearNumKeyHeads,
+                  linearNumValueHeads: wire.linearNumValueHeads,
+                  linearKeyHeadDim: wire.linearKeyHeadDim,
+                  linearValueHeadDim: wire.linearValueHeadDim,
+                  linearConvKernel: wire.linearConvKernel,
+                  rmsNormEps: wire.rmsNormEps,
+                  normWeightsShifted: wire.normWeightsShifted,
+                  attentionOutputGate: wire.attentionOutputGate,
+                  sharedExpertGate: wire.sharedExpertGate)
+    }
+}
+
 private extension Manifest {
     init(wire: GTurboManifestV1) {
         self.init(magic: wire.magic,
@@ -259,6 +341,8 @@ private extension Manifest {
                   files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
                   expertsPerLayer: wire.expertsPerLayer,
                   numLayers: wire.numLayers,
-                  expertStride: wire.expertStride)
+                  expertStride: wire.expertStride,
+                  modelFamily: wire.modelFamily,
+                  qwen35: wire.qwen35.map(ManifestQwen35.init(wire:)))
     }
 }

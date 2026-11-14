@@ -55,7 +55,9 @@ struct PackedExpertsLayout: Sendable {
 }
 
 enum PackedExpertsLayoutReader {
-    static let defaultMaxBytes: UInt64 = 16 * 1024 * 1024
+    // Sized for the Qwen layout (40 layers x 256 experts, 22,493,846 bytes in
+    // the S6 dry run); the original 16 MiB fit Gemma only. Keep >= 32 MiB.
+    static let defaultMaxBytes: UInt64 = 32 * 1024 * 1024
 
     static func load(directoryURL: URL,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> PackedExpertsLayout {

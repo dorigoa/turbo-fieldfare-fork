@@ -13,9 +13,24 @@ public struct Args: Equatable, Sendable {
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
+    /// True when the user passed the sampling flag at all (D10): the family
+    /// applies its own default (U4) to a knob the flag left untouched.
+    public var temperatureSet: Bool
+    public var topKSet: Bool
+    public var topPSet: Bool
     public var repetitionPenalty: Float
     public var seed: UInt64?
     public var stops: [String]
+    /// Qwen only (D11): when set, the generation prompt starts the turn after
+    /// an empty think block instead of inside one, so the model answers
+    /// without a reasoning block.
+    public var noThinking: Bool
+    /// Qwen only: how many tokens the model may spend inside its think block
+    /// before the runtime closes it and makes it answer. nil leaves the
+    /// reasoning unbounded, which is what every run did before the flag
+    /// existed. Mutually exclusive with `noThinking`: a depth for a turn that
+    /// does no reasoning is refused rather than silently dropped.
+    public var reasoningDepth: ReasoningDepth?
     public var quiet: Bool
     public var expertCacheSlots: Int
     public var expertCachePolicy: RuntimeExpertCachePolicy
@@ -38,9 +53,14 @@ public struct Args: Equatable, Sendable {
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
+                temperatureSet: Bool = false,
+                topKSet: Bool = false,
+                topPSet: Bool = false,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
+                noThinking: Bool = false,
+                reasoningDepth: ReasoningDepth? = nil,
                 quiet: Bool = false,
                 expertCacheSlots: Int = RuntimeConfiguration.production.expertCacheSlots,
                 expertCachePolicy: RuntimeExpertCachePolicy = RuntimeConfiguration.production.expertCachePolicy,
@@ -60,9 +80,14 @@ public struct Args: Equatable, Sendable {
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
+        self.temperatureSet = temperatureSet
+        self.topKSet = topKSet
+        self.topPSet = topPSet
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
         self.stops = stops
+        self.noThinking = noThinking
+        self.reasoningDepth = reasoningDepth
         self.quiet = quiet
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
@@ -116,14 +141,14 @@ extension Args {
     }
 
     public static let usage = """
-    TurboFieldfareCLI — Gemma 4 26B-A4B text generation
+    TurboFieldfareCLI — Gemma 4 26B-A4B and Qwen 3.6 35B-A3B text generation
 
     usage: TurboFieldfareCLI --model <dir>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
 
     required:
       --model <dir>             Path to a .gturbo model directory, 4-bit or 8-bit;
-                                the variant is read from its manifest.
+                                the variant and the family are read from its manifest.
       --prompt <string>         Raw-completion prompt.
       --chat-prompt <string>    Single-turn instruction chat; pairs with --image
       --messages-file <path>    JSON chat messages with role and content fields.
@@ -136,15 +161,26 @@ extension Args {
     options:
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192, max 262144).
-      --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
-      --top-k <int>              Top-k truncation, 1...256 (default 64; 0 = off).
-      --top-p <float>            Nucleus truncation (default 0.95).
+      --temperature <float>      Sampling temperature (Gemma 0.2, Qwen 1.0; 0 = greedy).
+      --top-k <int>              Top-k truncation, 1...256 (Gemma 64, Qwen 20; 0 = off).
+      --top-p <float>            Nucleus truncation (default 0.95 for both families).
       --repetition-penalty <f>   Repetition penalty (default 1.0).
       --seed <uint64>            Deterministic sampling seed (default off).
       --stop <string>            Stop substring (repeatable).
+      --no-thinking              Qwen only: start the turn after an empty think
+                                 block, so the model answers without reasoning
+                                 (default: reasoning on, streamed to stderr).
+      --reasoning-depth <level>  Qwen only: how deeply to reason before answering:
+                                 low (\(ReasoningDepth.low.budgetTokens) tokens), medium (\(ReasoningDepth.medium.budgetTokens)) or high (\(ReasoningDepth.high.budgetTokens)).
+                                 When the budget runs out the runtime closes the
+                                 think block so the model answers. Default:
+                                 unbounded, which on this checkpoint can spend
+                                 the whole --max-new reasoning and answer
+                                 nothing. Rejected together with --no-thinking
+                                 (reasoning off has no depth to bound).
       --quiet                    Suppress the footer: a variant line
-                                 (variant=4-bit or variant=8-bit) and the
-                                 timing line.
+                                 (variant=4-bit or variant=8-bit, plus the
+                                 model family) and the timing line.
       --expert-cache-slots <n>   Expert-cache slots: \(RuntimeConfiguration.allowedValueList(RuntimeConfiguration.allowedExpertCacheSlots)) (default 16).
       --expert-cache-policy <s>  Expert-cache policy: lfu or lru (default lfu).
       --prefill on|off           Enable or disable chunked prompt prefill (default on).
@@ -209,9 +245,14 @@ extension Args {
         var temperature: Float = 0.2
         var topK: Int? = 64
         var topP: Float? = 0.95
+        var temperatureSet = false
+        var topKSet = false
+        var topPSet = false
         var repetitionPenalty: Float = 1.0
         var seed: UInt64?
         var stops: [String] = []
+        var noThinking = false
+        var reasoningDepth: ReasoningDepth?
         var quiet = false
         let runtimeDefaults = RuntimeConfiguration.production
         var expertCacheSlots = runtimeDefaults.expertCacheSlots
@@ -270,18 +311,21 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed
+                temperatureSet = true
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topK = parsed == 0 ? nil : parsed
+                topKSet = true
             case "--top-p":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topP = parsed
+                topPSet = true
             case "--repetition-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0 else {
@@ -296,6 +340,15 @@ extension Args {
                 seed = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
+            case "--no-thinking":
+                noThinking = true
+                index += 1
+            case "--reasoning-depth":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = ReasoningDepth(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                reasoningDepth = parsed
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
@@ -355,6 +408,13 @@ extension Args {
         if prompt != nil, !images.isEmpty {
             throw ArgsError.mutuallyExclusive("--prompt", "--image")
         }
+        // A depth for a turn that does no reasoning at all has nothing to
+        // bound. Refusing is the fail-closed answer the rest of this parser
+        // gives: silently dropping one of the two would leave the caller
+        // believing a control they passed took effect.
+        if noThinking, reasoningDepth != nil {
+            throw ArgsError.mutuallyExclusive("--no-thinking", "--reasoning-depth")
+        }
         let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         if !images.isEmpty, expertCacheSlots < minimumSlots {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
@@ -388,9 +448,14 @@ extension Args {
                              temperature: temperature,
                              topK: topK,
                              topP: topP,
+                             temperatureSet: temperatureSet,
+                             topKSet: topKSet,
+                             topPSet: topPSet,
                              repetitionPenalty: repetitionPenalty,
                              seed: seed,
                              stops: stops,
+                             noThinking: noThinking,
+                             reasoningDepth: reasoningDepth,
                              quiet: quiet,
                              expertCacheSlots: expertCacheSlots,
                              expertCachePolicy: expertCachePolicy,

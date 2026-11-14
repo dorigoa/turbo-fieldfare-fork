@@ -256,9 +256,18 @@ struct TokenizerDirectoryCache: Equatable, Sendable {
 actor RealInferenceSession {
     private var loadedKey: SessionLoadKey?
     private var ctx: MetalContext?
-    private var tokenizer: GFTokenizer?
+    /// The family's chat surface, chosen from the manifest before the load
+    /// (S25 step 4, D3): `GFTokenizer` or `QwenTokenizer`.
+    private var tokenizer: (any ChatTokenizer & Sendable)?
+    /// The prompt surface that goes with `tokenizer`, built at load from the
+    /// step 2 renderer types.
+    private var promptRenderer: (any ConversationPromptRenderer)?
+    /// The family the loaded model belongs to; nil between unload and load.
+    private var loadedFamily: ModelFamily?
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
-    private var runner: RealForwardRunner?
+    /// The family's runner from `LanguageModelRunnerFactory`:
+    /// `RealForwardRunner` or `QwenHybridForwardRunner` (D3).
+    private var runner: (any LanguageModelRunner)?
     private var scratch: RawCompletionScratch?
     private var model: Model?
     /// The open conversation, when the app is in chat mode. Nil for the
@@ -364,7 +373,7 @@ actor RealInferenceSession {
     private func conversationForRestore(
         options: AppRuntimeOptions
     ) throws -> MultimodalConversation {
-        guard let model, let ctx, let tokenizer, let runner, let scratch else {
+        guard let model, let ctx, let tokenizer, let promptRenderer, let runner, let scratch else {
             throw AppInferenceError.modelLoadFailed("session lost its loaded state")
         }
         runner.reset()
@@ -374,7 +383,8 @@ actor RealInferenceSession {
         nonisolated(unsafe) let sharedModel = model
         nonisolated(unsafe) let sharedVision = visionRuntime
         let created = MultimodalConversation(
-            model: sharedModel, context: ctx, tokenizer: tokenizer, runner: runner,
+            model: sharedModel, context: ctx, renderer: promptRenderer,
+            tokenizer: tokenizer, runner: runner,
             scratch: scratch, visionRuntime: sharedVision,
             visionRuntimeError: visionRuntimeError,
             visionResidency: options.visionResidencyPolicy,
@@ -400,6 +410,8 @@ actor RealInferenceSession {
         conversation = nil
         conversationTokens.withLock { $0 = 0 }
         runner = nil
+        promptRenderer = nil
+        loadedFamily = nil
         scratch = nil
         model = nil
         loadedKey = nil
@@ -409,16 +421,30 @@ actor RealInferenceSession {
         let start = Date()
         do {
             onState(.loading(.validatingDirectory))
-            let manifest = key.directory.appendingPathComponent("manifest.json")
-            guard FileManager.default.fileExists(atPath: manifest.path) else {
+            let manifestURL = key.directory.appendingPathComponent("manifest.json")
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else {
                 throw AppInferenceError.modelNotFound(key.directory.path)
             }
+            // The family comes from the manifest before anything else loads: it
+            // picks the tokenizer, the runner, and whether the image companion
+            // pack is opened at all (S25 step 4, D3/D12). `ManifestReader.load`
+            // applies the same schema checks `Model.load` would, on a few
+            // kilobytes and never the weights.
+            let manifest = try ManifestReader.load(directoryURL: key.directory,
+                                                    expecting: .gemma4_26B_A4B)
+            let family = Self.family(of: manifest)
 
             onState(.loading(.tokenizer))
-            if tokenizer == nil || tokenizerDirectoryCache.shouldReload(for: key.directory) {
+            let activeTokenizer: any ChatTokenizer & Sendable
+            if let tokenizer, !tokenizerDirectoryCache.shouldReload(for: key.directory) {
+                activeTokenizer = tokenizer
+            } else {
                 do {
-                    tokenizer = try await Self.loadTokenizer(for: key.directory)
+                    let loaded = try await Self.loadTokenizer(family: family,
+                                                              for: key.directory)
+                    tokenizer = loaded
                     tokenizerDirectoryCache.markLoaded(for: key.directory)
+                    activeTokenizer = loaded
                 } catch {
                     throw AppInferenceError.tokenizerUnavailable("\(error)")
                 }
@@ -444,38 +470,52 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.preparingRunner))
-            let loadedRunner = try RealForwardRunner(
+            // The factory picks the runner by the loaded model's family (D3):
+            // Gemma keeps the runtime configuration, Qwen's init has none.
+            let loadedRunner = try LanguageModelRunnerFactory.make(
                 model: loadedModel,
                 context: context,
                 maxContext: key.maxContext,
                 runtimeConfiguration: runtimeConfiguration)
+            let loadedRenderer = try Self.promptRenderer(family: loadedModel.family,
+                                                         tokenizer: activeTokenizer)
             let loadedScratch = try RawCompletionScratch(context: context,
                                                          vocab: loadedModel.config.vocabSize)
             try Task.checkCancellation()
 
             let loadedVisionRuntime: VisionRuntime?
             let loadedVisionRuntimeError: Error?
-            do {
-                let runtime = try VisionRuntime.open(
-                    textModelURL: key.directory,
-                    context: context)
-                // Keep Ready maps the tower during the load rather than on the
-                // first image, so the wait is where the user asked for it.
-                if key.options.visionResidencyPolicy == .keepReady {
-                    onState(.loading(.mappingImageTower))
-                    try runtime.prewarmWeightRegions()
+            if Self.opensImagePack(for: loadedModel.family) {
+                do {
+                    let runtime = try VisionRuntime.open(
+                        textModelURL: key.directory,
+                        context: context)
+                    // Keep Ready maps the tower during the load rather than on
+                    // the first image, so the wait is where the user asked for
+                    // it.
+                    if key.options.visionResidencyPolicy == .keepReady {
+                        onState(.loading(.mappingImageTower))
+                        try runtime.prewarmWeightRegions()
+                    }
+                    loadedVisionRuntime = runtime
+                    loadedVisionRuntimeError = nil
+                } catch {
+                    // A missing or invalid pack only means images are unavailable;
+                    // the reason travels to the first image turn.
+                    loadedVisionRuntime = nil
+                    loadedVisionRuntimeError = error
                 }
-                loadedVisionRuntime = runtime
-                loadedVisionRuntimeError = nil
-            } catch {
-                // A missing or invalid pack only means images are unavailable;
-                // the reason travels to the first image turn.
+            } else {
+                // D12 (S25 step 4): a Qwen pack has no image companion, and
+                // image turns are refused before any work — so never open one.
                 loadedVisionRuntime = nil
-                loadedVisionRuntimeError = error
+                loadedVisionRuntimeError = nil
             }
             try Task.checkCancellation()
 
             runner = loadedRunner
+            promptRenderer = loadedRenderer
+            loadedFamily = loadedModel.family
             scratch = loadedScratch
             model = loadedModel
             loadedKey = key
@@ -495,8 +535,87 @@ actor RealInferenceSession {
         }
     }
 
-    private static func loadTokenizer(for modelDirectory: URL) async throws -> GFTokenizer {
-        try await GFTokenizer.load(forModelDirectory: modelDirectory)
+    private static func loadTokenizer(family: ModelFamily,
+                                      for modelDirectory: URL) async throws -> any ChatTokenizer & Sendable {
+        let loaded = try await LanguageModelRunnerFactory.loadTokenizer(
+            family: family, forModelDirectory: modelDirectory)
+        // The conversation actor takes the surface as `ChatTokenizer & Sendable`;
+        // the factory hands back a bare `any ChatTokenizer`, so adopt the
+        // concrete tokenizer the factory built for this family — both are
+        // Sendable — and fail closed on anything else.
+        switch family {
+        case .gemma4:
+            guard let gemma = loaded as? GFTokenizer else {
+                throw AppInferenceError.tokenizerUnavailable(
+                    "the \(family.rawValue) loader returned \(type(of: loaded))")
+            }
+            return gemma
+        case .qwen35Moe:
+            guard let qwen = loaded as? QwenTokenizer else {
+                throw AppInferenceError.tokenizerUnavailable(
+                    "the \(family.rawValue) loader returned \(type(of: loaded))")
+            }
+            return qwen
+        }
+    }
+
+    /// Mirrors `Model.family`: an absent `modelFamily` means Gemma, and the
+    /// manifest codec has already rejected any family string this build does
+    /// not know, so the only other value is the Qwen one (D1).
+    nonisolated static func family(of manifest: Manifest) -> ModelFamily {
+        guard let name = manifest.modelFamily else { return .gemma4 }
+        return ModelFamily(rawValue: name) == .qwen35Moe ? .qwen35Moe : .gemma4
+    }
+
+    /// Whether a family's pack may have an image companion opened at load.
+    /// Only Gemma does (D12); for Qwen the session never touches a tower.
+    nonisolated static func opensImagePack(for family: ModelFamily) -> Bool {
+        family == .gemma4
+    }
+
+    /// The prompt renderer for the family, built from the tokenizer the load
+    /// produced (S25 step 2). Fails closed on a family/tokenizer mismatch:
+    /// reaching one means a tokenizer from another family was cached.
+    nonisolated static func promptRenderer(family: ModelFamily,
+                                           tokenizer: any ChatTokenizer,
+                                           enableThinking: Bool = true) throws
+        -> any ConversationPromptRenderer {
+        switch family {
+        case .gemma4:
+            guard let gemma = tokenizer as? GFTokenizer else {
+                throw AppInferenceError.modelLoadFailed(
+                    "the loaded tokenizer is not a Gemma tokenizer")
+            }
+            return GemmaConversationPromptRenderer(tokenizer: gemma)
+        case .qwen35Moe:
+            guard let qwen = tokenizer as? QwenTokenizer else {
+                throw AppInferenceError.modelLoadFailed(
+                    "the loaded tokenizer is not a Qwen tokenizer")
+            }
+            // The request's `enableThinking` arrives here (S25 step 5): the
+            // same flag picks the generation prompt's frame and the
+            // assistant decoder's start state, so they cannot disagree.
+            return QwenConversationPromptRenderer(tokenizer: qwen,
+                                                  enableThinking: enableThinking)
+        }
+    }
+
+    /// The turn's reasoning cap (D11), or nil for an unbounded one.
+    ///
+    /// Three things have to hold before a cap exists, and all three are read
+    /// here rather than at the call sites: the family must have a thinking
+    /// frame at all (only the Qwen tokenizer can build the frame's tokens), the
+    /// turn must have opened one — `enableThinking == false` renders a prompt
+    /// with the block already closed, so there is nothing to cut short — and
+    /// the request must actually carry a budget. A request without one runs
+    /// exactly as it did before the cap existed.
+    nonisolated static func reasoningBudget(for request: AppGenerationRequest,
+                                            tokenizer: (any ChatTokenizer)?)
+        -> ReasoningBudget? {
+        guard let qwen = tokenizer as? QwenTokenizer,
+              request.enableThinking != false,
+              let tokens = request.reasoningBudgetTokens else { return nil }
+        return qwen.reasoningBudget(tokens: tokens)
     }
 
     static func forceLogitsHead(for request: AppGenerationRequest) -> Bool {
@@ -531,6 +650,8 @@ actor RealInferenceSession {
         visionRuntimeError = nil
         model = nil
         runner = nil
+        promptRenderer = nil
+        loadedFamily = nil
         scratch = nil
         tokenizer = nil
         tokenizerDirectoryCache.clear()
@@ -542,22 +663,29 @@ actor RealInferenceSession {
     /// path sits beside it rather than inside it.
     private func runOneShot(
         request: AppGenerationRequest,
-        runner: RealForwardRunner,
-        tokenizer: GFTokenizer,
+        runner: any LanguageModelRunner,
+        tokenizer: any ChatTokenizer & Sendable,
+        renderer: any ConversationPromptRenderer,
         ctx: MetalContext,
         scratch: RawCompletionScratch,
         prefillConfig: PrefillRuntimeConfig,
         progress: ProgressState,
         memorySampler: AppMemorySampler,
-        report: @escaping @Sendable (RawDecodeProgress) -> Void
+        report: @escaping @Sendable (RawDecodeProgress) -> Void,
+        onThinking: @escaping @Sendable (Bool) -> Void
     ) async throws -> TurnOutcome {
+            // D12 (S25 step 4): refuse images for every non-Gemma family
+            // before hashing a byte or touching the model.
+            guard request.imageAttachments.isEmpty || loadedFamily == .gemma4 else {
+                throw AppInferenceError.invalidRequest(
+                    "Image support is unavailable: this model family does not accept images.")
+            }
             let promptIds: [Int32]
             let multimodalInput: MultimodalPrefillInput?
             if request.imageAttachments.isEmpty {
-                let renderedPrompt = try tokenizer.applyChatTemplate([
-                    GFTokenizer.Message(role: .user, content: request.prompt)
-                ])
-                promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
+                // Same template and `addBOS: false` as before, now through the
+                // family renderer so a Qwen one-shot renders Qwen turns.
+                promptIds = try renderer.firstTurnTokens(text: request.prompt)
                 multimodalInput = nil
             } else {
                 guard let visionRuntime, let model else {
@@ -588,10 +716,16 @@ actor RealInferenceSession {
                     MultimodalContentPart.image(id: $0.id)
                 }
                 if !request.prompt.isEmpty { content.append(.text(request.prompt)) }
+                // Reachable only for Gemma (the guard above refuses the rest),
+                // but fail closed on the downcast rather than assume.
+                guard let gemmaTokenizer = tokenizer as? GFTokenizer else {
+                    throw AppInferenceError.invalidRequest(
+                        "Image support is unavailable: the loaded tokenizer is not a Gemma tokenizer.")
+                }
                 let input = try MultimodalPromptRenderer.render(
                     messages: [MultimodalMessage(role: .user, content: content)],
                     featuresByID: features,
-                    tokenizer: tokenizer)
+                    tokenizer: gemmaTokenizer)
                 promptIds = input.effectiveTokenIDs
                 multimodalInput = input
             }
@@ -613,13 +747,62 @@ actor RealInferenceSession {
             progress.prefillStart = Date()
 
 
+        // D11 (S25 step 5): the first turn of a chat can arrive here (the gate
+        // admits a turn-less one as a one-shot), so the single-prompt path is
+        // also app content: a Qwen thinking frame must not reach `report`
+        // here either. The wrap mirrors the conversation's loop, and for a
+        // family that does not filter — Gemma — it is a pass-through, the
+        // call below exactly as it was.
+        let thinkingStream = ConversationThinkingStream(renderer: renderer,
+                                                        onThinking: onThinking)
+        defer { thinkingStream.closeTurn() }
+        var decodingFailure: Error?
+        let stopFlag = stopFlagReader()
         let result = try await runRawCompletion(
             producer: runner, tokenizer: tokenizer, promptIds: promptIds,
             multimodalInput: multimodalInput,
             config: config, context: ctx, scratch: scratch,
             prefillConfig: prefillConfig,
-            shouldStop: stopFlagReader(),
-            onProgress: report)
+            reasoningBudget: Self.reasoningBudget(for: request, tokenizer: tokenizer),
+            shouldStop: {
+                // A poisoned decoder is poisoned for good: stop like the CLI's
+                // Qwen path does, and let the recorded error fail the turn.
+                if decodingFailure != nil { return true }
+                return stopFlag()
+            }) { progress in
+                guard thinkingStream.isFiltering else {
+                    report(progress)
+                    return
+                }
+                switch progress {
+                case .prefill:
+                    report(progress)
+                case .token(let index, let id, let delta):
+                    guard decodingFailure == nil else { break }
+                    do {
+                        let visible = try thinkingStream.consume(delta)
+                        if !visible.isEmpty {
+                            report(.token(index: index, id: id, delta: visible))
+                        }
+                    } catch { decodingFailure = error }
+                case .tail(let tail):
+                    guard decodingFailure == nil else { break }
+                    do {
+                        let visible = try thinkingStream.consume(tail)
+                        if !visible.isEmpty {
+                            report(.tail(visible))
+                        }
+                    } catch { decodingFailure = error }
+                }
+            }
+        // The decoder's finish flush, same order as the conversation's: the
+        // run is over, held text surfaces, an unclosed block throws — and a
+        // one-shot holds no lineage, so the error simply fails the turn.
+        do {
+            let flushed = try thinkingStream.finish()
+            if !flushed.isEmpty { report(.tail(flushed)) }
+        } catch { decodingFailure = decodingFailure ?? error }
+        if let decodingFailure { throw decodingFailure }
         return TurnOutcome(
             reason: result.reason, prefillSeconds: result.prefillSeconds,
             decodeSeconds: result.decodeSeconds, newTokens: result.newTokens,
@@ -654,7 +837,7 @@ actor RealInferenceSession {
         _ request: AppGenerationRequest
     ) throws -> MultimodalConversation {
         if let conversation { return conversation }
-        guard let model, let ctx, let tokenizer, let runner, let scratch else {
+        guard let model, let ctx, let tokenizer, let promptRenderer, let runner, let scratch else {
             throw AppInferenceError.modelLoadFailed("session lost its loaded state")
         }
         // A conversation starts from an empty KV. The runner may be carrying a
@@ -672,7 +855,8 @@ actor RealInferenceSession {
         nonisolated(unsafe) let sharedModel = model
         nonisolated(unsafe) let sharedVision = visionRuntime
         let created = MultimodalConversation(
-            model: sharedModel, context: ctx, tokenizer: tokenizer, runner: runner,
+            model: sharedModel, context: ctx, renderer: promptRenderer,
+            tokenizer: tokenizer, runner: runner,
             scratch: scratch, visionRuntime: sharedVision,
             visionRuntimeError: visionRuntimeError,
             visionResidency: request.runtimeOptions.visionResidencyPolicy,
@@ -684,11 +868,25 @@ actor RealInferenceSession {
     private func runConversationTurn(
         request: AppGenerationRequest,
         prefillConfig: PrefillRuntimeConfig,
+        renderer: any ConversationPromptRenderer,
         progress: ProgressState,
         memorySampler: AppMemorySampler,
-        report: @escaping @Sendable (RawDecodeProgress) -> Void
+        report: @escaping @Sendable (RawDecodeProgress) -> Void,
+        onThinking: @escaping @Sendable (Bool) -> Void
     ) async throws -> TurnOutcome {
+        // D12 (S25 step 4): image turns are refused for every non-Gemma family
+        // before the conversation is built and before the attachments are even
+        // hashed — before any work at all.
+        guard request.imageAttachments.isEmpty || loadedFamily == .gemma4 else {
+            throw AppInferenceError.invalidRequest(
+                "Image support is unavailable: this model family does not accept images.")
+        }
         let conversation = try conversationForTurn(request)
+        // The conversation may predate this request's thinking switch, and a
+        // fresh one was built from the session's default renderer. Hand it the
+        // turn's renderer before anything encodes: the renderer is consulted
+        // only at turn encoding, never under a live decode (S25 step 5).
+        await conversation.setPromptRenderer(renderer)
         var parts: [MultimodalContinuationPart] = []
         var imageURLs: [URL] = []
         for attachment in request.imageAttachments {
@@ -719,8 +917,11 @@ actor RealInferenceSession {
                 config: Self.generationConfig(
                     for: request, maxNewTokens: request.maxNewTokens),
                 prefillConfig: prefillConfig,
+                reasoningBudget: Self.reasoningBudget(for: request,
+                                                      tokenizer: tokenizer),
                 checkCancellation: { try Task.checkCancellation() },
                 shouldStop: stopFlagReader(),
+                onThinking: onThinking,
                 onProgress: report)
             progress.promptTokenCount = turn.promptTokens
             // The conversation's own count. `promptTokens + completionTokens`
@@ -791,8 +992,22 @@ actor RealInferenceSession {
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
-            guard let runner, let tokenizer, let ctx, let scratch else {
+            guard let runner, let tokenizer, let promptRenderer, let ctx, let scratch,
+                  let family = loadedFamily else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
+            }
+            // D11 (S25 step 5): the thinking switch rides the request. The
+            // session's renderer is the family default (on), so only an
+            // explicit `false` forces a rebuild — and rebuild it is, because
+            // the frame decision and the assistant decoder's start state both
+            // live on the renderer.
+            let turnRenderer: any ConversationPromptRenderer
+            if request.enableThinking == false {
+                turnRenderer = try Self.promptRenderer(family: family,
+                                                       tokenizer: tokenizer,
+                                                       enableThinking: false)
+            } else {
+                turnRenderer = promptRenderer
             }
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
@@ -807,7 +1022,11 @@ actor RealInferenceSession {
                         // From here there are token boundaries to stop at.
                         self.decodeBegan.withLock { $0 = true }
                         progress.decodeStart = Date()
-                        progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
+                        // Gemma-only counter buckets: a Qwen runner has no
+                        // equivalent, so the snapshot stays nil and the HUD
+                        // omits the per-token rows.
+                        progress.countersAtDecodeStart = (runner as? RealForwardRunner)
+                            .map { RunnerCounterSnapshot($0) }
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
                 case .token(let index, _, let delta):
@@ -826,18 +1045,27 @@ actor RealInferenceSession {
                 }
             }
 
+            // D11 (S25 step 5): the block's open/closed state goes to the app
+            // as its own event; the conversation reports it only on the
+            // transitions, and closes the block during its own unwind, so the
+            // state can never outlive the run.
+            let reportThinking: @Sendable (Bool) -> Void = { active in
+                continuation.yield(.thinking(active: active))
+            }
             let outcome: TurnOutcome
             if request.continuesConversation {
                 outcome = try await runConversationTurn(
                     request: request, prefillConfig: prefillConfig,
+                    renderer: turnRenderer,
                     progress: progress, memorySampler: memorySampler,
-                    report: report)
+                    report: report, onThinking: reportThinking)
             } else {
                 outcome = try await runOneShot(
                     request: request, runner: runner, tokenizer: tokenizer,
+                    renderer: turnRenderer,
                     ctx: ctx, scratch: scratch, prefillConfig: prefillConfig,
                     progress: progress, memorySampler: memorySampler,
-                    report: report)
+                    report: report, onThinking: reportThinking)
             }
             let result = outcome
 
@@ -956,7 +1184,10 @@ actor RealInferenceSession {
     /// The forward count is `generated - 1`: each loop iteration that continues
     /// ends with one `produce`; the final sampled token never runs a forward.
     private func runnerDiagnostics(progress: ProgressState, generated: Int) -> AppRunnerDiagnostics? {
-        guard let runner, let base = progress.countersAtDecodeStart, generated > 1 else { return nil }
+        // Only Gemma's runner publishes counter buckets; for Qwen the cast
+        // fails and the diagnostics omit them, as the nil snapshot already does.
+        guard let runner = runner as? RealForwardRunner,
+              let base = progress.countersAtDecodeStart, generated > 1 else { return nil }
         let now = RunnerCounterSnapshot(runner)
         let forwards = Double(generated - 1)
         func ms(_ end: UInt64, _ start: UInt64) -> Double {

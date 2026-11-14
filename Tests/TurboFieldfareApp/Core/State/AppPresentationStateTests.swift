@@ -111,6 +111,25 @@ import Testing
         }
     }
 
+    /// D11 (S25): the HUD names the thinking phase while the frame is open
+    /// instead of pretending text is arriving. Families without a frame never
+    /// report one, so Gemma's snapshots keep answering "Generating".
+    @Test func decodePhaseNamesTheThinkingFrameWhileItIsOpen() {
+        let ready = AppModelLoadState.ready(
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.gturbo"), loadSeconds: 1)
+        var snapshot = Self.installedSnapshot(loadState: ready)
+        snapshot.isRunning = true
+        snapshot.generationPhase = .decode
+        #expect(AppPresentationState.resolve(snapshot).label == "Generating")
+
+        snapshot.isThinking = true
+        #expect(AppPresentationState.resolve(snapshot).label == "Thinking…")
+
+        // A stop request is still named first, frame or not.
+        snapshot.isGenerationCancellationPending = true
+        #expect(AppPresentationState.resolve(snapshot).label == "Stopping")
+    }
+
     @Test func prefillProgressUsesCompactFractionLabel() {
         let ready = AppModelLoadState.ready(
             modelDirectory: URL(fileURLWithPath: "/tmp/model.gturbo"),

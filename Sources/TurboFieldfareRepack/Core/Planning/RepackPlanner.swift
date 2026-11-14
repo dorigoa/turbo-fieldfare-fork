@@ -95,6 +95,12 @@ struct RepackPlan: Sendable {
     /// 1 keeps the historical tightly packed layout (every affine4 install);
     /// an all-8-bit source gets `RepackPlanner.affine8ResidentWeightAlignment`.
     var residentQuantizedWeightAlignment: UInt64 = 1
+    /// `GTurboModelFamily` raw value written to `manifest.json -> modelFamily`
+    /// (D1). `nil` keeps the Gemma manifest byte-identical.
+    var modelFamily: String? = nil
+    /// Qwen hybrid block (C4) written to `manifest.json -> qwen35`;
+    /// `nil` for Gemma 4.
+    var qwen35: GTurboManifestQwen35V1? = nil
 }
 
 // MARK: - Planner
@@ -202,13 +208,20 @@ enum RepackPlanner {
         case unknown
     }
 
-    static func classify(_ name: String, numLayers: Int) -> Bucket {
+    static func classify(_ name: String, numLayers: Int, qwen: Bool = false) -> Bucket {
         if name.hasPrefix("language_model.") {
             // Routed expert?
-            if let role = routedExpertRole(in: name),
+            let role = qwen ? qwenRoutedExpertRole(in: name) : routedExpertRole(in: name)
+            if let role,
                let layer = layerIndex(in: name),
                layer >= 0 && layer < numLayers {
                 return .routedExpert(role: role, layer: layer)
+            }
+            if qwen {
+                // The Qwen source is allowlisted by name: anything outside
+                // 3.3 fails the plan instead of landing in the resident file.
+                return isQwenResidentTensorName(name, numLayers: numLayers)
+                    ? .lmResident : .unknown
             }
             return .lmResident
         }
@@ -224,6 +237,72 @@ enum RepackPlanner {
         if name.contains(".up_proj.")   { return "up" }
         if name.contains(".down_proj.") { return "down" }
         return nil
+    }
+
+    /// Qwen routed experts (3.3): `.mlp.switch_mlp.{gate,up,down}_proj.`.
+    /// The router `mlp.gate` and `mlp.shared_expert*` never carry the
+    /// `.switch_mlp.` marker, so they stay resident.
+    private static func qwenRoutedExpertRole(in name: String) -> String? {
+        guard name.contains(".mlp.switch_mlp.") else { return nil }
+        if name.contains(".gate_proj.") { return "gate" }
+        if name.contains(".up_proj.")   { return "up" }
+        if name.contains(".down_proj.") { return "down" }
+        return nil
+    }
+
+    /// Exact-name allowlist for Qwen resident tensors (3.3). Layer tensors
+    /// must sit under `model.layers.<N>.` with N inside the model.
+    static let qwenResidentCompanionComponents = ["weight", "scales", "biases"]
+
+    static let qwenTopLevelResidentNames: Set<String> = {
+        var names: Set<String> = ["language_model.model.norm.weight"]
+        for component in qwenResidentCompanionComponents {
+            names.insert("language_model.model.embed_tokens.\(component)")
+            names.insert("language_model.lm_head.\(component)")
+        }
+        return names
+    }()
+
+    /// Suffixes after `language_model.model.layers.<N>.`, union over linear
+    /// and full-attention layers. A full checkpoint holds exactly one of the
+    /// `linear_attn`/`self_attn` groups per layer; the planner does not
+    /// re-check the layer type, the manifest mask records it.
+    static let qwenLayerResidentSuffixes: Set<String> = {
+        var suffixes: Set<String> = [
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "linear_attn.conv1d.weight",
+            "linear_attn.A_log",
+            "linear_attn.dt_bias",
+            "linear_attn.norm.weight",
+            "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+        ]
+        for component in qwenResidentCompanionComponents {
+            for projection in ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"] {
+                suffixes.insert("linear_attn.\(projection).\(component)")
+            }
+            for projection in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                suffixes.insert("self_attn.\(projection).\(component)")
+            }
+            suffixes.insert("mlp.gate.\(component)")
+            suffixes.insert("mlp.shared_expert_gate.\(component)")
+            for projection in ["gate_proj", "up_proj", "down_proj"] {
+                suffixes.insert("mlp.shared_expert.\(projection).\(component)")
+            }
+        }
+        return suffixes
+    }()
+
+    private static func isQwenResidentTensorName(_ name: String, numLayers: Int) -> Bool {
+        if qwenTopLevelResidentNames.contains(name) { return true }
+        let layersPrefix = "language_model.model.layers."
+        guard name.hasPrefix(layersPrefix) else { return false }
+        let tail = name.dropFirst(layersPrefix.count)
+        guard let dot = tail.firstIndex(of: ".") else { return false }
+        guard let layer = Int(tail[tail.startIndex..<dot]),
+              layer >= 0, layer < numLayers else { return false }
+        return qwenLayerResidentSuffixes.contains(String(tail[tail.index(after: dot)...]))
     }
 
     private static func layerIndex(in name: String) -> Int? {
@@ -252,6 +331,7 @@ enum RepackPlanner {
         // Source allowlisting owns exact fingerprint validation. Preserve the
         // declared override count for the output manifest audit.
         let bitsOverrideCount = meta.bitsOverrides.count
+        let isQwen = arch.modelFamily != nil
 
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
@@ -261,7 +341,7 @@ enum RepackPlanner {
                 excludedMultimodalNames.append(name)
             }
             if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
-            let b = classify(name, numLayers: arch.numLayers)
+            let b = classify(name, numLayers: arch.numLayers, qwen: isQwen)
             switch b {
             case .lmResident:                   lmResidentBases.append(name)
             case .routedExpert(let role, let layer):
@@ -283,7 +363,8 @@ enum RepackPlanner {
 
         let weightAlignment = residentQuantizedWeightAlignment(registry: registry,
                                                                meta: meta,
-                                                               numLayers: arch.numLayers)
+                                                               numLayers: arch.numLayers,
+                                                               qwen: isQwen)
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
@@ -326,7 +407,9 @@ enum RepackPlanner {
                           layers: layerPlans,
                           matchedModelID: matched,
                           excludedMultimodalTensorNames: excludedMultimodalNames,
-                          residentQuantizedWeightAlignment: weightAlignment)
+                          residentQuantizedWeightAlignment: weightAlignment,
+                          modelFamily: arch.modelFamily,
+                          qwen35: arch.qwen35)
     }
 
     /// Resident alignment for quantized weights in an all-8-bit (`affine8`)
@@ -341,11 +424,12 @@ enum RepackPlanner {
     /// existing installs already use, byte for byte.
     static func residentQuantizedWeightAlignment(registry: [String: SourceTensor],
                                                  meta: IndexLoader.SourceMetadata,
-                                                 numLayers: Int) -> UInt64 {
+                                                 numLayers: Int,
+                                                 qwen: Bool = false) -> UInt64 {
         var sawQuantizedWeight = false
         for (name, tensor) in registry
         where tensor.dtype == .u32 && name.hasSuffix(".weight") {
-            switch classify(name, numLayers: numLayers) {
+            switch classify(name, numLayers: numLayers, qwen: qwen) {
             case .lmResident, .routedExpert:
                 sawQuantizedWeight = true
                 if IndexLoader.quantSpec(forTensor: name, meta: meta).bits != 8 {
@@ -619,6 +703,22 @@ enum RepackPlanner {
         if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 17 }
         if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
         if n.hasSuffix(".layer_scalar")           { return 19 }
+        // Qwen layer slots (3.3): DeltaNet projections first, then the gated
+        // attention block, the router, and the shared expert.
+        if n.contains(".linear_attn.in_proj_qkv.weight")    { return 20 }
+        if n.contains(".linear_attn.in_proj_z.weight")      { return 21 }
+        if n.contains(".linear_attn.in_proj_a.weight")      { return 22 }
+        if n.contains(".linear_attn.in_proj_b.weight")      { return 23 }
+        if n.contains(".linear_attn.out_proj.weight")       { return 24 }
+        if n.contains(".linear_attn.conv1d.weight")         { return 25 }
+        if n.contains(".linear_attn.A_log")                 { return 26 }
+        if n.contains(".linear_attn.dt_bias")               { return 27 }
+        if n.contains(".linear_attn.norm.weight")           { return 28 }
+        if n.contains(".mlp.gate.weight")                   { return 30 }
+        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 31 }
+        if n.contains(".mlp.shared_expert.up_proj.weight")  { return 32 }
+        if n.contains(".mlp.shared_expert.down_proj.weight") { return 33 }
+        if n.contains(".mlp.shared_expert_gate.weight")     { return 34 }
         return 100
     }
 }

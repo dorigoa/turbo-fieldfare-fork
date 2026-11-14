@@ -39,6 +39,11 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
     /// it an installed 8-bit model on an 8 GB Mac resolved to "Installed · Not
     /// loaded" with a Load button that the model then refused.
     public var memoryRefusal: String?
+    /// Whether the running reply is reasoning inside its thinking frame
+    /// (D11, S25 step 6): the HUD says "Thinking…" instead of "Generating"
+    /// while it is open. Families without a thinking frame never report one,
+    /// so this is false for Gemma and while no run is in flight.
+    public var isThinking: Bool
 
     public init(requiresInstallation: Bool,
                 installState: AppModelInstallState,
@@ -52,7 +57,8 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
                 livePrefillTotal: Int = 0,
                 lastStopReason: AppStopReason? = nil,
                 isVisionFilesystemMutationInProgress: Bool = false,
-                memoryRefusal: String? = nil) {
+                memoryRefusal: String? = nil,
+                isThinking: Bool = false) {
         self.requiresInstallation = requiresInstallation
         self.installState = installState
         self.installReadiness = installReadiness
@@ -66,6 +72,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
         self.lastStopReason = lastStopReason
         self.isVisionFilesystemMutationInProgress = isVisionFilesystemMutationInProgress
         self.memoryRefusal = memoryRefusal
+        self.isThinking = isThinking
     }
 }
 
@@ -180,7 +187,11 @@ public struct AppPresentationState: Equatable, Sendable {
                     : "Prefill"
                 return Self(label: label, severity: .active)
             case .decode:
-                return Self(label: "Generating", severity: .active)
+                // D11 (S25 step 6): a thinking frame is part of the answer's
+                // making but never part of the answer, so the HUD names the
+                // phase rather than pretending text is arriving.
+                return Self(label: snapshot.isThinking ? "Thinking…" : "Generating",
+                            severity: .active)
             case .idle:
                 return Self(label: "Starting generation", severity: .active,
                             showsActivity: true)

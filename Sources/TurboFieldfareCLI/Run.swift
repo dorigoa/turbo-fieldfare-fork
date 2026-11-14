@@ -54,6 +54,16 @@ public func run(args: Args,
 
         let modelURL = URL(fileURLWithPath: args.model)
         let input = try parseInput(args: args)
+        // The family is read from the installed manifest, never a flag: it
+        // picks the runner, the tokenizer, and the footer the run reports
+        // (S22, D3). Qwen takes its own branch from here.
+        let variant = try CLIModelVariant.read(modelDirectory: modelURL)
+        if variant.family == .qwen35Moe {
+            return await runQwenFamily(args: args, input: input,
+                                       modelURL: modelURL,
+                                       stdout: stdout, stderr: stderr,
+                                       variant: variant)
+        }
         var selectedDevice: MTLDevice?
         if input.hasImages {
             guard let device = MetalContext.makeSystemDefaultDevice() else {
@@ -62,7 +72,14 @@ public func run(args: Args,
             try VisionRuntime.requireSupportedDevice(device)
             selectedDevice = device
         }
-        let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
+        let chatTokenizer = try await LanguageModelRunnerFactory.loadTokenizer(
+            family: variant.family, forModelDirectory: modelURL)
+        guard let tokenizer = chatTokenizer as? GFTokenizer else {
+            // The factory returned the tokenizer for the family the manifest
+            // named, and this branch only runs for `.gemma4`, so this cannot
+            // happen; refuse closed instead of forcing a cast.
+            return errored(stderr, "tokenizer does not match the model family", 1)
+        }
         var promptIds: [Int32]
         var multimodalMessages: [MultimodalMessage]?
         var imageURLs: [UUID: URL] = [:]
@@ -130,7 +147,7 @@ public func run(args: Args,
         // Not gated on --quiet, which suppresses the timing footer, not a
         // warning that the run may swap or be killed. The cost depends on the
         // variant, which only the installed manifest records.
-        let manifestVariant = try CLIModelVariant.read(modelDirectory: modelURL)
+        let manifestVariant = variant
         if let warning = manifestVariant.memoryWarning(
             maxContext: args.maxContext,
             hostMemoryBytes: ContextAdmission.hostMemoryBytes,
@@ -194,7 +211,7 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(
+        let runner = try LanguageModelRunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
@@ -467,7 +484,7 @@ func validatePromptSize(
     return nil
 }
 
-private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
+func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
     stderr.write(Data("error: \(message)\n".utf8))
     return RunResult(exitCode: code)
 }

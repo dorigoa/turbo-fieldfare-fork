@@ -195,6 +195,12 @@ enum MultimodalConversationKVRecovery {
         do {
             try rewind(positionBefore)
         } catch {
+            // D6: DeltaNet state cannot rewind anywhere but a snapshot, and a
+            // runner that refuses says so with `rewindUnsupported`. That is
+            // not a failed recovery — it is the signal for the caller to
+            // rebuild the KV from the recorded tokens instead of condemning
+            // the lineage. Any other failure stays wrapped as today.
+            if case QwenRewindError.rewindUnsupported = error { throw error }
             throw MultimodalConversationError.lineageRecoveryFailed(
                 reason: "The turn failed with \(generationError). Rewinding to "
                     + "token \(positionBefore) then failed with \(error).")
@@ -219,6 +225,9 @@ enum MultimodalConversationKVRecovery {
             do {
                 try rewind(target)
             } catch {
+                // `rewindUnsupported` propagates un-wrapped for the D6 replay
+                // fallback, as in `restoreAfterFailure`.
+                if case QwenRewindError.rewindUnsupported = error { throw error }
                 throw MultimodalConversationError.lineageRecoveryFailed(
                     reason: "Removing stop-string tokens required rewinding to "
                         + "token \(target), which failed with \(error).")
@@ -282,8 +291,21 @@ public struct MultimodalTurnResult: Sendable {
 public actor MultimodalConversation {
     private let model: Model
     private let context: MetalContext
-    private let tokenizer: GFTokenizer
-    private let runner: RealForwardRunner
+    /// The family-specific prompt surface (S25 step 2). Text turns reach the
+    /// tokenizer only through it, so both families share this actor. Mutable
+    /// because the session can rebuild it between turns when the request's
+    /// `enableThinking` changes (S25 step 5); it is read only when a turn is
+    /// encoded, never under a live decode.
+    private var renderer: any ConversationPromptRenderer
+    /// Kept for the vision path (`encodeMultimodalUserContinuation`, a
+    /// `GFTokenizer` member, is reached through a guarded downcast) and for
+    /// the family-agnostic `runRawCompletion`. The `Sendable` conjunct is the
+    /// one both tokenizers already have; `ChatTokenizer` itself does not
+    /// refine it (D13), so the existential would not cross the actor edge.
+    private let tokenizer: any ChatTokenizer & Sendable
+    /// `ContinuableLogitProducer` + `maxContext` + `rewind(to:)` (D3): what
+    /// the turn loop and the KV recovery helpers actually use.
+    private let runner: any LanguageModelRunner
     private let scratch: RawCompletionScratch
     private let visionRuntime: VisionRuntime?
     private let visionRuntimeError: Error?
@@ -313,6 +335,9 @@ public actor MultimodalConversation {
     private var uncommittedBoundary: [Int32] = []
     private var boundaryNeedsReplay = false
 
+    /// Gemma entry point. Unchanged signature and behavior: it adopts the
+    /// prompt surface with the Gemma renderer and forwards to the general
+    /// initializer (S25 step 2).
     public init(model: Model,
                 context: MetalContext,
                 tokenizer: GFTokenizer,
@@ -322,8 +347,37 @@ public actor MultimodalConversation {
                 visionRuntimeError: Error? = nil,
                 visionResidency: VisionResidencyPolicy = .defaultPolicy,
                 maxContext: Int) {
+        self.init(model: model,
+                  context: context,
+                  renderer: GemmaConversationPromptRenderer(tokenizer: tokenizer),
+                  tokenizer: tokenizer,
+                  runner: runner,
+                  scratch: scratch,
+                  visionRuntime: visionRuntime,
+                  visionRuntimeError: visionRuntimeError,
+                  visionResidency: visionResidency,
+                  maxContext: maxContext)
+    }
+
+    /// Family-general entry point (S25 step 2). The prompt surface comes in
+    /// as a `ConversationPromptRenderer`, so Qwen conversations render turns
+    /// with `enableThinking` while this actor stays family-agnostic. Vision
+    /// stays Gemma-only: an image turn additionally needs the tokenizer to be
+    /// a `GFTokenizer` and the runner to be a `MultimodalPrefillRunner`, and
+    /// fails closed (D12) before any model work when either is not.
+    public init(model: Model,
+                context: MetalContext,
+                renderer: any ConversationPromptRenderer,
+                tokenizer: any ChatTokenizer & Sendable,
+                runner: any LanguageModelRunner,
+                scratch: RawCompletionScratch,
+                visionRuntime: VisionRuntime? = nil,
+                visionRuntimeError: Error? = nil,
+                visionResidency: VisionResidencyPolicy = .defaultPolicy,
+                maxContext: Int) {
         self.model = model
         self.context = context
+        self.renderer = renderer
         self.tokenizer = tokenizer
         self.runner = runner
         self.scratch = scratch
@@ -337,6 +391,15 @@ public actor MultimodalConversation {
     public var hasStagedTurn: Bool { pending != nil }
     public var isClosed: Bool { closed }
     public var isUsable: Bool { !closed && !lineageBroken }
+
+    /// Swaps the prompt surface (S25 step 5). The request-level `enableThinking`
+    /// switch lives on the renderer, so a turn generated after the switch
+    /// changes has to see a rebuilt one; the session owns the renderer and
+    /// hands it over here. The renderer is consulted only when a turn is
+    /// encoded, so this takes effect on the next turn — never mid-decode.
+    public func setPromptRenderer(_ renderer: any ConversationPromptRenderer) {
+        self.renderer = renderer
+    }
 
     /// Marks this conversation unusable without touching the shared runner or
     /// vision runtime. The session calls it when handing out a replacement, so a
@@ -454,14 +517,18 @@ public actor MultimodalConversation {
         images: [URL] = [],
         config: GenerationConfig,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        reasoningBudget: ReasoningBudget? = nil,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
+        onThinking: (@Sendable (Bool) -> Void)? = nil,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil
     ) async throws -> MultimodalTurnResult {
         try append(parts: parts, images: images)
         return try await generate(
             config: config, prefillConfig: prefillConfig,
+            reasoningBudget: reasoningBudget,
             checkCancellation: checkCancellation, shouldStop: shouldStop,
+            onThinking: onThinking,
             onProgress: onProgress)
     }
 
@@ -477,11 +544,22 @@ public actor MultimodalConversation {
     /// a different thing from cancelling the task, which throws out of the
     /// decode loop and makes this rewind the whole turn. A Stop button wants
     /// the first; a teardown wants the second.
+    /// `onThinking` reports the D11 thinking-block state of families that have
+    /// one: `true` when the model starts reasoning, `false` when visible
+    /// content closes the block or the turn ends. Text turns never carry a
+    /// think block's text through `text` or `onProgress` (D11); Gemma never
+    /// calls the callback at all.
+    /// `reasoningBudget` caps the tokens the turn may spend inside its
+    /// thinking block, forcing the block closed when it runs out (D11). nil is
+    /// the unbounded turn every caller had before the cap, and the only thing
+    /// Gemma ever passes.
     public func generate(
         config: GenerationConfig,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        reasoningBudget: ReasoningBudget? = nil,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
+        onThinking: (@Sendable (Bool) -> Void)? = nil,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil
     ) async throws -> MultimodalTurnResult {
         guard !closed else { throw MultimodalConversationError.closed }
@@ -497,9 +575,16 @@ public actor MultimodalConversation {
         let imageCount = parts.filter {
             if case .image = $0 { return true } else { return false }
         }.count
-        if imageCount > 0, visionRuntime == nil {
-            throw MultimodalConversationError.imageUnavailable(
-                reason: visionRuntimeError.map(String.init(describing:)))
+        if imageCount > 0 {
+            // D12 fail-closed before any model work: images additionally need
+            // a runner that can prefill image spans at all, so a Qwen turn
+            // carrying an image is refused here, not by an encode failure.
+            guard visionRuntime != nil, runner is any MultimodalPrefillRunner else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntime == nil
+                        ? visionRuntimeError.map(String.init(describing:))
+                        : "image input is not available for this model")
+            }
         }
 
         let cached = kvTokenIDs.count
@@ -530,6 +615,17 @@ public actor MultimodalConversation {
         var generation = config
         generation.maxNewTokens = min(config.maxNewTokens, maxContext - promptIDs.count)
         var text = ""
+        // D11 (S25 step 5): the turn's text pipeline. With Qwen it splits the
+        // think frame before anything reaches `text` or the forwarded
+        // progress, and reports the thinking block's state; with Gemma it
+        // passes every fragment through untouched, so the loop below stays
+        // byte-identical to before. `closeTurn` in the defer guarantees a
+        // block the run never closed — stopped, failed, or cut off — still
+        // ends before the caller sees the terminal event.
+        let thinkingStream = ConversationThinkingStream(renderer: renderer,
+                                                        onThinking: onThinking)
+        var decodingFailure: Error?
+        defer { thinkingStream.closeTurn() }
         // Marked only once the run has actually written to the KV. Setting it
         // before the attempt condemned the conversation for failures that never
         // touched the cache — a cancellation caught by the first
@@ -555,25 +651,56 @@ public actor MultimodalConversation {
             scratch: scratch,
             prefillConfig: effectivePrefill,
             start: cached == 0 ? .reset : .resume(cachedPromptTokens: cached),
+            reasoningBudget: reasoningBudget,
                 // Cancellation mid-decode ends the turn at a token boundary
                 // and returns the partial result; throwing here instead would
                 // condemn the lineage for a KV that is perfectly resumable.
                 shouldStop: {
+                    // A malformed assistant block stops the run the same way
+                    // the CLI's Qwen path stops at one (S22): the decoder is
+                    // poisoned, so streaming further would only repeat it.
+                    if decodingFailure != nil { return true }
                     if shouldStop?() == true { return true }
                     do { try checkCancellation(); return false } catch { return true }
                 }) { progress in
-                    onProgress?(progress)
+                    guard thinkingStream.isFiltering else {
+                        onProgress?(progress)
+                        switch progress {
+                        case .token(_, _, let delta):
+                            text += delta
+                        case .tail(let tail):
+                            // The detokenizer flush at the stop boundary. Dropping
+                            // it returned turn text missing its final characters
+                            // while the KV kept those very tokens.
+                            text += tail
+                        case .prefill:
+                            // The first progress report is the proof the KV moved.
+                            kvAdvanced = true
+                        }
+                        return
+                    }
                     switch progress {
-                    case .token(_, _, let delta):
-                        text += delta
-                    case .tail(let tail):
-                        // The detokenizer flush at the stop boundary. Dropping
-                        // it returned turn text missing its final characters
-                        // while the KV kept those very tokens.
-                        text += tail
                     case .prefill:
-                        // The first progress report is the proof the KV moved.
                         kvAdvanced = true
+                        onProgress?(progress)
+                    case .token(let index, let id, let delta):
+                        guard decodingFailure == nil else { break }
+                        do {
+                            let visible = try thinkingStream.consume(delta)
+                            if !visible.isEmpty {
+                                text += visible
+                                onProgress?(.token(index: index, id: id, delta: visible))
+                            }
+                        } catch { decodingFailure = error }
+                    case .tail(let tail):
+                        guard decodingFailure == nil else { break }
+                        do {
+                            let visible = try thinkingStream.consume(tail)
+                            if !visible.isEmpty {
+                                text += visible
+                                onProgress?(.tail(visible))
+                            }
+                        } catch { decodingFailure = error }
                     }
                 }
         } catch let generationError {
@@ -592,6 +719,20 @@ public actor MultimodalConversation {
                         generationError: generationError,
                         rewind: runner.rewind(to:),
                         reset: runner.reset)
+                } catch is QwenRewindError {
+                    // D6: the runner refused to rewind (Qwen's DeltaNet state
+                    // only survives at a snapshot). Rebuild the KV from the
+                    // recorded lineage — the same reset-and-replay a stored
+                    // chat restore performs — instead of condemning it. The
+                    // staged turn stays pending, so the caller can retry it.
+                    do {
+                        try await replayRecordedKV(
+                            kvTokenIDs,
+                            prefillConfig: effectivePrefill,
+                            onProgress: onProgress)
+                    } catch {
+                        throw error  // the replay itself condemned the lineage
+                    }
                 } catch {
                     lineageBroken = true
                     throw error
@@ -616,12 +757,26 @@ public actor MultimodalConversation {
         // visible prefix before the match began stays, so at most a few
         // characters of one boundary token remain hidden.
         if result.reason == .stopString, result.withheldTrailingKVTokens > 0 {
+            let trimTarget = result.kvBackedTokenIDs.count - result.withheldTrailingKVTokens
             do {
                 kvTokenIDs = try MultimodalConversationKVRecovery.trimHiddenStopTokens(
                     result.kvBackedTokenIDs,
                     withheld: result.withheldTrailingKVTokens,
                     rewind: runner.rewind(to:),
                     reset: runner.reset)
+            } catch is QwenRewindError {
+                // D6: same fallback as the failure path above. The turn
+                // already produced its text; what the KV must keep is the
+                // trimmed prefix, so replay that from an empty cache rather
+                // than condemn a turn that completed cleanly.
+                do {
+                    try await replayRecordedKV(
+                        Array(result.kvBackedTokenIDs.prefix(trimTarget)),
+                        prefillConfig: effectivePrefill,
+                        onProgress: onProgress)
+                } catch {
+                    throw error
+                }
             } catch {
                 lineageBroken = true
                 throw error
@@ -629,6 +784,20 @@ public actor MultimodalConversation {
         }
         uncommittedBoundary = result.uncommittedBoundaryTokenIDs
         boundaryNeedsReplay = result.reason == .maxTokens || result.reason == .cancelled
+        // D11: the decoder's finish flush is the last word of the stream,
+        // after the tail fragment and in that order (the server and CLI run
+        // the same sequence): text held back by an incomplete tag surfaces
+        // now, and an unclosed block throws — like a consume failure, it
+        // fails the turn only after the KV bookkeeping above, so a completed
+        // turn never loses its place in the lineage.
+        do {
+            let flushed = try thinkingStream.finish()
+            if !flushed.isEmpty {
+                text += flushed
+                onProgress?(.tail(flushed))
+            }
+        } catch { decodingFailure = decodingFailure ?? error }
+        if let decodingFailure { throw decodingFailure }
         let generatedTokenIDs = MultimodalTurnRecord.generatedTokenIDs(
             kvTokenIDs: kvTokenIDs, promptCount: promptIDs.count)
         return MultimodalTurnResult(
@@ -650,6 +819,57 @@ public actor MultimodalConversation {
             generatedTokenIDs: generatedTokenIDs,
             uncommittedBoundaryTokenIDs: uncommittedBoundary,
             boundaryNeedsReplay: boundaryNeedsReplay)
+    }
+
+    /// D6 recovery for a `rewind` the runner refuses: rebuild the KV from the
+    /// recorded tokens the way `restore` does — from an empty cache, prefill
+    /// the bare recorded sequence — leaving the cursor exactly where
+    /// `kvTokenIDs` says it is, so the conversation keeps resuming normally.
+    ///
+    /// A replay that fails from `.reset` can always be undone by resetting,
+    /// but unlike `restore` this one destroys every recorded turn from a live
+    /// conversation, so it does condemn the lineage: the caller must start a
+    /// fresh chat rather than resume a KV that no longer exists.
+    private func replayRecordedKV(
+        _ recorded: [Int32],
+        prefillConfig: PrefillRuntimeConfig,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)?
+    ) async throws {
+        if recorded.isEmpty {
+            // Nothing to replay; resetting alone puts the cursor at zero,
+            // which is what an empty record describes.
+            runner.reset()
+        } else {
+            do {
+                _ = try await runRawPrefill(
+                    producer: runner,
+                    promptIds: recorded,
+                    multimodalInput: nil,
+                    prefillConfig: prefillConfig,
+                    // Reset first: this is a rebuild, not a continuation, and
+                    // a refused rewind means the runner's cursor cannot be
+                    // trusted. `.reset` makes `runRawPrefill` reset the
+                    // producer itself.
+                    start: .reset,
+                    // No decode follows; the seed would be discarded anyway.
+                    outputMode: .greedyIfAvailable,
+                    seedUse: .discarded,
+                    historyReserve: recorded.count,
+                    scratch: scratch,
+                    onProgress: { onProgress?($0) })
+            } catch {
+                runner.reset()
+                kvTokenIDs.removeAll(keepingCapacity: true)
+                uncommittedBoundary = []
+                boundaryNeedsReplay = false
+                lineageBroken = true
+                throw MultimodalConversationError.lineageRecoveryFailed(
+                    reason: "The KV could not be rewound, and replaying the "
+                        + "recorded \(recorded.count)-token lineage failed "
+                        + "with \(error).")
+            }
+        }
+        kvTokenIDs = recorded
     }
 
     /// Rebuilds the KV of a stored conversation by prefilling its own token IDs,
@@ -694,9 +914,15 @@ public actor MultimodalConversation {
                 reserve: ConversationGenerationReserve.tokens,
                 maxContext: maxContext)
         }
-        if !lineage.images.isEmpty, visionRuntime == nil {
-            throw MultimodalConversationError.imageUnavailable(
-                reason: visionRuntimeError.map(String.init(describing:)))
+        if !lineage.images.isEmpty {
+            // Same D12 guard as `generate`: a stored image replayed against a
+            // family that cannot prefill image spans fails before the KV moves.
+            guard visionRuntime != nil, runner is any MultimodalPrefillRunner else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntime == nil
+                        ? visionRuntimeError.map(String.init(describing:))
+                        : "image input is not available for this model")
+            }
         }
         generating = true
         defer { finishGeneration() }
@@ -804,13 +1030,21 @@ public actor MultimodalConversation {
         guard !images.isEmpty, let visionRuntime else {
             var text = ""
             for part in parts { if case .text(let value) = part { text += value } }
+            // S25 step 2: the two render calls moved into the prompt renderer;
+            // for Gemma they are the identical calls, for Qwen they carry
+            // `enableThinking`.
             let ids = kvTokenIDs.isEmpty
-                ? tokenizer.encode(
-                    try tokenizer.applyChatTemplate(
-                        [GFTokenizer.Message(role: .user, content: text)]),
-                    addBOS: false)
-                : tokenizer.encodeTextContinuation(userContent: text)
+                ? try renderer.firstTurnTokens(text: text)
+                : try renderer.continuationTokens(userText: text)
             return EncodedTurn(effectiveTokenIDs: ids, prefillInput: nil)
+        }
+
+        // The bridge below is a `GFTokenizer` member: an image turn on any
+        // other family is the D12 refusal, kept here as the second fail-closed
+        // net behind the `generate`/`restore` guards.
+        guard let gfTokenizer = tokenizer as? GFTokenizer else {
+            throw MultimodalConversationError.imageUnavailable(
+                reason: "image input is not available for this model")
         }
 
         // Token counts come from geometry, so the turn's shape is known before
@@ -825,7 +1059,7 @@ public actor MultimodalConversation {
         // user did.
         let plans = try images.map { try preprocessor.plan(fileURL: $0) }
         let counts = plans.map(\.geometry.softTokenCount)
-        let bridge = try tokenizer.encodeMultimodalUserContinuation(
+        let bridge = try gfTokenizer.encodeMultimodalUserContinuation(
             textAndImages: parts, imageTokenCounts: counts,
             // An empty KV means this is the conversation's first turn, which
             // needs the chat template's opening rather than a continuation's.

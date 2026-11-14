@@ -42,9 +42,25 @@ import TurboFieldfare
         #expect(AppModelVariant.int8.modelFootprint == .affine8Provisional)
     }
 
-    @Test func onlyTheEightBitDownloadCarriesAnInstallNote() {
+    /// S24: the two large downloads carry their caveat, derived from the
+    /// catalog so the installer, the disk check and the copy never disagree.
+    @Test func theLargeDownloadsCarryAnInstallNote() {
         #expect(AppModelVariant.int4.installNote == nil)
         #expect(AppModelVariant.int8.installNote == "~27 GB download; 16 GB memory recommended")
+        #expect(AppModelVariant.qwen36.installNote
+            == "~20 GB download; 16 GB memory recommended")
+    }
+
+    /// S24 lifted the S4 filter: the pickers list every catalog variant, so
+    /// Qwen3.6 is selectable alongside the Gemma pair. `gemma4Variants` stays
+    /// as the catalog's own view of the Gemma entries.
+    @Test func theAppOffersEveryCatalogVariant() {
+        #expect(AppModelVariant.allCases == [.int4, .int8, .qwen36])
+        #expect(AppModelVariant.gemma4Variants == [.int4, .int8])
+        #expect(AppModelVariant.int4.family == nil)
+        #expect(AppModelVariant.int8.family == nil)
+        #expect(AppModelVariant.qwen36.family != nil)
+        #expect(AppModelVariant.qwen36.quantProfile == .affine4)
     }
 }
 
@@ -107,6 +123,7 @@ import TurboFieldfare
         }
         #expect(resolve(.int4) == "/repo/scratch/gemma4.gturbo")
         #expect(resolve(.int8) == "/repo/scratch/gemma4-8bit.gturbo")
+        #expect(resolve(.qwen36) == "/repo/scratch/qwen36.gturbo")
     }
 
     @Test func aStandaloneAppKeepsEachVariantInApplicationSupport() {
@@ -118,6 +135,14 @@ import TurboFieldfare
             fileExists: { _ in false },
             variant: .int8)
         #expect(result.path == "/support/TurboFieldfare/gemma4-8bit.gturbo")
+        let qwen = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: URL(fileURLWithPath: "/Applications/TurboFieldfareMac"),
+            currentDirectoryURL: URL(fileURLWithPath: "/"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: { _ in false },
+            variant: .qwen36)
+        #expect(qwen.path == "/support/TurboFieldfare/qwen36.gturbo")
     }
 
     /// The 8-bit model goes where the 4-bit one is, under its own name, so
@@ -126,6 +151,8 @@ import TurboFieldfare
         let fourBit = URL(fileURLWithPath: "/Users/someone/LLM/TurboFieldfare/gemma4.gturbo")
         #expect(AppModelLocation.defaultURL(for: .int8, besideFourBit: fourBit).path
             == "/Users/someone/LLM/TurboFieldfare/gemma4-8bit.gturbo")
+        #expect(AppModelLocation.defaultURL(for: .qwen36, besideFourBit: fourBit).path
+            == "/Users/someone/LLM/TurboFieldfare/qwen36.gturbo")
         #expect(AppModelLocation.defaultURL(for: .int4, besideFourBit: fourBit) == fourBit)
     }
 

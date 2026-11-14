@@ -1,0 +1,34 @@
+[
+  {
+    "name": "p0",
+    "kind": "text",
+    "text": "The capital of France is"
+  },
+  {
+    "name": "p1",
+    "kind": "text",
+    "text": "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n"
+  },
+  {
+    "name": "p2",
+    "kind": "text",
+    "text": "La Divina Commedia è un poema scritto da"
+  },
+  {
+    "name": "p3",
+    "kind": "text",
+    "text": "人工智能的发展历史可以追溯到"
+  },
+  {
+    "name": "p4",
+    "kind": "chat",
+    "user": "What is 17 * 23? Answer with the number only.",
+    "enable_thinking": false
+  },
+  {
+    "name": "p5",
+    "kind": "chat",
+    "user": "Name three primary colors.",
+    "enable_thinking": true
+  }
+]

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfareFormat
 @testable import TurboFieldfareRepackCore
 
 @Suite struct SupportedModelVariantTests {
@@ -49,6 +50,59 @@ import Testing
         // Room for manifest.json and verified-install.json (about 14 KB).
         #expect(variant.installedBytes >= measured + 16_384)
         #expect(variant.installedBytes - measured < 100_000)
+    }
+
+    /// Pinned from a metadata-only dry run of the Qwen source (S6): the
+    /// parts are the figures that run printed; see the catalog comments.
+    /// The minimum host memory keeps the 8-bit Mac class figure because a
+    /// dry run measures disk sizes, not memory.
+    @Test func qwen36VariantIsPinnedWithDryRunSizes() {
+        let variant = SupportedModelVariant.qwen36
+        #expect(variant.displayName == "Qwen3.6 35B-A3B 4-bit")
+        #expect(variant.shortLabel == "Qwen3.6")
+        #expect(variant.repoID == "mlx-community/Qwen3.6-35B-A3B-4bit")
+        #expect(variant.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
+        #expect(variant.sourceIndexSHA256
+                == "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
+
+        let payloadRanges: UInt64 = 20_146_183_200
+        let sourceMetadata: UInt64 = 513_665
+        let tokenizerDownload: UInt64 = 19_998_246
+        #expect(variant.approximateDownloadBytes
+                == payloadRanges + sourceMetadata + tokenizerDownload)
+
+        let residentFile: UInt64 = 1_389_476_096
+        let expertFiles: UInt64 = 40 * 452_984_832
+        let layout: UInt64 = 22_493_846
+        let tokenizerInstalled: UInt64 = 20_021_837
+        let measured = residentFile + expertFiles + layout + tokenizerInstalled
+        #expect(variant.installedBytes == 19_551_400_000)
+        // The gap covers manifest.json and verified-install.json (a few KB).
+        #expect(variant.installedBytes > measured)
+        #expect(variant.installedBytes - measured < 100_000)
+        #expect(variant.defaultDirectoryName == "qwen36.gturbo")
+        #expect(variant.recommendedMinimumHostMemoryBytes == 16 << 30)
+    }
+
+    @Test func qwen36IsFoundByEveryIdentityItLeavesBehind() {
+        let variant = SupportedModelVariant.qwen36
+        #expect(SupportedModelVariant.variant(forSourceIndexSHA256: variant.sourceIndexSHA256)
+                == variant)
+        #expect(SupportedModelVariant.variant(
+                    forSourceSnapshotHash: "sha256:" + variant.sourceIndexSHA256) == variant)
+        #expect(SupportedModelVariant.variant(forRepoID: variant.repoID) == variant)
+        #expect(SourceFingerprint.modelID(
+                    forIndexSha256: variant.sourceIndexSHA256) == variant.repoID)
+    }
+
+    /// The manifest family splits the catalog (C1): no key is Gemma, and the
+    /// app's model selectors list the Gemma entries until S24 lifts the filter.
+    @Test func familiesSplitTheCatalogAndOnlyGemmaIsAppSelectable() {
+        #expect(SupportedModelVariant.int4.family == nil)
+        #expect(SupportedModelVariant.int8.family == nil)
+        #expect(SupportedModelVariant.qwen36.family == .qwen35Moe)
+        #expect(SupportedModelVariant.gemma4Variants == [.int4, .int8])
+        #expect(SupportedModelVariant.allCases.count == 3)
     }
 
     @Test func variantsAreFoundByEveryIdentityTheyLeaveBehind() {

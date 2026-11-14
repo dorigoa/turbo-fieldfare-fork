@@ -1,0 +1,1569 @@
+[
+ {
+  "text": "",
+  "ids": [],
+  "decoded": ""
+ },
+ {
+  "text": "Ciao, mondo!",
+  "ids": [
+   34,
+   21817,
+   11,
+   67348,
+   0
+  ],
+  "decoded": "Ciao, mondo!"
+ },
+ {
+  "text": "L'acqua dell'isola è limpida e fresca.",
+  "ids": [
+   43,
+   6,
+   175345,
+   23476,
+   6,
+   194775,
+   11094,
+   79438,
+   4591,
+   378,
+   202388,
+   13
+  ],
+  "decoded": "L'acqua dell'isola è limpida e fresca."
+ },
+ {
+  "text": "È arrivato un'e-mail alle 9:30.",
+  "ids": [
+   168975,
+   198307,
+   632,
+   46272,
+   11139,
+   11951,
+   220,
+   24,
+   25,
+   18,
+   15,
+   13
+  ],
+  "decoded": "È arrivato un'e-mail alle 9:30."
+ },
+ {
+  "text": "Oggi fa un caldo africano, non credi?",
+  "ids": [
+   46,
+   162993,
+   2148,
+   632,
+   187066,
+   82033,
+   159547,
+   11,
+   2397,
+   4049,
+   72,
+   30
+  ],
+  "decoded": "Oggi fa un caldo africano, non credi?"
+ },
+ {
+  "text": "L'Italia è una Repubblica democratica, fondata sul lavoro.",
+  "ids": [
+   43,
+   72111,
+   18278,
+   11094,
+   4931,
+   184237,
+   24729,
+   64,
+   11,
+   26423,
+   673,
+   24953,
+   63178,
+   13
+  ],
+  "decoded": "L'Italia è una Repubblica democratica, fondata sul lavoro."
+ },
+ {
+  "text": "Dell'amministrazione dell'Aja: un po' d'ordine, gli altri?",
+  "ids": [
+   35,
+   598,
+   55565,
+   156509,
+   23476,
+   49550,
+   5405,
+   25,
+   632,
+   3091,
+   6,
+   293,
+   6,
+   180467,
+   11,
+   27026,
+   63934,
+   30
+  ],
+  "decoded": "Dell'amministrazione dell'Aja: un po' d'ordine, gli altri?"
+ },
+ {
+  "text": "Perché gli amici di Luca arrivano domani?",
+  "ids": [
+   3758,
+   71500,
+   27026,
+   178765,
+   1789,
+   80307,
+   220406,
+   190034,
+   30
+  ],
+  "decoded": "Perché gli amici di Luca arrivano domani?"
+ },
+ {
+  "text": "Un'ora d'aria e una passeggiata in città, vecchio stile.",
+  "ids": [
+   1743,
+   6,
+   6020,
+   293,
+   6,
+   10122,
+   378,
+   4931,
+   216916,
+   450,
+   303,
+   93595,
+   11,
+   201892,
+   175930,
+   13
+  ],
+  "decoded": "Un'ora d'aria e una passeggiata in città, vecchio stile."
+ },
+ {
+  "text": "La ñ e la å non sono italiane, ma capiteranno.",
+  "ids": [
+   8482,
+   1624,
+   109,
+   378,
+   1147,
+   12699,
+   2397,
+   20187,
+   95522,
+   11,
+   7256,
+   1994,
+   1947,
+   20892,
+   13
+  ],
+  "decoded": "La ñ e la å non sono italiane, ma capiteranno."
+ },
+ {
+  "text": "The quick brown fox jumps over the lazy dog.",
+  "ids": [
+   760,
+   3841,
+   13477,
+   37550,
+   33075,
+   888,
+   279,
+   15217,
+   5388,
+   13
+  ],
+  "decoded": "The quick brown fox jumps over the lazy dog."
+ },
+ {
+  "text": "I don't know what we'll do — it's entirely up to you.",
+  "ids": [
+   40,
+   1459,
+   914,
+   1366,
+   1092,
+   567,
+   3172,
+   635,
+   1892,
+   424,
+   579,
+   11040,
+   685,
+   310,
+   488,
+   13
+  ],
+  "decoded": "I don't know what we'll do — it's entirely up to you."
+ },
+ {
+  "text": "She said, \"Hello there!\" and smiled.",
+  "ids": [
+   7691,
+   1018,
+   11,
+   328,
+   9419,
+   1017,
+   8687,
+   321,
+   29547,
+   13
+  ],
+  "decoded": "She said, \"Hello there!\" and smiled."
+ },
+ {
+  "text": " leading and trailing spaces ",
+  "ids": [
+   6187,
+   321,
+   26849,
+   12258,
+   220
+  ],
+  "decoded": " leading and trailing spaces "
+ },
+ {
+  "text": "HelloWorld camelCaseSplitting",
+  "ids": [
+   9419,
+   9833,
+   47502,
+   4068,
+   19580,
+   1235
+  ],
+  "decoded": "HelloWorld camelCaseSplitting"
+ },
+ {
+  "text": "Don't stop believin'",
+  "ids": [
+   7751,
+   914,
+   2842,
+   2728,
+   9317,
+   6
+  ],
+  "decoded": "Don't stop believin'"
+ },
+ {
+  "text": "To be, or not to be: that is the question.",
+  "ids": [
+   1206,
+   381,
+   11,
+   466,
+   524,
+   310,
+   381,
+   25,
+   421,
+   369,
+   279,
+   3296,
+   13
+  ],
+  "decoded": "To be, or not to be: that is the question."
+ },
+ {
+  "text": "A very long English sentence that keeps going and going and going until it finally ends.",
+  "ids": [
+   32,
+   1546,
+   1248,
+   6163,
+   11316,
+   421,
+   13205,
+   2019,
+   321,
+   2019,
+   321,
+   2019,
+   2980,
+   424,
+   5326,
+   10029,
+   13
+  ],
+  "decoded": "A very long English sentence that keeps going and going and going until it finally ends."
+ },
+ {
+  "text": "你好，世界！",
+  "ids": [
+   109266,
+   3709,
+   96748,
+   6115
+  ],
+  "decoded": "你好，世界！"
+ },
+ {
+  "text": "我喜欢编程和机器学习。",
+  "ids": [
+   111721,
+   102027,
+   95793,
+   119016,
+   1710
+  ],
+  "decoded": "我喜欢编程和机器学习。"
+ },
+ {
+  "text": "请使用 Swift 和 Metal 在 Apple Silicon 上运行。",
+  "ids": [
+   135540,
+   22929,
+   220,
+   95793,
+   18626,
+   220,
+   95772,
+   7905,
+   35919,
+   220,
+   95802,
+   98836,
+   1710
+  ],
+  "decoded": "请使用 Swift 和 Metal 在 Apple Silicon 上运行。"
+ },
+ {
+  "text": "北京、上海、广州、深圳。",
+  "ids": [
+   98116,
+   5205,
+   98817,
+   5205,
+   103705,
+   5205,
+   99441,
+   1710
+  ],
+  "decoded": "北京、上海、广州、深圳。"
+ },
+ {
+  "text": "传统漢字与简化字混合测试。",
+  "ids": [
+   97804,
+   101306,
+   96356,
+   95999,
+   112174,
+   96356,
+   101742,
+   99449,
+   1710
+  ],
+  "decoded": "传统漢字与简化字混合测试。"
+ },
+ {
+  "text": "第23个中文句子测试点。",
+  "ids": [
+   96025,
+   17,
+   18,
+   95840,
+   99986,
+   104268,
+   99449,
+   95952,
+   1710
+  ],
+  "decoded": "第23个中文句子测试点。"
+ },
+ {
+  "text": "😀",
+  "ids": [
+   169706
+  ],
+  "decoded": "😀"
+ },
+ {
+  "text": "😀🎉🚀🌍",
+  "ids": [
+   169706,
+   9008,
+   236,
+   231,
+   9008,
+   248,
+   222,
+   9008,
+   234,
+   235
+  ],
+  "decoded": "😀🎉🚀🌍"
+ },
+ {
+  "text": "Bellissimo! 🎉🎉🎉 Grazie mille 🙏",
+  "ids": [
+   81236,
+   155628,
+   0,
+   10838,
+   236,
+   231,
+   9008,
+   236,
+   231,
+   9008,
+   236,
+   231,
+   177843,
+   178599,
+   10838,
+   247,
+   237
+  ],
+  "decoded": "Bellissimo! 🎉🎉🎉 Grazie mille 🙏"
+ },
+ {
+  "text": "👨‍👩‍👧‍👦 family with ZWJ",
+  "ids": [
+   9008,
+   239,
+   101,
+   373,
+   235,
+   9008,
+   239,
+   102,
+   373,
+   235,
+   9008,
+   239,
+   100,
+   373,
+   235,
+   9008,
+   239,
+   99,
+   2902,
+   440,
+   1799,
+   54,
+   41
+  ],
+  "decoded": "👨‍👩‍👧‍👦 family with ZWJ"
+ },
+ {
+  "text": "👍🏽 and 👋🏿 skin tones",
+  "ids": [
+   9008,
+   239,
+   235,
+   9008,
+   237,
+   121,
+   321,
+   59720,
+   233,
+   9008,
+   237,
+   123,
+   6574,
+   40589
+  ],
+  "decoded": "👍🏽 and 👋🏿 skin tones"
+ },
+ {
+  "text": "🇮🇹🇨🇳 flags together",
+  "ids": [
+   9008,
+   229,
+   106,
+   9008,
+   229,
+   117,
+   9008,
+   229,
+   101,
+   9008,
+   229,
+   111,
+   7789,
+   3658
+  ],
+  "decoded": "🇮🇹🇨🇳 flags together"
+ },
+ {
+  "text": "def greet(name: str) -> str:\n    return f\"Hello, {name}!\"",
+  "ids": [
+   727,
+   39440,
+   3052,
+   25,
+   592,
+   8,
+   1411,
+   592,
+   25,
+   198,
+   262,
+   460,
+   281,
+   1,
+   9419,
+   11,
+   313,
+   591,
+   92,
+   8687
+  ],
+  "decoded": "def greet(name: str) -> str:\n    return f\"Hello, {name}!\""
+ },
+ {
+  "text": "let value: Double = .pi * 2\nprint(String(format: \"%.3f\", value))",
+  "ids": [
+   1112,
+   869,
+   25,
+   6872,
+   283,
+   641,
+   2413,
+   348,
+   220,
+   17,
+   198,
+   1302,
+   2170,
+   20072,
+   25,
+   64370,
+   18,
+   69,
+   487,
+   869,
+   578
+  ],
+  "decoded": "let value: Double = .pi * 2\nprint(String(format: \"%.3f\", value))"
+ },
+ {
+  "text": "#include <metal_stdlib>\nusing namespace metal;\nkernel void add(device const float* a [[buffer(0)]], device float* b [[buffer(1)]], uint i [[thread_position_in_grid]]) { b[i] = a[i] + b[i]; }",
+  "ids": [
+   1032,
+   361,
+   52195,
+   15197,
+   2653,
+   29,
+   198,
+   940,
+   4325,
+   9041,
+   26,
+   198,
+   22524,
+   715,
+   884,
+   17314,
+   713,
+   2153,
+   9,
+   264,
+   4177,
+   7333,
+   7,
+   15,
+   7025,
+   1089,
+   3545,
+   2153,
+   9,
+   292,
+   4177,
+   7333,
+   7,
+   16,
+   7025,
+   1089,
+   2535,
+   585,
+   4177,
+   4380,
+   9373,
+   1201,
+   15146,
+   28649,
+   313,
+   292,
+   957,
+   60,
+   283,
+   264,
+   957,
+   60,
+   478,
+   292,
+   957,
+   5098,
+   333
+  ],
+  "decoded": "#include <metal_stdlib>\nusing namespace metal;\nkernel void add(device const float* a [[buffer(0)]], device float* b [[buffer(1)]], uint i [[thread_position_in_grid]]) { b[i] = a[i] + b[i]; }"
+ },
+ {
+  "text": "SELECT name, city FROM users WHERE age > 30 ORDER BY name;",
+  "ids": [
+   4703,
+   803,
+   11,
+   3177,
+   4154,
+   3719,
+   5120,
+   4092,
+   835,
+   220,
+   18,
+   15,
+   15064,
+   7466,
+   803,
+   26
+  ],
+  "decoded": "SELECT name, city FROM users WHERE age > 30 ORDER BY name;"
+ },
+ {
+  "text": "{\"key\": [1, 2, 3], \"nested\": {\"ok\": true}}",
+  "ids": [
+   4754,
+   767,
+   763,
+   498,
+   16,
+   11,
+   220,
+   17,
+   11,
+   220,
+   18,
+   1089,
+   328,
+   57267,
+   763,
+   5046,
+   547,
+   763,
+   804,
+   3307
+  ],
+  "decoded": "{\"key\": [1, 2, 3], \"nested\": {\"ok\": true}}"
+ },
+ {
+  "text": "<function=search>\n<parameter=q>\nhello world\n</parameter>\n</function>",
+  "ids": [
+   27,
+   1628,
+   93260,
+   29,
+   198,
+   27,
+   15704,
+   60922,
+   29,
+   198,
+   14556,
+   1814,
+   198,
+   510,
+   15704,
+   29,
+   198,
+   510,
+   1628,
+   29
+  ],
+  "decoded": "<function=search>\n<parameter=q>\nhello world\n</parameter>\n</function>"
+ },
+ {
+  "text": "git commit -m 'Fix the tokenizer' && git push origin main",
+  "ids": [
+   12513,
+   5099,
+   471,
+   76,
+   359,
+   25128,
+   279,
+   44424,
+   6,
+   976,
+   15865,
+   4336,
+   6042,
+   1822
+  ],
+  "decoded": "git commit -m 'Fix the tokenizer' && git push origin main"
+ },
+ {
+  "text": "```swift\nlet x = 1\n```",
+  "ids": [
+   71093,
+   68251,
+   198,
+   1112,
+   830,
+   283,
+   220,
+   16,
+   198,
+   71093
+  ],
+  "decoded": "```swift\nlet x = 1\n```"
+ },
+ {
+  "text": "x = y + z;   if (a && b) { return c ? d : e; }",
+  "ids": [
+   87,
+   283,
+   374,
+   478,
+   1110,
+   26,
+   256,
+   413,
+   318,
+   64,
+   976,
+   292,
+   8,
+   313,
+   460,
+   272,
+   907,
+   293,
+   535,
+   378,
+   26,
+   333
+  ],
+  "decoded": "x = y + z;   if (a && b) { return c ? d : e; }"
+ },
+ {
+  "text": "two   spaces    between",
+  "ids": [
+   19186,
+   256,
+   12258,
+   262,
+   1881
+  ],
+  "decoded": "two   spaces    between"
+ },
+ {
+  "text": "tab\tseparated\tcolumns",
+  "ids": [
+   5999,
+   81764,
+   47930,
+   49920,
+   82
+  ],
+  "decoded": "tab\tseparated\tcolumns"
+ },
+ {
+  "text": "line one\n\n\nline four after blank lines",
+  "ids": [
+   1021,
+   799,
+   1358,
+   1021,
+   2943,
+   1238,
+   9813,
+   4965
+  ],
+  "decoded": "line one\n\n\nline four after blank lines"
+ },
+ {
+  "text": "line one\r\nline two\r\nwindows style",
+  "ids": [
+   1021,
+   799,
+   317,
+   1021,
+   1330,
+   317,
+   26209,
+   1647
+  ],
+  "decoded": "line one\r\nline two\r\nwindows style"
+ },
+ {
+  "text": "   \t  \n  ",
+  "ids": [
+   262,
+   37050,
+   256
+  ],
+  "decoded": "   \t  \n  "
+ },
+ {
+  "text": "text\nwith\nsingle\nbreaks",
+  "ids": [
+   1272,
+   198,
+   4058,
+   198,
+   14892,
+   198,
+   8689,
+   82
+  ],
+  "decoded": "text\nwith\nsingle\nbreaks"
+ },
+ {
+  "text": "12345678901234567890123456789",
+  "ids": [
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24
+  ],
+  "decoded": "12345678901234567890123456789"
+ },
+ {
+  "text": "3.14159265358979323846264338327950288",
+  "ids": [
+   18,
+   13,
+   16,
+   19,
+   16,
+   20,
+   24,
+   17,
+   21,
+   20,
+   18,
+   20,
+   23,
+   24,
+   22,
+   24,
+   18,
+   17,
+   18,
+   23,
+   19,
+   21,
+   17,
+   21,
+   19,
+   18,
+   18,
+   23,
+   18,
+   17,
+   22,
+   24,
+   20,
+   15,
+   17,
+   23,
+   23
+  ],
+  "decoded": "3.14159265358979323846264338327950288"
+ },
+ {
+  "text": "1,000,000 and 12,345 and 1 000 000",
+  "ids": [
+   16,
+   11,
+   15,
+   15,
+   15,
+   11,
+   15,
+   15,
+   15,
+   321,
+   220,
+   16,
+   17,
+   11,
+   18,
+   19,
+   20,
+   321,
+   220,
+   16,
+   220,
+   15,
+   15,
+   15,
+   220,
+   15,
+   15,
+   15
+  ],
+  "decoded": "1,000,000 and 12,345 and 1 000 000"
+ },
+ {
+  "text": "-42 and +17 and ±3",
+  "ids": [
+   12,
+   19,
+   17,
+   321,
+   478,
+   16,
+   22,
+   321,
+   19671,
+   18
+  ],
+  "decoded": "-42 and +17 and ±3"
+ },
+ {
+  "text": "1.23e45 and 6.022e23",
+  "ids": [
+   16,
+   13,
+   17,
+   18,
+   68,
+   19,
+   20,
+   321,
+   220,
+   21,
+   13,
+   15,
+   17,
+   17,
+   68,
+   17,
+   18
+  ],
+  "decoded": "1.23e45 and 6.022e23"
+ },
+ {
+  "text": "Tel. +39 02 1234 5678",
+  "ids": [
+   36010,
+   13,
+   478,
+   18,
+   24,
+   220,
+   15,
+   17,
+   220,
+   16,
+   17,
+   18,
+   19,
+   220,
+   20,
+   21,
+   22,
+   23
+  ],
+  "decoded": "Tel. +39 02 1234 5678"
+ },
+ {
+  "text": "0xFF 0b1010 0o777 0b1111_0000",
+  "ids": [
+   15,
+   8989,
+   220,
+   15,
+   65,
+   16,
+   15,
+   16,
+   15,
+   220,
+   15,
+   78,
+   22,
+   22,
+   22,
+   220,
+   15,
+   65,
+   16,
+   16,
+   16,
+   16,
+   62,
+   15,
+   15,
+   15,
+   15
+  ],
+  "decoded": "0xFF 0b1010 0o777 0b1111_0000"
+ },
+ {
+  "text": "2^10 = 1024; 2048*1024 = 2097152 bytes",
+  "ids": [
+   17,
+   61,
+   16,
+   15,
+   283,
+   220,
+   16,
+   15,
+   17,
+   19,
+   26,
+   220,
+   17,
+   15,
+   19,
+   23,
+   9,
+   16,
+   15,
+   17,
+   19,
+   283,
+   220,
+   17,
+   15,
+   24,
+   22,
+   16,
+   20,
+   17,
+   5639
+  ],
+  "decoded": "2^10 = 1024; 2048*1024 = 2097152 bytes"
+ },
+ {
+  "text": "<|im_start|>",
+  "ids": [
+   248045
+  ],
+  "decoded": "<|im_start|>"
+ },
+ {
+  "text": "<|im_end|>",
+  "ids": [
+   248046
+  ],
+  "decoded": "<|im_end|>"
+ },
+ {
+  "text": "<think>",
+  "ids": [
+   248068
+  ],
+  "decoded": "<think>"
+ },
+ {
+  "text": "</think>",
+  "ids": [
+   248069
+  ],
+  "decoded": "</think>"
+ },
+ {
+  "text": "<tool_call>",
+  "ids": [
+   248058
+  ],
+  "decoded": "<tool_call>"
+ },
+ {
+  "text": "</tool_call>",
+  "ids": [
+   248059
+  ],
+  "decoded": "</tool_call>"
+ },
+ {
+  "text": "<<|im_start|>im_start|>",
+  "ids": [
+   27,
+   248045,
+   316,
+   4747,
+   91,
+   29
+  ],
+  "decoded": "<<|im_start|>im_start|>"
+ },
+ {
+  "text": "text<|im_start|>in between",
+  "ids": [
+   1272,
+   248045,
+   258,
+   1881
+  ],
+  "decoded": "text<|im_start|>in between"
+ },
+ {
+  "text": "a<|im_start|>b<|im_start|>c",
+  "ids": [
+   64,
+   248045,
+   65,
+   248045,
+   66
+  ],
+  "decoded": "a<|im_start|>b<|im_start|>c"
+ },
+ {
+  "text": "<|endoftext|>",
+  "ids": [
+   248044
+  ],
+  "decoded": "<|endoftext|>"
+ },
+ {
+  "text": "ciao<|endoftext|>mondo",
+  "ids": [
+   66,
+   21817,
+   248044,
+   1588,
+   2887
+  ],
+  "decoded": "ciao<|endoftext|>mondo"
+ },
+ {
+  "text": "<tool_response>",
+  "ids": [
+   248066
+  ],
+  "decoded": "<tool_response>"
+ },
+ {
+  "text": "</tool_response>",
+  "ids": [
+   248067
+  ],
+  "decoded": "</tool_response>"
+ },
+ {
+  "text": "<tool_response>risultato</tool_response>",
+  "ids": [
+   248066,
+   5776,
+   484,
+   4189,
+   248067
+  ],
+  "decoded": "<tool_response>risultato</tool_response>"
+ },
+ {
+  "text": "<|im_start|>system\nSei un assistente.<|im_end|>\n<|im_start|>user\nCiao!<|im_end|>\n",
+  "ids": [
+   248045,
+   8678,
+   198,
+   1460,
+   72,
+   632,
+   7543,
+   6603,
+   13,
+   248046,
+   198,
+   248045,
+   846,
+   198,
+   34,
+   21817,
+   0,
+   248046,
+   198
+  ],
+  "decoded": "<|im_start|>system\nSei un assistente.<|im_end|>\n<|im_start|>user\nCiao!<|im_end|>\n"
+ },
+ {
+  "text": "printf(\"%d\\n\", 42);",
+  "ids": [
+   2437,
+   4285,
+   67,
+   1639,
+   487,
+   220,
+   19,
+   17,
+   1174
+  ],
+  "decoded": "printf(\"%d\\n\", 42);"
+ },
+ {
+  "text": "Café NFC composed, café NFC decomposed, résumé.",
+  "ids": [
+   34,
+   2492,
+   933,
+   45629,
+   22687,
+   11,
+   50203,
+   45629,
+   27572,
+   3736,
+   11,
+   238976,
+   13
+  ],
+  "decoded": "Café NFC composed, café NFC decomposed, résumé."
+ },
+ {
+  "text": "Ελληνικά, русский текст, עברית, العربية, ไทย",
+  "ids": [
+   168953,
+   164594,
+   159778,
+   11,
+   211075,
+   185386,
+   11,
+   150581,
+   151188,
+   151552,
+   11,
+   171405,
+   11,
+   181204
+  ],
+  "decoded": "Ελληνικά, русский текст, עברית, العربية, ไทย"
+ },
+ {
+  "text": "_naïve_ *markdown* __very__ `code` ~strike~",
+  "ids": [
+   56649,
+   36328,
+   571,
+   62,
+   348,
+   58046,
+   9,
+   1259,
+   1164,
+   548,
+   1510,
+   1787,
+   63,
+   3835,
+   70522,
+   93
+  ],
+  "decoded": "_naïve_ *markdown* __very__ `code` ~strike~"
+ },
+ {
+  "text": "Mi mixed 你好 🎉 1234 <tag> \"quote\" (paren) [bracket] {brace} \\slash| pipe",
+  "ids": [
+   40506,
+   9238,
+   220,
+   109266,
+   10838,
+   236,
+   231,
+   220,
+   16,
+   17,
+   18,
+   19,
+   361,
+   4429,
+   29,
+   328,
+   2855,
+   1,
+   318,
+   39708,
+   8,
+   498,
+   1277,
+   5531,
+   60,
+   313,
+   30212,
+   92,
+   1088,
+   48569,
+   91,
+   13254
+  ],
+  "decoded": "Mi mixed 你好 🎉 1234 <tag> \"quote\" (paren) [bracket] {brace} \\slash| pipe"
+ },
+ {
+  "text": "Hmm... wow!!! Really?! Yes—no. Maybe… OK?",
+  "ids": [
+   77264,
+   1076,
+   34485,
+   11726,
+   27291,
+   25153,
+   7179,
+   2218,
+   2083,
+   13,
+   10380,
+   1873,
+   10092,
+   30
+  ],
+  "decoded": "Hmm... wow!!! Really?! Yes—no. Maybe… OK?"
+ },
+ {
+  "text": "à É î Ô Ù ü ö ß æ œ ç ã õ ę ł ş ı",
+  "ids": [
+   6161,
+   27118,
+   13952,
+   155238,
+   1624,
+   247,
+   10176,
+   16445,
+   1624,
+   253,
+   62816,
+   94742,
+   17547,
+   1624,
+   96,
+   180846,
+   220,
+   4991,
+   71894,
+   21386,
+   220,
+   3649
+  ],
+  "decoded": "à É î Ô Ù ü ö ß æ œ ç ã õ ę ł ş ı"
+ },
+ {
+  "text": "  \n\t mixed \t\n  whitespace \n\n  ",
+  "ids": [
+   2228,
+   197,
+   9238,
+   16957,
+   220,
+   35169,
+   4558,
+   256
+  ],
+  "decoded": "  \n\t mixed \t\n  whitespace \n\n  "
+ },
+ {
+  "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "ids": [
+   55961,
+   55961,
+   55961,
+   55961,
+   55961,
+   24881,
+   5840
+  ],
+  "decoded": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+ },
+ {
+  "text": "na+na*na-na/na:na;na,na.na?na!na@na#na$na%na^na&na*na(na)na-na+na=na",
+  "ids": [
+   3267,
+   10,
+   3267,
+   9,
+   3267,
+   89876,
+   14,
+   3267,
+   25,
+   3267,
+   26,
+   3267,
+   11,
+   3267,
+   1210,
+   64,
+   30,
+   3267,
+   0,
+   3267,
+   31,
+   3267,
+   2,
+   3267,
+   3,
+   3267,
+   4,
+   3267,
+   61,
+   3267,
+   5,
+   3267,
+   9,
+   3267,
+   1393,
+   64,
+   8,
+   3267,
+   89876,
+   10,
+   3267,
+   28,
+   3267
+  ],
+  "decoded": "na+na*na-na/na:na;na,na.na?na!na@na#na$na%na^na&na*na(na)na-na+na=na"
+ },
+ {
+  "text": "Il modello Qwen3.6-35B-A3B usa MoE con 256 esperti, 8 attivi, top-k 8 e hidden 2048.",
+  "ids": [
+   11707,
+   175973,
+   1167,
+   16451,
+   18,
+   13,
+   21,
+   12,
+   18,
+   20,
+   33,
+   6481,
+   18,
+   33,
+   32598,
+   5861,
+   36,
+   384,
+   220,
+   17,
+   20,
+   21,
+   188207,
+   11,
+   220,
+   23,
+   222386,
+   11,
+   1844,
+   12283,
+   220,
+   23,
+   378,
+   7920,
+   220,
+   17,
+   15,
+   19,
+   23,
+   13
+  ],
+  "decoded": "Il modello Qwen3.6-35B-A3B usa MoE con 256 esperti, 8 attivi, top-k 8 e hidden 2048."
+ },
+ {
+  "text": "Tab\there and newline\nthere and multiple\n\n\nspaces   here",
+  "ids": [
+   8320,
+   197,
+   6527,
+   321,
+   37734,
+   198,
+   17977,
+   321,
+   5081,
+   1358,
+   42815,
+   256,
+   1532
+  ],
+  "decoded": "Tab\there and newline\nthere and multiple\n\n\nspaces   here"
+ },
+ {
+  "text": "12月25日（金）13:45～18:30 ＠東京タワー 🗼",
+  "ids": [
+   16,
+   17,
+   96212,
+   17,
+   20,
+   95971,
+   9616,
+   96012,
+   7313,
+   16,
+   18,
+   25,
+   19,
+   20,
+   20565,
+   16,
+   23,
+   25,
+   18,
+   15,
+   60708,
+   254,
+   115197,
+   246217,
+   10838,
+   245,
+   120
+  ],
+  "decoded": "12月25日（金）13:45～18:30 ＠東京タワー 🗼"
+ },
+ {
+  "text": "\n",
+  "ids": [
+   198
+  ],
+  "decoded": "\n"
+ },
+ {
+  "text": " ",
+  "ids": [
+   220
+  ],
+  "decoded": " "
+ }
+]

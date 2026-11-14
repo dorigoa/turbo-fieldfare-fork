@@ -187,10 +187,12 @@ struct ServerModelVariantTests {
     }
 
     @Test func modelOpenedLogNamesTheVariant() {
+        // S23 appends the family so the operator sees what was opened;
+        // the fields before it are untouched.
         #expect(ServerLog.modelOpenedMessage(Self.fourBit)
-            == "model opened variant=4-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-4bit")
+            == "model opened variant=4-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-4bit family=gemma4")
         #expect(ServerLog.modelOpenedMessage(Self.eightBit)
-            == "model opened variant=8-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit")
+            == "model opened variant=8-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit family=gemma4")
     }
 
     @Test func usageExplainsTheVariantDefault() {

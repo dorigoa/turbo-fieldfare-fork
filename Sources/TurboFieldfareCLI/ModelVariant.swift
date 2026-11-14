@@ -10,6 +10,18 @@ struct CLIModelVariant: Equatable {
     let profile: QuantProfile
     /// `manifest.modelID`: the Hugging Face repository the pack was built from.
     let manifestModelID: String
+    /// The family the installed manifest declares; absence of `modelFamily`
+    /// is Gemma (D1). The CLI prints it next to the variant, and it picks the
+    /// runner and the tokenizer the run uses (S22, D3).
+    let family: ModelFamily
+
+    init(profile: QuantProfile,
+         manifestModelID: String,
+         family: ModelFamily = .gemma4) {
+        self.profile = profile
+        self.manifestModelID = manifestModelID
+        self.family = family
+    }
 
     /// "4-bit" or "8-bit", the names the installer and the Mac app use.
     var label: String { "\(profile.denseWeightBits)-bit" }
@@ -28,7 +40,16 @@ struct CLIModelVariant: Equatable {
                 detail: "manifest.quant is required to size the model's memory")
         }
         return CLIModelVariant(profile: try QuantProfile(manifestQuant: quant),
-                               manifestModelID: manifest.modelID)
+                               manifestModelID: manifest.modelID,
+                               family: family(of: manifest))
+    }
+
+    /// Mirrors `Model.family`: an absent `modelFamily` means Gemma, and the
+    /// format codec has already rejected any family string this build does
+    /// not know, so the only other value is the Qwen one.
+    private static func family(of manifest: Manifest) -> ModelFamily {
+        guard let name = manifest.modelFamily else { return .gemma4 }
+        return ModelFamily(rawValue: name) == .qwen35Moe ? .qwen35Moe : .gemma4
     }
 
     /// The warning printed when this host is below the admission estimate for
@@ -58,7 +79,7 @@ struct CLIModelVariant: Equatable {
     /// timing line, so `[stop=...]` keeps its exact shape and stays the last
     /// line for anything that already parses it.
     var footerLine: String {
-        "[variant=\(label) manifest_model_id=\(manifestModelID)]"
+        "[variant=\(label) family=\(family.rawValue) manifest_model_id=\(manifestModelID)]"
     }
 }
 

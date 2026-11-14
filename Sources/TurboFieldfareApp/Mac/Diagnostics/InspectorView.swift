@@ -14,7 +14,11 @@ struct InspectorView: View {
             // fold, where the one screen that must mention it - the empty state
             // before any model exists - could not.
             if showsVisionSection {
-                visionSection
+                if model.modelVariant.supportsImages {
+                    visionSection
+                } else {
+                    visionUnavailableForModelSection
+                }
             }
             memorySection
             generationSection
@@ -37,6 +41,19 @@ struct InspectorView: View {
             isVisionPackInstalled: model.isVisionPackInstalled,
             isCompanionOperationInProgress: model.isVisionCompanionOperationInProgress,
             installState: model.visionInstallState)
+    }
+
+    /// D12, S24: the family itself carries no image tower. The section shows
+    /// the reason instead of hiding: the screen still tells someone the app
+    /// does images, this model does not.
+    private var visionUnavailableForModelSection: some View {
+        Section("Image Support") {
+            Label("Image input is not available for this model",
+                  systemImage: "photo.badge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help("Image support has not been trained into this checkpoint.")
+        }
     }
 
     private var visionSection: some View {
@@ -209,8 +226,9 @@ struct InspectorView: View {
 
     private var modelSection: some View {
         Section("Model") {
-            LabeledContent("Variant") {
-                Picker("Variant", selection: modelVariantBinding) {
+            LabeledContent("Model") {
+                // Every catalog entry is selectable here, Qwen3.6 included.
+                Picker("Model", selection: modelVariantBinding) {
                     ForEach(AppModelVariant.allCases, id: \.self) { variant in
                         Text(variant.shortLabel).tag(variant)
                     }
@@ -337,7 +355,7 @@ struct InspectorView: View {
                 // would put a row in the menu that every load then refuses.
                 Picker("Context", selection: contextTokensBinding) {
                     ForEach(model.contextOptions) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                        Text(option.menuLabel(config: model.admissionArchConfig)).tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
@@ -412,6 +430,34 @@ struct InspectorView: View {
                             .monospacedDigit()
                             .frame(width: 36, alignment: .trailing)
                     }
+                }
+            }
+            // D11 (S25 step 6): only a family with a thinking frame offers
+            // the switch, so Gemma's Generation section is unchanged.
+            if model.isThinkingControlAvailable {
+                Toggle("Thinking", isOn: $model.thinkingEnabled)
+                    .toggleStyle(.switch)
+                    .accessibilityIdentifier(.inspectorThinking)
+                Text("When on, the model reasons before answering and the status says Thinking. The reasoning never becomes part of the reply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                // Reasoning depth (D11): the depth only means something while the model reasons,
+                // so it follows the switch rather than standing beside it.
+                if model.thinkingEnabled {
+                    LabeledContent("Reasoning depth") {
+                        Picker("Reasoning depth", selection: $model.reasoningDepth) {
+                            ForEach(AppReasoningDepth.allCases) { depth in
+                                Text(depth.label).tag(depth)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier(.inspectorReasoningDepth)
+                    }
+                    Text("How many tokens the model may spend reasoning before it has to answer. When the budget runs out the reasoning is closed off and the reply begins. Unbounded lets it reason until the response limit, which on this model can use up the whole reply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

@@ -1,8 +1,8 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+`TurboFieldfareServer` exposes a local Chat Completions API for one model,
+Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` without authentication
+or TLS. Do not expose it through a proxy or tunnel.
 
 ## Start the server
 
@@ -109,6 +109,50 @@ repository, so a client still set up for the 4-bit name is refused instead of
 being served a different variant without notice. `--model-id <id>` replaces
 the ID for either variant. `GET /v1/models` lists the ID in use, and responses
 echo it in their `model` field.
+
+## Qwen3.6
+
+The server also serves Qwen3.6-35B-A3B (4-bit). Pass its model directory; the
+server reads the family from the manifest, and the `model opened` and ready
+lines name it with `family=qwen3_5_moe`:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/qwen36.gturbo \
+  --port 8080 \
+  --max-context 16384
+```
+
+The API model ID is the one its manifest records,
+`mlx-community/Qwen3.6-35B-A3B-4bit`; `--model-id` replaces it as for Gemma.
+The differences from Gemma:
+
+- **Sampling defaults.** A request that omits `temperature`, `top_k` or
+  `top_p` gets the checkpoint's reference values: 1.0, 20 and 0.95. Values the
+  request sets are used as given.
+- **Reasoning.** Thinking is on by default. The reasoning text never reaches
+  `content`. Send `"chat_template_kwargs": {"enable_thinking": false}` to answer
+  without it; that object accepts only the boolean `enable_thinking`. Under
+  Gemma the field is still an unrecognized request field.
+- **Reasoning depth.** `reasoning_effort` takes `low`, `medium` or `high` and
+  caps the tokens the model may spend reasoning at 256, 1,024 or 4,096. When
+  the budget runs out the runtime closes the thinking block and the model
+  answers; omitting the field leaves the reasoning unbounded, as it was before
+  the field was accepted. The chat template has no such parameter, so this is
+  enforced during decode, not in the prompt — the cached prefix is the same
+  either way. Any other value returns `unsupported_value`, combining it with
+  `enable_thinking: false` returns `invalid_value`, and under Gemma, which has
+  no reasoning phase, the field still returns `unsupported_value`.
+- **Tool calls.** Tools are rendered by the model's own chat template, and the
+  model's XML tool calls come back in the OpenAI `tool_calls` field with
+  `finish_reason` `tool_calls`. A call to a tool the request did not declare
+  fails the request instead of reaching the client.
+- **Prompt reuse.** A request is reused only as a continuation at the exact
+  end of the cached prompt; any other request runs a full prefill. The
+  model's state cannot be rewound to an earlier point.
+- **Images.** Not available. A request with an image gets HTTP 400 with
+  `image_not_supported` and the message "image input is not available for
+  this model"; `--vision-pack` with a Qwen model is refused at startup.
 
 ## Connect a client
 
@@ -274,9 +318,11 @@ Unknown top-level request fields return HTTP 400 with `code`
 `unknown_parameter` and the field name in `param`, so a misspelled option is
 refused rather than silently ignored. `response_format` is accepted only as
 `{"type": "text"}`; `json_object` and `json_schema` return
-`unsupported_value`, as do `logit_bias`, `top_logprobs`, `reasoning_effort`,
+`unsupported_value`, as do `logit_bias`, `top_logprobs`,
 `verbosity`, `modalities`, `audio`, `prediction`, `web_search_options`, and
-the legacy `functions` and `function_call`. `response_format` must be an object; any
+the legacy `functions` and `function_call`. `reasoning_effort` is read only
+under Qwen3.6 (see [Qwen3.6](#qwen36)) and returns `unsupported_value` for
+every other family. `response_format` must be an object; any
 other JSON value returns `invalid_value`. `user`, `store`, `metadata`,
 `service_tier`, `prompt_cache_key`, and `safety_identifier` are accepted and
 ignored. A top-level field set to `null` is treated as absent. Fields inside

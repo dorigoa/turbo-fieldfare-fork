@@ -103,7 +103,9 @@ enum GTurboJSON {
             expertsPerLayer: expertsPerLayer,
             numLayers: numLayers,
             expertStride: expertStride,
-            bitWidthOverridesHonored: plan.bitsOverrideCount))
+            bitWidthOverridesHonored: plan.bitsOverrideCount,
+            modelFamily: plan.modelFamily,
+            qwen35: plan.qwen35))
     }
 
     static func encodeLayout(plan: RepackPlan,

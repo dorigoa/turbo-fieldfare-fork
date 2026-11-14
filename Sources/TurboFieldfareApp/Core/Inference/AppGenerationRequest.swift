@@ -31,6 +31,15 @@ public struct AppGenerationRequest: Equatable, Sendable {
     /// only the service is entitled to make it.
     public var conversationEpoch: UUID?
     public var turnIndex: Int?
+    /// Whether this turn's Qwen generation prompt opens its thinking block
+    /// (S25 step 5, D11). nil means the family default (on), so an older
+    /// caller or wire message changes nothing; the runtime only ever builds
+    /// the renderer from `request.enableThinking ?? true`.
+    public var enableThinking: Bool?
+    /// Tokens this turn may spend inside its Qwen thinking block before the
+    /// runtime closes it (D11). nil means unbounded, so a caller without a
+    /// depth control changes nothing; only a turn that opens a block reads it.
+    public var reasoningBudgetTokens: Int?
 
     public init(modelDirectory: URL,
                 prompt: String,
@@ -45,7 +54,11 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 continuesConversation: Bool = false,
                 conversationTokens: Int = 0,
                 conversationEpoch: UUID? = nil,
-                turnIndex: Int? = nil) {
+                turnIndex: Int? = nil,
+                enableThinking: Bool? = nil,
+                reasoningBudgetTokens: Int? = nil) {
+        self.enableThinking = enableThinking
+        self.reasoningBudgetTokens = reasoningBudgetTokens
         self.continuesConversation = continuesConversation
         self.conversationTokens = conversationTokens
         self.conversationEpoch = conversationEpoch

@@ -102,6 +102,37 @@ package struct GTurboManifestQuantV1: Codable, Equatable, Sendable {
     }
 }
 
+/// Qwen hybrid geometry carried by the optional `qwen35` manifest block (C4).
+/// The manifest is the wire contract; the runtime matches these values
+/// field-by-field against its pinned `QwenHybridConfig` at load time.
+package struct GTurboManifestQwen35V1: Codable, Equatable, Sendable {
+    package let linearNumKeyHeads: Int
+    package let linearNumValueHeads: Int
+    package let linearKeyHeadDim: Int
+    package let linearValueHeadDim: Int
+    package let linearConvKernel: Int
+    package let rmsNormEps: Double
+    package let normWeightsShifted: Bool
+    package let attentionOutputGate: Bool
+    package let sharedExpertGate: Bool
+
+    package init(linearNumKeyHeads: Int, linearNumValueHeads: Int,
+                 linearKeyHeadDim: Int, linearValueHeadDim: Int,
+                 linearConvKernel: Int, rmsNormEps: Double,
+                 normWeightsShifted: Bool, attentionOutputGate: Bool,
+                 sharedExpertGate: Bool) {
+        self.linearNumKeyHeads = linearNumKeyHeads
+        self.linearNumValueHeads = linearNumValueHeads
+        self.linearKeyHeadDim = linearKeyHeadDim
+        self.linearValueHeadDim = linearValueHeadDim
+        self.linearConvKernel = linearConvKernel
+        self.rmsNormEps = rmsNormEps
+        self.normWeightsShifted = normWeightsShifted
+        self.attentionOutputGate = attentionOutputGate
+        self.sharedExpertGate = sharedExpertGate
+    }
+}
+
 package struct GTurboManifestV1: Codable, Equatable, Sendable {
     package let magic: String
     package let versionMajor: Int
@@ -116,6 +147,11 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
     package let numLayers: Int
     package let expertStride: UInt64
     package let bitWidthOverridesHonored: Int?
+    /// `GTurboModelFamily` raw value, or `nil` for Gemma 4 (D1). Stored as a
+    /// string so an unknown family fails with a clear message in `validate`
+    /// instead of a decoder error.
+    package let modelFamily: String?
+    package let qwen35: GTurboManifestQwen35V1?
 
     package init(magic: String = GTurboFormatV1.magic,
                  versionMajor: Int = GTurboFormatV1.versionMajor,
@@ -125,7 +161,9 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
                  quant: GTurboManifestQuantV1?,
                  files: [String: GTurboManifestFileV1],
                  expertsPerLayer: Int, numLayers: Int, expertStride: UInt64,
-                 bitWidthOverridesHonored: Int?) {
+                 bitWidthOverridesHonored: Int?,
+                 modelFamily: String? = nil,
+                 qwen35: GTurboManifestQwen35V1? = nil) {
         self.magic = magic
         self.versionMajor = versionMajor
         self.versionMinor = versionMinor
@@ -139,6 +177,8 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
         self.numLayers = numLayers
         self.expertStride = expertStride
         self.bitWidthOverridesHonored = bitWidthOverridesHonored
+        self.modelFamily = modelFamily
+        self.qwen35 = qwen35
     }
 }
 
@@ -180,6 +220,27 @@ package enum GTurboManifestCodec {
         for flag in manifest.flags.keys where !GTurboFormatV1.knownFlags.contains(flag) {
             throw GTurboFormatError.invalid(field: "manifest.flags.\(flag)", reason: "unknown v1 flag")
         }
+        let family: GTurboModelFamily?
+        if let name = manifest.modelFamily {
+            guard let parsed = GTurboModelFamily(rawValue: name) else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.modelFamily",
+                    reason: "unknown model family \"\(name)\"")
+            }
+            family = parsed
+            guard manifest.qwen35 != nil else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.qwen35",
+                    reason: "required for model family \"\(name)\"")
+            }
+        } else {
+            family = nil
+            guard manifest.qwen35 == nil else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.qwen35",
+                    reason: "present without manifest.modelFamily")
+            }
+        }
         guard !manifest.modelID.isEmpty,
               manifest.numLayers > 0, manifest.expertsPerLayer > 0,
               manifest.expertStride > 0,
@@ -192,11 +253,14 @@ package enum GTurboManifestCodec {
                 field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
         }
         let arch = manifest.arch
+        // Qwen 3.5-MoE has no sliding window at all (D1); Gemma keeps the
+        // original strictly-positive rule untouched.
+        let minimumSlidingWindow = family == .qwen35Moe ? 0 : 1
         guard arch.hiddenSize > 0, arch.ffnIntermediate > 0,
               arch.moeIntermediateSize > 0, arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
-              arch.vocabSize > 0, arch.slidingWindow > 0,
+              arch.vocabSize > 0, arch.slidingWindow >= minimumSlidingWindow,
               arch.topKExperts > 0, arch.topKExperts <= arch.numExperts,
               arch.finalLogitSoftcap.isFinite,
               arch.ropeTheta.isFinite, arch.ropeTheta > 0,
@@ -224,6 +288,15 @@ package enum GTurboManifestCodec {
                     throw GTurboFormatError.invalid(
                         field: "manifest.quant.\(name)", reason: "invalid quantization values")
                 }
+            }
+        }
+        if let qwen35 = manifest.qwen35 {
+            guard qwen35.linearNumKeyHeads > 0, qwen35.linearNumValueHeads > 0,
+                  qwen35.linearKeyHeadDim > 0, qwen35.linearValueHeadDim > 0,
+                  qwen35.linearConvKernel > 0,
+                  qwen35.rmsNormEps.isFinite, qwen35.rmsNormEps > 0 else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.qwen35", reason: "invalid hybrid values")
             }
         }
         let reservedFiles: Set<String> = ["manifest.json", "verified-install.json"]

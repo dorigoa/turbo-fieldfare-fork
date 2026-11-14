@@ -345,6 +345,43 @@ import TurboFieldfare
         #expect(fourBit.notice == legacy.notice)
     }
 
+    /// S24: Qwen3.6 answers admission with its family's geometry, and S27
+    /// measured it — 256K, not 128K, is what needs more than 8 GB now — so the
+    /// clamp for the variant matches that arithmetic rather than the 4-bit
+    /// Gemma one.
+    @Test func theQwenVariantIsAdmittedByItsOwnGeometry() throws {
+        #expect(AppModel.modelVariantMemoryRefusal(variant: .qwen36,
+                                                   hostMemoryBytes: eightGigabyteHost) == nil)
+        #expect(AppModel.modelVariantMemoryRefusal(variant: .qwen36,
+                                                   hostMemoryBytes: sixteenGigabyteHost) == nil)
+        let note = try #require(AppModel.contextOptionsNote(hostMemoryBytes: eightGigabyteHost,
+                                                            footprint: .qwen36Measured,
+                                                            config: ArchConfig.qwen36_35B_A3B))
+        #expect(note.contains("262,144"))
+        #expect(note.contains("needs 16 GB"))
+        // The ceiling is where the two profiles part after S27's measurement:
+        // this host meets Qwen's requirement there exactly and is short of the
+        // 4-bit Gemma one, which still hides the row.
+        let ceilingMinimum: UInt64 = 262_144 * 20_480 + 1_879_048_192 + 67_108_864 + 3_221_225_472
+        #expect(AppModel.contextOptionsNote(hostMemoryBytes: ceilingMinimum,
+                                            footprint: .qwen36Measured,
+                                            config: ArchConfig.qwen36_35B_A3B) == nil)
+        #expect(AppModel.contextOptionsNote(hostMemoryBytes: ceilingMinimum)
+            .map { $0.contains("262,144") } ?? false)
+        // 256K is too big for 8 GB (10,536,091,648), 128K is not
+        // (7,851,737,088): the clamp falls back to the largest admitted row
+        // and says so once.
+        let clamped = AppModel.admittedContext(262_144, hostMemoryBytes: eightGigabyteHost,
+                                               variant: .qwen36)
+        #expect(clamped.tokens == 131_072)
+        #expect(clamped.notice?.contains("262,144") == true)
+        #expect(clamped.notice?.contains("Qwen3.6") == false) // the need sentence names memory
+        let kept = AppModel.admittedContext(131_072, hostMemoryBytes: eightGigabyteHost,
+                                            variant: .qwen36)
+        #expect(kept.tokens == 131_072)
+        #expect(kept.notice == nil)
+    }
+
     @Test func theContextNoteUsesTheVariantsFootprint() throws {
         #expect(AppModel.contextOptionsNote(hostMemoryBytes: sixteenGigabyteHost) == nil)
         #expect(AppModel.contextOptionsNote(hostMemoryBytes: sixteenGigabyteHost,
@@ -355,6 +392,171 @@ import TurboFieldfare
         #expect(note.contains("262,144"))
         #expect(!note.contains("131,072"))
         #expect(AppModel.contextOptionsNote(hostMemoryBytes: sixteenGigabyteHost, expertCacheSlots: 32) == nil)
+    }
+
+    /// S24, U4: the Qwen variant opens on its family's sampling, and the
+    /// Gemma variants keep theirs — the same sliders, two sets of values.
+    @MainActor @Test func theQwenVariantOpensWithItsFamilySampling() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.modelVariant == .qwen36)
+        #expect(model.temperature == 1.0)
+        #expect(model.topK == 20)
+        #expect(model.topP == 0.95)
+
+        await model.setModelVariant(.int4)
+        #expect(model.temperature == 0.2)
+        #expect(model.topK == 64)
+        #expect(model.topP == 0.95)
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 1.0)
+        #expect(model.topK == 20)
+    }
+
+    /// A sampling the user changed stays with the family it was changed on,
+    /// under that family's keys: the untouched family keeps answering with its
+    /// defaults, and a save keeps both records apart.
+    @MainActor @Test func aChangedSamplingStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.temperature == 0.2)
+        model.temperature = 0.5
+        model.topK = 30
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 1.0, "Qwen took the values changed on Gemma")
+        #expect(model.topK == 20)
+        model.temperature = 0.7
+
+        await model.setModelVariant(.int4)
+        #expect(model.temperature == 0.5, "the Gemma edit was lost over the switch")
+        #expect(model.topK == 30)
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.temperature == 0.7, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.temperature == 0.5)
+        #expect(saved.topK == 30)
+        #expect(saved.temperatureQwen36 == 0.7)
+        #expect(saved.topKQwen36 == 20)
+    }
+
+    /// S25, D11: only the frame family offers the switch. Its choice stays
+    /// with the family the way the sliders' does, Gemma never grows a key,
+    /// and the hidden Gemma screen value keeps its own answer so a switch
+    /// back never inherits an edit made for another family.
+    @MainActor @Test func aThinkingChangeStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.modelVariant == .qwen36)
+        #expect(model.isThinkingControlAvailable)
+        #expect(model.thinkingEnabled, "a family left as it ships runs its frame open")
+        model.thinkingEnabled = false
+
+        await model.setModelVariant(.int4)
+        #expect(!model.isThinkingControlAvailable, "Gemma offered a frame it does not have")
+        #expect(model.thinkingEnabled, "the hidden Gemma switch inherited Qwen's off")
+
+        await model.setModelVariant(.int8)
+        #expect(!model.isThinkingControlAvailable, "8-bit Gemma offered a frame too")
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.isThinkingControlAvailable)
+        #expect(!model.thinkingEnabled, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.thinkingEnabledQwen36 == false)
+        #expect(saved.thinkingEnabled(for: .int4))
+    }
+
+    /// The switch becomes `enableThinking` only for the frame family: Gemma's
+    /// request reads exactly as before the frame existed — field absent — and
+    /// a Qwen request carries the switch's position, on by default.
+    @MainActor @Test func theThinkingSwitchBecomesEnableThinkingOnlyForQwen() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(model.modelVariant == .int4)
+        #expect(try model.makeRequest().enableThinking == nil,
+                "Gemma's request grew a field the pre-frame reader never sent")
+
+        await model.setModelVariant(.qwen36)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(try model.makeRequest().enableThinking == true)
+        model.thinkingEnabled = false
+        #expect(try model.makeRequest().enableThinking == false)
+    }
+
+    /// Reasoning depth (D11): the depth becomes a token budget only for the frame family, only
+    /// while the frame is open, and `unbounded` sends nothing — so Gemma's
+    /// request keeps reading exactly as it did before the cap existed.
+    @MainActor @Test func theDepthBecomesABudgetOnlyForAnOpenQwenFrame() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        #expect(model.modelVariant == .int4)
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "Gemma's request grew a budget the pre-cap reader never sent")
+
+        await model.setModelVariant(.qwen36)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        // The shipped default is a bounded depth: S27 measured this checkpoint
+        // spending a whole budget inside a block it never closed.
+        #expect(model.reasoningDepth == AppReasoningDepth.familyDefault)
+        #expect(try model.makeRequest().reasoningBudgetTokens
+            == AppReasoningDepth.familyDefault.budgetTokens)
+
+        model.reasoningDepth = .low
+        #expect(try model.makeRequest().reasoningBudgetTokens
+            == ReasoningDepth.low.budgetTokens)
+
+        model.reasoningDepth = .unbounded
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "unbounded sent a budget")
+
+        // A closed frame has nothing to bound, whatever the depth says.
+        model.reasoningDepth = .high
+        model.thinkingEnabled = false
+        #expect(try model.makeRequest().reasoningBudgetTokens == nil,
+                "a turn that does no reasoning carried a reasoning budget")
+    }
+
+    /// The depth travels with its family exactly as the switch does, and
+    /// Gemma never grows a key for a control it cannot show.
+    @MainActor @Test func aDepthChangeStaysWithItsFamily() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MacAppSettingsFileStore.save(MacAppSettings(modelVariant: .qwen36),
+                                         at: AppDataLocation.settingsURL(in: root))
+        let model = makeModel(root: root, client: MockLifecycleInferenceClient(), host: sixteenGigabyteHost)
+        #expect(model.reasoningDepth == AppReasoningDepth.familyDefault)
+        model.reasoningDepth = .high
+
+        await model.setModelVariant(.int4)
+        #expect(model.reasoningDepth == .unbounded,
+                "Gemma inherited a depth from Qwen")
+
+        await model.setModelVariant(.qwen36)
+        #expect(model.reasoningDepth == .high, "the Qwen edit was lost over the switch")
+
+        let saved = try #require(try MacAppSettingsFileStore.load(at: AppDataLocation.settingsURL(in: root)))
+        #expect(saved.reasoningDepthQwen36 == .high)
+        #expect(saved.reasoningDepth(for: .int4) == .unbounded)
     }
 
     // MARK: - Helpers

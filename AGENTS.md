@@ -1,6 +1,7 @@
 # TurboFieldfare
 
-Swift and Metal inference for Gemma 4 26B-A4B on Apple Silicon.
+Swift and Metal inference for Gemma 4 26B-A4B and Qwen3.6 35B-A3B on Apple
+Silicon.
 
 ## Scope
 
@@ -31,9 +32,21 @@ swift run -c release TurboFieldfareCLI \
   --model scratch/gemma4-8bit.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
+swift run -c release TurboFieldfareRepack --variant qwen36 --dry-run --output scratch/qwen36.gturbo
+swift run -c release TurboFieldfareRepack --variant qwen36 --output scratch/qwen36.gturbo
+swift run -c release TurboFieldfareRepack --verify-install --input-gturbo scratch/qwen36.gturbo
+swift run -c release TurboFieldfareCLI \
+  --model scratch/qwen36.gturbo \
+  --prompt "The capital of France is" \
+  --max-new 64
+swift run -c release TurboFieldfareCLI \
+  --model scratch/qwen36.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/short-explanation.json \
+  --no-thinking \
+  --max-new 256
 ```
 
-The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB for the default 4-bit model (`--variant int4`) and about 27 GB for the experimental 8-bit one (`--variant int8`), which needs a 16 GB Mac or larger; do not download the 8-bit checkpoint unless the user asks. `--dry-run` reads only metadata and shard headers. Keep each variant in its own directory. Cancellation preserves verified completed ranges; continue them with `--resume` and the same `--variant`, or remove them with `--discard-partial --output scratch/gemma4.gturbo`. The CLI and server read the variant from the manifest of the `--model` directory and print it.
+The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB for the default 4-bit model (`--variant int4`), about 27 GB for the experimental 8-bit one (`--variant int8`), which needs a 16 GB Mac or larger, and about 20 GB for Qwen3.6 35B-A3B 4-bit (`--variant qwen36`), which installs 47 files totalling 19.6 GB; do not download the 8-bit or the Qwen checkpoint unless the user asks. `--dry-run` reads only metadata and shard headers. Keep each variant in its own directory. Cancellation preserves verified completed ranges; continue them with `--resume` and the same `--variant`, or remove them with `--discard-partial --output scratch/gemma4.gturbo`. The CLI and server read the variant from the manifest of the `--model` directory and print it.
 
 ## Local server
 
@@ -59,7 +72,7 @@ or Preview macros. Run `ruby Scripts/check_swiftui_macros.rb --self-test` and
 
 ## Test rules
 
-Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo` or `scratch/gemma4-8bit.gturbo` (the variant the run uses), and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, `scratch/gemma4-8bit.gturbo` or `scratch/qwen36.gturbo` (the model the run uses, proved by reading a byte of its `manifest.json` and not by the path existing), and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 
@@ -70,7 +83,7 @@ directory so settings and history stay separate. `TURBO_FIELDFARE_MODEL_PATH`
 overrides the saved model location and disables location changes in the UI.
 See [Build a Mac app](README.md#build-a-mac-app) for bundle instructions.
 
-For performance results, build release once and follow the [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable experimental controls or profiling. Name the model variant in every result.
+For performance results, build release once and follow the [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable experimental controls or profiling. Name the model family and variant in every result.
 
 Do not download a full checkpoint, duplicate the `.gturbo` model, create a worktree, or purge caches just to run tests.
 

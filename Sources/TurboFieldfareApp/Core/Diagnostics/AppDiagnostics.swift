@@ -149,6 +149,12 @@ public enum AppInferenceEvent: Equatable, Sendable {
     case prefillProgress(done: Int, total: Int)
     case memorySample
     case token(AppTokenEvent)
+    /// The thinking-block state of a turn that has one (S25 step 5, D11):
+    /// true while the model reasons inside its thinking frame, false when
+    /// visible content closes the frame or the turn ends. Families whose
+    /// template has no thinking frame never send it, so a Gemma run is
+    /// event-for-event what it was before.
+    case thinking(active: Bool)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
     case failed(AppInferenceError, partial: AppDiagnostics?)

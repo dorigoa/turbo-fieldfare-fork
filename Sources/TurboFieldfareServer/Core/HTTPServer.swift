@@ -17,6 +17,10 @@ public actor TurboFieldfareHTTPServer {
 
     private let group: MultiThreadedEventLoopGroup
     private let modelID: String
+    /// The family the loaded model belongs to (S23): it decides which
+    /// request fields exist (`chat_template_kwargs`) and which sampling
+    /// defaults answer when the caller names none (D10, D11).
+    private let family: ModelFamily
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
@@ -32,11 +36,13 @@ public actor TurboFieldfareHTTPServer {
                 backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 visionCapability: String = "missing",
+                family: ModelFamily = .gemma4,
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
+        self.family = family
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
@@ -48,6 +54,7 @@ public actor TurboFieldfareHTTPServer {
 
     public func start(port: Int) async throws -> Channel {
         let modelID = self.modelID
+        let family = self.family
         let backend = self.backend
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
@@ -74,6 +81,7 @@ public actor TurboFieldfareHTTPServer {
                 }.flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         modelID: modelID,
+                        family: family,
                         backend: backend,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
@@ -144,6 +152,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     typealias OutboundOut = HTTPServerResponsePart
 
     private let modelID: String
+    private let family: ModelFamily
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
@@ -164,6 +173,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var activeTask: Task<Void, Never>?
 
     init(modelID: String,
+         family: ModelFamily,
          backend: any ServerInferenceBackend,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
@@ -171,6 +181,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          attachmentRoot: URL,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
+        self.family = family
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
@@ -204,7 +215,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // elsewhere is counted and dropped.
             bodyParser = Self.carriesChatBody(head)
                 ? StreamingChatRequestBody(attachmentRoot: attachmentRoot,
-                                           visionCapability: visionCapability)
+                                           visionCapability: visionCapability,
+                                           family: family)
                 : nil
             bodyError = nil
             receivedBodyBytes = 0
@@ -334,10 +346,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func handleCompletion(body: ParsedChatRequestBody,
                                   context: ChannelHandlerContext) {
         do {
-            let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: body.json)
+            let decoder = JSONDecoder()
+            // The key sweep in the request decoder asks the family whether
+            // `chat_template_kwargs` is a field at all (D11).
+            decoder.userInfo[OpenAIChatRequest.modelFamilyUserInfoKey] = family
+            let decoded = try decoder.decode(OpenAIChatRequest.self, from: body.json)
             let request = try OpenAIRequestValidator.validate(
                 decoded,
                 modelID: modelID,
+                family: family,
                 preStagedImages: body.stagedImages,
                 attachmentLease: body.lease)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")

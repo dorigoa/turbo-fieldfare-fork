@@ -16,8 +16,15 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         "\(tokens / 1_024)K"
     }
 
-    /// The architecture every figure on this type is derived from. The menu
-    /// only ever offers contexts for the model the app ships with.
+    /// The architecture the parameterless members below derive their figures
+    /// from, which is Gemma's because it was the only family when they were
+    /// written. Nothing in the app reaches them any more: the picker reads
+    /// `menuLabel(config:)` with the loaded model's `admissionArchConfig`, and
+    /// every admission call passes its own `config`, because the KV geometry
+    /// is per family — Qwen3.6 keeps a cache in ten of its forty layers and
+    /// holds recurrent state in the rest (S24). They survive for the tests
+    /// that pin the Gemma figures, so a reader should not take this constant
+    /// for what the menu shows.
     private static let architecture = ArchConfig.gemma4_26B_A4B
 
     /// Delegated rather than recomputed: the menu label, the loader's refusal,
@@ -35,31 +42,37 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         minimumHostMemoryBytes(footprint: .affine4Measured)
     }
 
-    /// The same figures for another variant. The KV cache is the same FP16
-    /// geometry for every variant; what changes is the footprint around it.
-    public func projectedFootprintBytes(footprint: ModelFootprint) -> UInt64 {
-        ContextAdmission.projectedFootprintBytes(config: Self.architecture,
+    /// The same figures for another variant. The Gemma variants share the FP16
+    /// geometry; what changes is the footprint around it. A variant of another
+    /// family passes its own pinned `config`, whose layer mask and window say
+    /// how that model allocates KV (S24).
+    public func projectedFootprintBytes(footprint: ModelFootprint,
+                                        config: ArchConfig = .gemma4_26B_A4B) -> UInt64 {
+        ContextAdmission.projectedFootprintBytes(config: config,
                                                  maxContext: tokens,
                                                  footprint: footprint)
     }
 
-    public func minimumHostMemoryBytes(footprint: ModelFootprint) -> UInt64 {
-        ContextAdmission.minimumHostMemoryBytes(config: Self.architecture,
+    public func minimumHostMemoryBytes(footprint: ModelFootprint,
+                                       config: ArchConfig = .gemma4_26B_A4B) -> UInt64 {
+        ContextAdmission.minimumHostMemoryBytes(config: config,
                                                 maxContext: tokens,
                                                 footprint: footprint)
     }
 
     public func availability(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                             footprint: ModelFootprint = .affine4Measured) -> ContextAdmission.Availability {
-        ContextAdmission.availability(config: Self.architecture,
+                             footprint: ModelFootprint = .affine4Measured,
+                             config: ArchConfig = .gemma4_26B_A4B) -> ContextAdmission.Availability {
+        ContextAdmission.availability(config: config,
                                       maxContext: tokens,
                                       hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
                                       footprint: footprint)
     }
 
     public func needDescription(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                                footprint: ModelFootprint = .affine4Measured) -> String {
-        ContextAdmission.needDescription(config: Self.architecture,
+                                footprint: ModelFootprint = .affine4Measured,
+                                config: ArchConfig = .gemma4_26B_A4B) -> String {
+        ContextAdmission.needDescription(config: config,
                                          maxContext: tokens,
                                          hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
                                          footprint: footprint)
@@ -75,10 +88,11 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// Empty when the variant whose `footprint` this is cannot run on this host
     /// at any context; the app then refuses the load outright.
     public static func available(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                                 footprint: ModelFootprint = .affine4Measured) -> [AppContextLengthOption] {
+                                 footprint: ModelFootprint = .affine4Measured,
+                                 config: ArchConfig = .gemma4_26B_A4B) -> [AppContextLengthOption] {
         allCases.filter {
             $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                            footprint: footprint) == .available
+                            footprint: footprint, config: config) == .available
         }
     }
 
@@ -87,8 +101,10 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// the loader refuses an unbacked context before it allocates, so the
     /// refusal is where that machine is told, not a menu with no rows in it.
     public static func largestAvailable(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                                        footprint: ModelFootprint = .affine4Measured) -> AppContextLengthOption {
-        available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, footprint: footprint).last ?? .fourK
+                                        footprint: ModelFootprint = .affine4Measured,
+                                        config: ArchConfig = .gemma4_26B_A4B) -> AppContextLengthOption {
+        available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, footprint: footprint,
+                  config: config).last ?? .fourK
     }
 
     public static let defaultOption: AppContextLengthOption = .eightK
@@ -96,9 +112,14 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// The default row is labeled as such; every other row shows its FP16 KV
     /// allocation relative to the default, computed from `fp16KVBytes` rather
     /// than hardcoded so a default change moves every delta with it.
-    public var menuLabel: String {
+    public var menuLabel: String { menuLabel(config: Self.architecture) }
+
+    /// The label for a variant of another family, whose pinned `config`
+    /// decides the KV geometry the delta is computed from (S24).
+    public func menuLabel(config: ArchConfig) -> String {
         guard self != Self.defaultOption else { return "\(shortLabel), Default" }
-        let delta = Int64(fp16KVBytes) - Int64(Self.defaultOption.fp16KVBytes)
+        let delta = Int64(ContextAdmission.fp16KVBytes(config: config, maxContext: tokens))
+            - Int64(ContextAdmission.fp16KVBytes(config: config, maxContext: Self.defaultOption.tokens))
         return "\(shortLabel), \(Self.formattedDelta(delta))"
     }
 

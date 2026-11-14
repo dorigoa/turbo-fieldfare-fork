@@ -50,6 +50,21 @@ public final class AppModel {
     /// variants' defaults are derived from the 4-bit location, so they are
     /// computed against this rather than stored.
     private let defaultFourBitModelURL: URL
+    /// Each family's sampling as the settings file recorded it, keyed by the
+    /// variant that owns the storage — the two Gemma variants share the keys
+    /// they had before variants existed, Qwen has its own (S24). The values on
+    /// screen belong to `modelVariant`; a switch saves them here and shows the
+    /// other family's.
+    private var savedSampling: [AppModelVariant: AppSamplingValues]
+    /// Each family's thinking-frame choice as saved for the run (S25 step 6),
+    /// keyed like `savedSampling`. Only Qwen has a frame, so the Gemma slot
+    /// always holds its default; the switch on screen belongs to `modelVariant`
+    /// and a variant change saves and restores it the way sampling is.
+    private var savedThinkingEnabled: [AppModelVariant: Bool]
+    /// Each family's reasoning depth as saved for the run (D11), keyed like
+    /// `savedSampling`. Only Qwen has a depth to save; the Gemma slot always
+    /// holds `unbounded`, the no-cap value its turns have always used.
+    private var savedReasoningDepth: [AppModelVariant: AppReasoningDepth]
     /// Which checkpoint the app installs and loads. Settable only through
     /// `setModelVariant`, because changing it moves the model location, the
     /// download, the installed-model probe and memory admission together.
@@ -110,6 +125,16 @@ public final class AppModel {
     public var topK: Int = 64
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
+    /// Whether this family's generations open their thinking frame (D11,
+    /// S25 step 6). The screen value for `modelVariant`, saved per family like
+    /// the sampling above; a family without a frame shows no switch and sends
+    /// no value, so what reaches Gemma never changes.
+    public var thinkingEnabled: Bool = true
+    /// How deeply this family may reason before answering (D11). The screen
+    /// value for `modelVariant`, saved per family like the switch above; a
+    /// family without a thinking frame shows no control and sends no budget,
+    /// so what reaches Gemma never changes.
+    public var reasoningDepth: AppReasoningDepth = AppReasoningDepth.familyDefault
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var showPromptExamples: Bool = true
     public private(set) var textSize: AppTextSize = .standard
@@ -148,6 +173,10 @@ public final class AppModel {
     public var loadState: AppModelLoadState = .notLoaded
     public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
     public internal(set) var phase: AppGenerationPhase = .idle
+    /// True while the running turn is reasoning inside its thinking frame
+    /// (S25 step 5, D11). Only families with a thinking frame report one, so
+    /// this is always false for Gemma; every generation run starts it closed.
+    public private(set) var isThinking: Bool = false
     public private(set) var liveTokenCount: Int = 0
     public private(set) var liveElapsedDecodeSeconds: Double = 0
     public internal(set) var livePrefillDone: Int = 0
@@ -340,11 +369,37 @@ public final class AppModel {
                                             variant: variant)
         self.maxContextTokens = admitted.tokens
         self.contextClampNotice = admitted.notice
-        self.temperature = settings.temperature
-        self.topKEnabled = settings.topKEnabled
-        self.topK = settings.topK
-        self.topPEnabled = settings.topPEnabled
-        self.topP = settings.topP
+        // Sampling per family (U4): each family's saved values, and the
+        // launch variant's shown — its own if the user saved some, else the
+        // family's defaults.
+        var savedSampling: [AppModelVariant: AppSamplingValues] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedSampling[family] = settings.sampling(for: family)
+        }
+        self.savedSampling = savedSampling
+        let launchSampling = savedSampling[Self.samplingKey(for: variant)] ?? variant.defaultSampling
+        self.temperature = launchSampling.temperature
+        self.topKEnabled = launchSampling.topKEnabled
+        self.topK = launchSampling.topK
+        self.topPEnabled = launchSampling.topPEnabled
+        self.topP = launchSampling.topP
+        // The thinking frame follows the same per-family reading: each
+        // family's saved choice (only Qwen can have one), and the launch
+        // variant's shown.
+        var savedThinkingEnabled: [AppModelVariant: Bool] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedThinkingEnabled[family] = settings.thinkingEnabled(for: family)
+        }
+        self.savedThinkingEnabled = savedThinkingEnabled
+        self.thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
+        // The depth is read per family exactly as the switch is.
+        var savedReasoningDepth: [AppModelVariant: AppReasoningDepth] = [:]
+        for family in [AppModelVariant.int4, .qwen36] {
+            savedReasoningDepth[family] = settings.reasoningDepth(for: family)
+        }
+        self.savedReasoningDepth = savedReasoningDepth
+        self.reasoningDepth = savedReasoningDepth[Self.samplingKey(for: variant)]
+            ?? AppReasoningDepth.familyDefault
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.textSize = settings.textSize
@@ -402,6 +457,10 @@ public final class AppModel {
     /// What admission charges the current variant beyond its KV cache.
     public var modelFootprint: ModelFootprint { modelVariant.modelFootprint }
 
+    /// The architecture admission uses for the current variant: its pinned
+    /// checkpoint constants, so the KV term counts the family's own layers.
+    public var admissionArchConfig: ArchConfig { modelVariant.admissionArchConfig }
+
     /// What the Context picker may offer on this Mac.
     ///
     /// Never empty: a variant this Mac cannot run at any context keeps showing
@@ -410,7 +469,8 @@ public final class AppModel {
     public var contextOptions: [AppContextLengthOption] {
         let available = AppContextLengthOption.available(on: hostMemoryBytes,
                                                          expertCacheSlots: runtimeOptions.expertCacheSlots,
-                                                         footprint: modelFootprint)
+                                                         footprint: modelFootprint,
+                                                         config: admissionArchConfig)
         guard available.isEmpty else { return available }
         return [AppContextLengthOption(rawValue: maxContextTokens) ?? .fourK]
     }
@@ -421,15 +481,16 @@ public final class AppModel {
     /// test rather than by looking at the window. Nil when every size is
     /// offered — there is then nothing to explain.
     public nonisolated static func contextOptionsNote(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16,
-                                                      footprint: ModelFootprint = .affine4Measured) -> String? {
+                                                      footprint: ModelFootprint = .affine4Measured,
+                                                      config: ArchConfig = .gemma4_26B_A4B) -> String? {
         let hidden = AppContextLengthOption.allCases.filter {
             $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                            footprint: footprint) != .available
+                            footprint: footprint, config: config) != .available
         }
         guard !hidden.isEmpty else { return nil }
         return hidden
             .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                      footprint: footprint) }
+                                      footprint: footprint, config: config) }
             .joined(separator: " ")
     }
 
@@ -439,7 +500,8 @@ public final class AppModel {
         guard modelVariantMemoryRefusal == nil else { return nil }
         return Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes,
                                        expertCacheSlots: runtimeOptions.expertCacheSlots,
-                                       footprint: modelFootprint)
+                                       footprint: modelFootprint,
+                                       config: admissionArchConfig)
     }
 
     /// Why this Mac cannot load the current variant at any context, or nil
@@ -456,12 +518,13 @@ public final class AppModel {
         expertCacheSlots: Int = 16
     ) -> String? {
         let footprint = variant.modelFootprint
+        let config = variant.admissionArchConfig
         guard AppContextLengthOption.available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                               footprint: footprint).isEmpty else { return nil }
+                                               footprint: footprint, config: config).isEmpty else { return nil }
         let smallest = AppContextLengthOption.allCases[0]
         return "The \(variant.shortLabel) model can't be loaded on this Mac. "
             + smallest.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                       footprint: footprint)
+                                       footprint: footprint, config: config)
     }
 
     public var modelVariantMemoryRefusal: String? {
@@ -479,16 +542,16 @@ public final class AppModel {
         _ tokens: Int,
         hostMemoryBytes: UInt64,
         expertCacheSlots: Int = 16,
-        footprint: ModelFootprint = .affine4Measured
+        footprint: ModelFootprint = .affine4Measured,
+        config: ArchConfig = .gemma4_26B_A4B
     ) -> (tokens: Int, notice: String?) {
-        let config = ArchConfig.gemma4_26B_A4B
         guard case .needsMemory = ContextAdmission.availability(
             config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
             footprint: footprint) else {
             return (tokens, nil)
         }
         let fallback = AppContextLengthOption.largestAvailable(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                                               footprint: footprint)
+                                                               footprint: footprint, config: config)
         let need = ContextAdmission.needDescription(config: config,
                                                     maxContext: tokens,
                                                     hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
@@ -512,7 +575,7 @@ public final class AppModel {
             return (tokens, nil)
         }
         return admittedContext(tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                               footprint: variant.modelFootprint)
+                               footprint: variant.modelFootprint, config: variant.admissionArchConfig)
     }
 
     public var isRunning: Bool { runState == .running }
@@ -941,7 +1004,8 @@ public final class AppModel {
             livePrefillTotal: livePrefillTotal,
             lastStopReason: diagnostics?.stopReason,
             isVisionFilesystemMutationInProgress: isVisionFilesystemMutationInProgress,
-            memoryRefusal: modelVariantMemoryRefusal))
+            memoryRefusal: modelVariantMemoryRefusal,
+            isThinking: isThinking))
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -1118,6 +1182,24 @@ public final class AppModel {
 
     private func applyModelVariant(_ variant: AppModelVariant) {
         guard variant != modelVariant else { return }
+        // Sampling follows the family (U4): what is on screen was being
+        // edited for the variant being left, and the one being switched to
+        // shows its own — the values saved for it, or the family's defaults
+        // where the user never changed any.
+        savedSampling[Self.samplingKey(for: modelVariant)] = screenSampling
+        let values = savedSampling[Self.samplingKey(for: variant)] ?? variant.defaultSampling
+        temperature = values.temperature
+        topKEnabled = values.topKEnabled
+        topK = values.topK
+        topPEnabled = values.topPEnabled
+        topP = values.topP
+        // The thinking switch travels with its family for the same reason the
+        // sliders do (S25 step 6).
+        savedThinkingEnabled[Self.samplingKey(for: modelVariant)] = thinkingEnabled
+        thinkingEnabled = savedThinkingEnabled[Self.samplingKey(for: variant)] ?? true
+        savedReasoningDepth[Self.samplingKey(for: modelVariant)] = reasoningDepth
+        reasoningDepth = savedReasoningDepth[Self.samplingKey(for: variant)]
+            ?? AppReasoningDepth.familyDefault
         modelVariant = variant
         installer = installerFactory(variant)
         // Admission moves with the variant: a context the old one could back
@@ -1371,9 +1453,22 @@ public final class AppModel {
     /// The runtime flag only says this build *can* use images; the companion
     /// pack is what makes it possible for this model. Gating on the flag alone
     /// offered an Add-images button with no tower behind it, and the failure
-    /// only surfaced when the user pressed Generate.
+    /// only surfaced when the user pressed Generate. The family decides first
+    /// (D12, S24): a checkpoint with no image tower never accepts an image at
+    /// any price in page cache.
     public var isImageInputAvailable: Bool {
-        isVisionRuntimeSupported && isVisionPackInstalled
+        modelVariant.supportsImages && isVisionRuntimeSupported && isVisionPackInstalled
+    }
+
+    /// Whether the Inspector shows the thinking switch (D11, S25 step 6).
+    ///
+    /// Qwen3.6 is the only family with a thinking frame, so only it gets the
+    /// control; Gemma's Generation section stays exactly as it was. Like the
+    /// image gate the family decides: changing variant unloads the model, so
+    /// the variant on screen is the one a run will use, and the switch is
+    /// configurable before the load as well as after.
+    public var isThinkingControlAvailable: Bool {
+        modelVariant == .qwen36
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
@@ -1636,12 +1731,12 @@ public final class AppModel {
         // the moment a command buffer binds it, so a host that cannot hold it
         // does not find out part-way through a load: it is killed.
         if case .needsMemory = ContextAdmission.availability(
-            config: ArchConfig.gemma4_26B_A4B,
+            config: admissionArchConfig,
             maxContext: maxContext,
             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
             footprint: modelFootprint) {
             loadState = .failed(.modelLoadFailed(
-                ContextAdmission.needDescription(config: ArchConfig.gemma4_26B_A4B,
+                ContextAdmission.needDescription(config: admissionArchConfig,
                                                  maxContext: maxContext,
                                                  hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots,
                                                  footprint: modelFootprint)))
@@ -2103,6 +2198,15 @@ public final class AppModel {
     }
 
     private func recordVisionAvailabilityError(at textModelDirectory: URL) {
+        // D12, S24: for a family with no image tower, no companion pack can
+        // ever be restored. The pack-centric wording below would describe a
+        // repair that does not exist; say the family reason instead.
+        guard modelVariant.supportsImages else {
+            let message = "Image input is not available for this model."
+            visionAvailabilityAttachmentError = message
+            imageAttachmentError = message
+            return
+        }
         let location: String
         do {
             location = try VisionPackLocation.companionURL(
@@ -2409,17 +2513,27 @@ public final class AppModel {
         installETAText = DownloadETAFormatter.string(for: presentation)
     }
 
+    /// The family slot a variant's sampling lives in: the two Gemma variants
+    /// share the keys written before variants ever existed, Qwen3.6 has its
+    /// own (S24).
+    private static func samplingKey(for variant: AppModelVariant) -> AppModelVariant {
+        variant == .qwen36 ? .qwen36 : .int4
+    }
+
+    /// The sampling values on screen right now; they belong to `modelVariant`.
+    /// (`AppModelHistory`'s `currentSampling()` wraps these with the reply
+    /// length for a conversation record; this is just the sliders.)
+    private var screenSampling: AppSamplingValues {
+        AppSamplingValues(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                          topPEnabled: topPEnabled, topP: topP)
+    }
+
     private func currentSettings() -> MacAppSettings {
-        MacAppSettings(
+        var settings = MacAppSettings(
             selectedModelPath: savedModelPaths[.int4],
             migratedHistorySources: migratedHistorySources,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
-            temperature: temperature,
-            topKEnabled: topKEnabled,
-            topK: topK,
-            topPEnabled: topPEnabled,
-            topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
@@ -2430,7 +2544,30 @@ public final class AppModel {
             rdadvisePolicy: runtimeOptions.rdadvisePolicy,
             loadModelOnLaunch: loadModelOnLaunch,
             modelVariant: savedModelVariant,
-            selectedModelPathInt8: savedModelPaths[.int8])
+            selectedModelPathInt8: savedModelPaths[.int8],
+            selectedModelPathQwen36: savedModelPaths[.qwen36])
+        // The sampling on screen belongs to the variant being shown; every
+        // other family is written back with its own saved values, so an edit
+        // made on one model never persists as the other's keys (S24).
+        for family in [AppModelVariant.int4, .qwen36] {
+            let values = Self.samplingKey(for: modelVariant) == family
+                ? screenSampling
+                : savedSampling[family] ?? family.defaultSampling
+            settings.setSampling(values, for: family)
+            // The thinking frame is routed like the sampling: the value on
+            // screen belongs to the shown variant, and writing the others
+            // back with their saved choices keeps an edit made for one
+            // family from ever landing in the other's key (S25 step 6).
+            let thinking = Self.samplingKey(for: modelVariant) == family
+                ? thinkingEnabled
+                : savedThinkingEnabled[family] ?? true
+            settings.setThinkingEnabled(thinking, for: family)
+            let depth = Self.samplingKey(for: modelVariant) == family
+                ? reasoningDepth
+                : savedReasoningDepth[family] ?? AppReasoningDepth.familyDefault
+            settings.setReasoningDepth(depth, for: family)
+        }
+        return settings
     }
 
     func persistSettings() {
@@ -2887,6 +3024,7 @@ public final class AppModel {
             options: request.runtimeOptions,
             forceLogitsHead: !request.isPureGreedy)
         isCancellationPending = false
+        isThinking = false
         liveTokenCount = 0
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
@@ -3072,7 +3210,16 @@ public final class AppModel {
             // the service's own exact state, while every image fails closed.
             conversationTokens: conversation.kvTokens ?? effective.maxContextTokens,
             conversationEpoch: ticket?.epoch,
-            turnIndex: ticket?.index)
+            turnIndex: ticket?.index,
+            // D11 (S25 step 6): only a family with a thinking frame sends a
+            // value; Gemma's request keeps reading exactly as before, with
+            // the field absent.
+            enableThinking: isThinkingControlAvailable ? thinkingEnabled : nil,
+            // Reasoning depth (D11): only a family with a frame sends a budget, and only a turn
+            // that opens one. `unbounded` sends nil, which is the turn every
+            // surface ran before the cap existed.
+            reasoningBudgetTokens: isThinkingControlAvailable && thinkingEnabled
+                ? reasoningDepth.budgetTokens : nil)
         try request.validate(requireModelDirectory: true)
         return request
     }
@@ -3087,6 +3234,11 @@ public final class AppModel {
             livePrefillDone = done
             livePrefillTotal = total
             sampleLiveMemory()
+        case .thinking(let active):
+            // The runtime reports only transitions, and it closes an open
+            // block during the turn's own unwind, so the state cannot
+            // outlive the run. The HUD reads `isThinking` (step 6).
+            isThinking = active
         case .token(let token):
             phase = .decode
             liveTokenCount = token.index + 1

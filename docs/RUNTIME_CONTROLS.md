@@ -13,15 +13,33 @@ The Mac app and CLI expose these generation controls:
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after the retained conversation and new turn. The CLI uses its explicit or default `--max-new` limit. |
 | Maximum context | 4K, 8K, 16K, 32K, 64K, 128K, 256K, depending on your Mac's RAM and cache settings | `--max-context` | CLI and app: 8K; server: 16K | Sets the combined capacity for the prompt or conversation and the response. The app shows how much FP16 KV-cache memory each size adds. The server defaults to 16K because agent clients routinely send prompts near 8K. |
-| Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
-| Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
-| Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
+| Temperature | 0...2 in 0.05 steps | `--temperature` | Gemma 0.2, Qwen3.6 1.0 | `0` is greedy; positive values sample. The default is each checkpoint's own reference value. |
+| Top-K | Off or 1...256 | `--top-k` | Gemma 64, Qwen3.6 20 | Keeps at most K candidates. CLI `0` turns it off. |
+| Top-P | Off or 0.01...1 | `--top-p` | 0.95 for both families | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
+| Reasoning | Thinking switch, Qwen3.6 only | `--no-thinking` | Reasoning on | Qwen3.6 thinks before it answers. The CLI streams the reasoning to stderr and keeps the answer on stdout; the flag starts the turn after an empty think block instead. Gemma has no reasoning phase and ignores the control. |
+| Reasoning depth | Reasoning depth menu, Qwen3.6 only: Low, Medium, High, Unbounded | `--reasoning-depth low\|medium\|high` | App: Medium; CLI and server: unbounded | Caps the tokens Qwen3.6 may spend reasoning: Low 256, Medium 1,024, High 4,096. When the budget runs out the runtime closes the thinking block and the model answers, instead of reasoning until the response limit. Unbounded is the pre-cap behaviour. The server takes the same levels as `reasoning_effort`. Not combinable with reasoning off, which has no depth to bound. Gemma ignores the control. |
 
 With positive temperature, a CLI Top-P below `1` requires Top-K between `1`
 and `256`. To disable both truncation controls, pass `--top-k 0 --top-p 1`.
 Generation controls apply to the next request and do not require a model
 reload. They are interactive product settings, not the fixed community
 benchmark protocol.
+
+Reasoning spends generated tokens, so with Qwen3.6 a low `--max-new` can end
+the turn inside the thinking block and return no answer at all. 1,024 tokens
+was not enough for any of the three community benchmark prompts. There are
+three ways out, in increasing order of how much reasoning they keep: pass
+`--no-thinking` for no reasoning at all, set a reasoning depth so the runtime
+closes the block and the model answers within the budget, or raise `--max-new`
+and leave the reasoning unbounded.
+
+A depth is a cap on the model's own reasoning, not on the frame: the closing
+marker the runtime writes does not count against the budget, though it does
+count against `--max-new` like any other token. A block the model closes by
+itself is left alone — the cap fires at most once per turn, and never after the
+model's own close. `--max-new` still wins: if the response limit is reached on
+the same token the budget would be, the turn ends there with no answer, so a
+depth only helps when `--max-new` leaves room after it.
 
 ## Runtime settings
 
@@ -127,21 +145,28 @@ slots, and headroom for macOS and the file cache. The last two depend on the
 model variant, which the app takes from **Settings > Model Variant** and the
 CLI and server read from the model's manifest:
 
-| Figure | 4-bit model | 8-bit model |
-| --- | ---: | ---: |
-| Runtime with 16 slots | 2 GiB | 3.5 GiB |
-| macOS and file cache | 3 GiB | 5 GiB (estimate) |
-| One routed-expert slot | 3,358,720 bytes | 6,324,224 bytes |
-| 24 slots instead of 16 | About 0.75 GiB more | About 1.41 GiB more |
-| 32 slots instead of 16 | About 1.50 GiB more | About 2.83 GiB more |
+| Figure | Gemma 4-bit | Gemma 8-bit | Qwen3.6 4-bit |
+| --- | ---: | ---: | ---: |
+| Runtime with 16 slots | 2 GiB | 3.5 GiB | 1.75 GiB |
+| macOS and file cache | 3 GiB | 5 GiB (estimate) | 3 GiB (estimate) |
+| One routed-expert slot | 3,358,720 bytes | 6,324,224 bytes | 1,769,472 bytes |
+| 24 slots instead of 16 | About 0.75 GiB more | About 1.41 GiB more | About 0.53 GiB more |
+| 32 slots instead of 16 | About 1.50 GiB more | About 2.83 GiB more | About 1.05 GiB more |
+| Recurrent state | — | — | 64 MiB |
 
-A slot holds one routed expert in each of the 30 layers, so each slot above 16
-costs 30 expert strides. With the 4-bit model on an 8 GB Mac, neither 24 nor
+A slot holds one routed expert in each layer, so each slot above 16 costs one
+expert stride per layer: 30 of them for Gemma, 40 for Qwen3.6. With the 4-bit model on an 8 GB Mac, neither 24 nor
 32 slots leaves enough room for 128K under this estimate. The 8-bit model needs
 about 8.8 GiB even at 4K, so it is refused on an 8 GB Mac at every context.
 Its runtime figure is measured, like the 4-bit one; its macOS and file-cache
 headroom is still an estimate scaled from the 4-bit one, and its slot size is
 exact.
+
+Qwen3.6 keeps a KV cache in only ten of its forty layers and holds a
+fixed-size recurrent state in the other thirty, so its context costs 20,480
+bytes per token and nothing else in it grows with the conversation. Its runtime
+figure is measured and its headroom is an estimate, as for the 8-bit model. An
+8 GB Mac can back it up to 128K and is refused only the 262,144-token ceiling.
 
 When a setting exceeds the estimate:
 

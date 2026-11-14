@@ -27,13 +27,14 @@ enum DecodeLoadAdmission {
                hostMemoryBytes: hostMemoryBytes,
                environment: environment,
                expertCacheSlots: expertCacheSlots,
-               footprint: { footprint })
+               footprint: { (.gemma4_26B_A4B, footprint) })
     }
 
     /// The same rule for the model about to be loaded, sized from its
     /// manifest: an 8-bit pack maps about twice the resident weights and fills
     /// slots twice the size, so the 4-bit figures would admit a context the
-    /// host cannot back.
+    /// host cannot back, and a Qwen pack needs its family's geometry, not
+    /// Gemma's (S24).
     ///
     /// Reads only `manifest.json`, and only once the ceiling and the override
     /// have been decided. A manifest that cannot be read is a refusal, not a
@@ -47,37 +48,47 @@ enum DecodeLoadAdmission {
                hostMemoryBytes: hostMemoryBytes,
                environment: environment,
                expertCacheSlots: expertCacheSlots,
-               footprint: { try ModelFootprint.forModelDirectory(modelDirectory) })
+               footprint: { try ContextAdmission.admissionProfile(forModelDirectory: modelDirectory) })
     }
 
     private static func decide(maxContextTokens: Int,
                                hostMemoryBytes: UInt64,
                                environment: [String: String], expertCacheSlots: Int,
-                               footprint readFootprint: () throws -> ModelFootprint) -> String? {
-        let config = ArchConfig.gemma4_26B_A4B
+                               footprint readProfile: () throws -> (config: ArchConfig,
+                                                                    footprint: ModelFootprint)) -> String? {
         // The ceiling is the checkpoint's, not the host's, so no override
         // reaches it: memory cannot make a position the model was never
-        // trained to address valid.
+        // trained to address valid. Both pinned checkpoints carry the same
+        // ceiling (U2 excludes anything above 262,144), so it answers before
+        // the manifest is opened; the profile below confirms it again from
+        // the checkpoint actually being loaded.
+        let ceiling = ArchConfig.gemma4_26B_A4B.maxPositionEmbeddings
+        guard maxContextTokens <= ceiling else {
+            return ModelError.contextExceedsModel(
+                requested: maxContextTokens,
+                maximum: ceiling).description
+        }
+        guard environment[overrideEnvironmentKey] != "1" else { return nil }
+        let profile: (config: ArchConfig, footprint: ModelFootprint)
+        do {
+            profile = try readProfile()
+        } catch {
+            return "The model's memory needs could not be read from its manifest: \(error)"
+        }
+        let config = profile.config
         guard maxContextTokens <= config.maxPositionEmbeddings else {
             return ModelError.contextExceedsModel(
                 requested: maxContextTokens,
                 maximum: config.maxPositionEmbeddings).description
         }
-        guard environment[overrideEnvironmentKey] != "1" else { return nil }
-        let footprint: ModelFootprint
-        do {
-            footprint = try readFootprint()
-        } catch {
-            return "The model's memory needs could not be read from its manifest: \(error)"
-        }
         guard case .needsMemory = ContextAdmission.availability(
             config: config,
             maxContext: maxContextTokens,
             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-            footprint: footprint) else { return nil }
+            footprint: profile.footprint) else { return nil }
         return ContextAdmission.needDescription(config: config,
                                                 maxContext: maxContextTokens,
                                                 hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots,
-                                                footprint: footprint)
+                                                footprint: profile.footprint)
     }
 }

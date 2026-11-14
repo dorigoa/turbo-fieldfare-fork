@@ -150,6 +150,37 @@ import TurboFieldfare
         #expect(refusal.contains("262145"))
     }
 
+    /// S24: a Qwen manifest is sized with its family's geometry, not Gemma's.
+    /// S27 measured that geometry, which moved where the two profiles part:
+    /// 128K now fits an 8 GB Mac on either, so the ceiling is the discriminator
+    /// — a host that exactly meets Qwen's requirement at 262,144 tokens is
+    /// still short of the 4-bit Gemma one. The boundary is inclusive.
+    @Test func aQwenManifestIsNotMeasuredWithGemmaGeometry() throws {
+        let directory = try writeQwenManifest()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let minimum: UInt64 = 262_144 * 20_480 + 1_879_048_192 + 67_108_864 + 3_221_225_472
+        // The same host, sized with the 4-bit Gemma constants, refuses.
+        #expect(DecodeLoadAdmission.refusal(maxContextTokens: 262_144,
+                                            hostMemoryBytes: minimum,
+                                            environment: [:]) != nil)
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 262_144,
+                                            hostMemoryBytes: minimum, environment: [:]) == nil)
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 262_144,
+                                            hostMemoryBytes: minimum - 1, environment: [:]) != nil)
+        let refusal = try #require(DecodeLoadAdmission.refusal(
+            modelDirectory: directory, maxContextTokens: 262_144,
+            hostMemoryBytes: eightGigabyteHost, environment: [:]))
+        #expect(refusal.contains("262,144"))
+        #expect(refusal.contains("needs 16 GB"))
+        // 128K fits an 8 GB Mac on the measured figures (S27); it did not on
+        // the provisional ones.
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 131_072,
+                                            hostMemoryBytes: eightGigabyteHost, environment: [:]) == nil)
+        // Small contexts sail through on both profiles.
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 4_096,
+                                            hostMemoryBytes: eightGigabyteHost, environment: [:]) == nil)
+    }
+
     /// The default footprint parameter is the 4-bit pack's, so callers that
     /// predate variants keep their answers.
     @Test func theexplicitFootprintDefaultsToTheFourBitPack() {
@@ -225,6 +256,57 @@ import TurboFieldfare
             "files": files,
             "expertsPerLayer": arch.numExperts,
             "numLayers": arch.numLayers,
+            "expertStride": UInt64(getpagesize()),
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+            .write(to: directory.appendingPathComponent("manifest.json"))
+        return directory
+    }
+
+    /// Just the manifest, with the pinned Qwen constants (D1, C4).
+    private func writeQwenManifest() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admission-qwen-\(UUID().uuidString).gturbo")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        func slot(_ weightBits: Int) -> [String: Any] {
+            ["weightBits": weightBits, "scheme": "affine", "scaleType": "BF16",
+             "biasType": "BF16", "groupSize": Quantization.groupSize]
+        }
+        let zeroSHA = String(repeating: "0", count: 64)
+        let manifest: [String: Any] = [
+            "magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
+            "flags": ["streamingPresent": true],
+            "modelID": "test/qwen36-35b-a3b",
+            "modelFamily": "qwen3_5_moe",
+            "qwen35": [
+                "linearNumKeyHeads": 16, "linearNumValueHeads": 32,
+                "linearKeyHeadDim": 128, "linearValueHeadDim": 128,
+                "linearConvKernel": 4, "rmsNormEps": 1e-6,
+                "normWeightsShifted": true, "attentionOutputGate": true,
+                "sharedExpertGate": true,
+            ],
+            "arch": [
+                "hiddenSize": 2048, "ffnIntermediate": 512, "moeIntermediateSize": 512,
+                "numHeads": 16, "numKVHeads": 2, "numFullKVHeads": 2,
+                "headDim": 256, "fullHeadDim": 256, "vocabSize": 248_320,
+                "slidingWindow": 0, "finalLogitSoftcap": 0,
+                "ropeTheta": 10_000_000, "fullRopeTheta": 10_000_000,
+                "partialRotaryFactor": 0.25, "numLayers": 40,
+                "numExperts": 256, "topKExperts": 8,
+                "tieWordEmbeddings": false, "attentionKEqV": false,
+                "hiddenActivation": "silu",
+                "fullAttentionLayerMask": (0..<40).map { $0 % 4 == 3 ? 1 : 0 },
+            ],
+            "quant": [
+                "embedding": slot(4), "attention": slot(4), "router": slot(8),
+                "sharedExpert": slot(4), "routedExpert": slot(4),
+            ],
+            "files": [
+                "model_weights.bin": ["size": 0, "sha256": zeroSHA],
+                "packed_experts/layout.json": ["size": 2, "sha256": zeroSHA],
+            ],
+            "expertsPerLayer": 256,
+            "numLayers": 40,
             "expertStride": UInt64(getpagesize()),
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])

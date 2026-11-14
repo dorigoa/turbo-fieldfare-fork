@@ -223,11 +223,12 @@ per-variant figures, the runtime's non-KV footprint with 16 expert-cache slots
 and the headroom left to macOS and the file cache, plus each slot above 16 at
 the variant's page-rounded stride. The variant comes from the model's manifest.
 
-| Figure | 4-bit | 8-bit |
-| --- | ---: | ---: |
-| Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 3.5 GiB (measured) |
-| Host reserve | 3 GiB | 5 GiB (estimate) |
-| Each slot above 16, all 30 layers | 3,358,720 bytes × 30 | 6,324,224 bytes × 30 |
+| Figure | Gemma 4-bit | Gemma 8-bit | Qwen3.6 4-bit |
+| --- | ---: | ---: | ---: |
+| Non-KV runtime footprint, 16 slots | 2 GiB (measured) | 3.5 GiB (measured) | 1.75 GiB (measured) |
+| Host reserve | 3 GiB | 5 GiB (estimate) | 3 GiB (estimate) |
+| Each slot above 16, every layer | 3,358,720 bytes × 30 | 6,324,224 bytes × 30 | 1,769,472 bytes × 40 |
+| Recurrent state, charged once | — | — | 64 MiB |
 
 The 8-bit non-KV figure comes from peak physical footprints measured on a
 32 GB M5 at 4K and 8K contexts with 16 and 32 slots: 3.07-3.09 GiB once the KV
@@ -237,6 +238,55 @@ scaled from the 4-bit one because each expert miss reads about twice the
 bytes; a 32 GB host cannot measure it. With these figures a 4K context needs
 about 8.8 GiB, so an 8 GB Mac is refused the 8-bit model while a 16 GB Mac is
 admitted.
+
+The Qwen3.6 figure was measured the same way, in S27, on a 36 GB M4 Max: peak
+physical footprint less the computed KV term and less the recurrent state, at
+4K, 32K and 128K with 16 slots. The residual held at 1.611-1.620 GiB across
+that 32-fold range, so the KV term accounts for all of the growth, and 1.75 GiB
+keeps the same margin over the measurement that the other two profiles keep.
+Peak resident set size cannot be used here: KV pages are charged when written,
+not when allocated, so the resident figure does not move with the context and at
+128K reads below the KV term alone. Qwen's reserve stays an estimate for the
+same reason the 8-bit one does. These figures admit a 128K context on an 8 GB
+Mac and refuse only the 262,144-token ceiling; the earlier provisional figure
+refused 128K as well.
+
+## The Qwen3.6 hybrid stack
+
+Qwen3.6 35B-A3B is the second family the runtime loads, and it is not a
+requantization of the first: it changes the shape of the per-position state.
+Gemma 4 interleaves sliding-window and full attention, so every layer keeps a
+KV cache and the sliding ones cap theirs with a ring. Qwen3.6 keeps full
+attention in only ten of its forty layers, at indices 3, 7, …, 39. The other
+thirty are Gated DeltaNet linear blocks, which carry a fixed-size recurrent
+state instead of a cache that grows with the conversation (D1).
+
+The consequences run through the whole runtime:
+
+- **The KV cache is ten layers wide, not forty.** With two KV heads of 256
+  dimensions, FP16 K and V cost 2,048 bytes per token per full-attention layer,
+  so 20,480 bytes per token in all. A 128K context therefore allocates 2.5 GiB,
+  about the same per token as Gemma's five full-attention layers, but nothing
+  else in the stack grows with the context.
+- **The linear layers' state is constant.** The DeltaNet recurrent state and
+  the short-convolution state together occupy 64 MiB whatever the context
+  length, so memory admission charges them once per loaded model rather than
+  per token (D5). `ContextAdmission.ModelFootprint` carries them as
+  `linearStateBytes`, which is zero for Gemma.
+- **A sliding window of zero is the family's signature.** The admission
+  arithmetic branches on it rather than on a family enum, so a checkpoint whose
+  linear layers hold recurrent state is sized correctly by construction.
+- **The cache is hybrid.** One object owns both kinds of per-position state, so
+  the decode loop advances attention rows and recurrent state together and a
+  snapshot captures both. That is what makes the state restorable at a
+  snapshot, and only there: rewinding to an arbitrary earlier position is not
+  supported, because the recurrent state of the intervening tokens cannot be
+  recovered from the kept rows. The server and the app therefore reuse a cached
+  prefix only as a continuation at its exact end, and otherwise prefill again
+  from the start (D6).
+- **The expert pool is wider and thinner.** 256 routed experts per layer
+  against Gemma's 128, top-8 in both, but each expert streams 1,769,472 bytes
+  against 3,358,720, across 40 layer files rather than 30.
 
 ## Load and ownership
 
