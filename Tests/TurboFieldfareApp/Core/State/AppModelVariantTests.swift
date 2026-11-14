@@ -345,32 +345,40 @@ import TurboFieldfare
         #expect(fourBit.notice == legacy.notice)
     }
 
-    /// S24: Qwen3.6 answers admission with its family's geometry — 128K needs
-    /// more than 8 GB — and the clamp for the variant matches that arithmetic,
-    /// not the 4-bit Gemma one that would admit the load.
+    /// S24: Qwen3.6 answers admission with its family's geometry, and S27
+    /// measured it — 256K, not 128K, is what needs more than 8 GB now — so the
+    /// clamp for the variant matches that arithmetic rather than the 4-bit
+    /// Gemma one.
     @Test func theQwenVariantIsAdmittedByItsOwnGeometry() throws {
         #expect(AppModel.modelVariantMemoryRefusal(variant: .qwen36,
                                                    hostMemoryBytes: eightGigabyteHost) == nil)
         #expect(AppModel.modelVariantMemoryRefusal(variant: .qwen36,
                                                    hostMemoryBytes: sixteenGigabyteHost) == nil)
         let note = try #require(AppModel.contextOptionsNote(hostMemoryBytes: eightGigabyteHost,
-                                                            footprint: .qwen36Provisional,
+                                                            footprint: .qwen36Measured,
                                                             config: ArchConfig.qwen36_35B_A3B))
-        #expect(note.contains("131,072"))
+        #expect(note.contains("262,144"))
         #expect(note.contains("needs 16 GB"))
-        // The same host on the old 4-bit Gemma figures hid nothing at 128K.
-        #expect(AppModel.contextOptionsNote(hostMemoryBytes: eightGigabyteHost)
-            .map { !$0.contains("131,072") } ?? true)
-        // 128K is too big for 8 GB (8,657,043,456), 64K is not (7,314,866,176):
-        // the clamp falls back to the largest admitted row and says so once.
-        let clamped = AppModel.admittedContext(131_072, hostMemoryBytes: eightGigabyteHost,
+        // The ceiling is where the two profiles part after S27's measurement:
+        // this host meets Qwen's requirement there exactly and is short of the
+        // 4-bit Gemma one, which still hides the row.
+        let ceilingMinimum: UInt64 = 262_144 * 20_480 + 1_879_048_192 + 67_108_864 + 3_221_225_472
+        #expect(AppModel.contextOptionsNote(hostMemoryBytes: ceilingMinimum,
+                                            footprint: .qwen36Measured,
+                                            config: ArchConfig.qwen36_35B_A3B) == nil)
+        #expect(AppModel.contextOptionsNote(hostMemoryBytes: ceilingMinimum)
+            .map { $0.contains("262,144") } ?? false)
+        // 256K is too big for 8 GB (10,536,091,648), 128K is not
+        // (7,851,737,088): the clamp falls back to the largest admitted row
+        // and says so once.
+        let clamped = AppModel.admittedContext(262_144, hostMemoryBytes: eightGigabyteHost,
                                                variant: .qwen36)
-        #expect(clamped.tokens == 65_536)
-        #expect(clamped.notice?.contains("131,072") == true)
+        #expect(clamped.tokens == 131_072)
+        #expect(clamped.notice?.contains("262,144") == true)
         #expect(clamped.notice?.contains("Qwen3.6") == false) // the need sentence names memory
-        let kept = AppModel.admittedContext(32_768, hostMemoryBytes: eightGigabyteHost,
+        let kept = AppModel.admittedContext(131_072, hostMemoryBytes: eightGigabyteHost,
                                             variant: .qwen36)
-        #expect(kept.tokens == 32_768)
+        #expect(kept.tokens == 131_072)
         #expect(kept.notice == nil)
     }
 

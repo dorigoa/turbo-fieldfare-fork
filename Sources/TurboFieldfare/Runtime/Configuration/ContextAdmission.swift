@@ -64,20 +64,33 @@ public enum ContextAdmission {
         /// The name the 8-bit figures had before they were measured.
         public static let affine8Provisional = affine8Measured
 
-        /// Qwen3.6, provisional (S24). The non-KV figure is an estimate, not a
-        /// measurement: the 4-bit Gemma pack measures 1.75-1.94 GB resident
-        /// around a 1.39 GB weight estimate (3.4), and Qwen's resident set is
-        /// somewhat larger, so 2.5 GiB carries it with margin until S27
-        /// measures it here. The DeltaNet (60 MiB) and conv (2.8 MiB) state is
-        /// constant at 64 MiB (3.4, D5). The reserve is 3 GiB: the routed
-        /// experts stream from 40 layer files with a cold-cache read of about
-        /// 566 MB per token (3.4), between the 4-bit and 8-bit reserves. The
-        /// pinned pack streams each routed expert at 1,769,472 bytes (S6).
-        public static let qwen36Provisional = ModelFootprint(
-            nonKVRuntimeBytes: 5 << 29,
+        /// Qwen3.6, measured (S27). The non-KV figure is the peak memory
+        /// footprint `/usr/bin/time -l` reports, which is `phys_footprint` and
+        /// counts the Metal allocations that peak resident set size misses,
+        /// less the FP16 KV term this type computes and less
+        /// `linearStateBytes`, at 16 slots, running the community benchmark's
+        /// 3,015-token prompt for 256 tokens. On a 36 GB Mac16,9 that residual
+        /// held at 1.618, 1.620 and 1.611 GiB at 4K, 32K and 128K, so the KV
+        /// term accounts for the entire growth across a 32-fold context range;
+        /// net of the linear state it leaves 1.55 GiB, and 1.75 GiB keeps about
+        /// the margin the 4-bit and 8-bit figures keep over their own
+        /// measurements. Peak resident set size cannot measure this: it does
+        /// not move with the context at all, because KV pages are charged when
+        /// written rather than when allocated, and at 128K it reads lower than
+        /// the KV term alone. The reserve stays unmeasured at 3 GiB, as for the
+        /// 8-bit pack: the routed experts stream from 40 layer files with a
+        /// cold-cache read of about 566 MB per token (3.4), between the 4-bit
+        /// and 8-bit reserves. The DeltaNet (60 MiB) and conv (2.8 MiB) state
+        /// is constant at 64 MiB (3.4, D5). The pinned pack streams each routed
+        /// expert at 1,769,472 bytes (S6).
+        public static let qwen36Measured = ModelFootprint(
+            nonKVRuntimeBytes: 7 << 28,
             expertStrideBytes: 1_769_472,
             hostReserveBytes: 3 << 30,
             linearStateBytes: 64 << 20)
+
+        /// The name the Qwen figures had before S27 measured them.
+        public static let qwen36Provisional = qwen36Measured
 
         public static func forProfile(_ profile: QuantProfile) -> ModelFootprint {
             switch profile {
@@ -90,7 +103,7 @@ public enum ContextAdmission {
         /// a few kilobytes and never touches the weights. The family decides
         /// the profile first: Qwen3.6 shares the 4-bit quantization shape with
         /// the Gemma pack but not its memory profile (S24), so its manifest
-        /// answers with the family's provisional figures.
+        /// answers with the family's own measured figures.
         public static func forModelDirectory(_ directoryURL: URL,
                                              config: ArchConfig = .gemma4_26B_A4B) throws
             -> ModelFootprint {
@@ -130,7 +143,7 @@ public enum ContextAdmission {
                 detail: "manifest.quant is required to size the model's memory")
         }
         if manifest.modelFamily != nil {
-            return .qwen36Provisional
+            return .qwen36Measured
         }
         return ModelFootprint.forProfile(try QuantProfile(manifestQuant: quant))
     }

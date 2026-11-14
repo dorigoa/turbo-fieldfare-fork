@@ -151,27 +151,31 @@ import TurboFieldfare
     }
 
     /// S24: a Qwen manifest is sized with its family's geometry, not Gemma's.
-    /// 128K on an 8 GB Mac is a load the 4-bit Gemma figures would start and
-    /// the family's own figures refuse; the boundary is inclusive.
+    /// S27 measured that geometry, which moved where the two profiles part:
+    /// 128K now fits an 8 GB Mac on either, so the ceiling is the discriminator
+    /// — a host that exactly meets Qwen's requirement at 262,144 tokens is
+    /// still short of the 4-bit Gemma one. The boundary is inclusive.
     @Test func aQwenManifestIsNotMeasuredWithGemmaGeometry() throws {
         let directory = try writeQwenManifest()
         defer { try? FileManager.default.removeItem(at: directory) }
-        // The old answer, from the 4-bit Gemma constants, would have gone ahead.
-        #expect(DecodeLoadAdmission.refusal(maxContextTokens: 131_072,
-                                            hostMemoryBytes: eightGigabyteHost,
-                                            environment: [:]) == nil)
-        let refusal = try #require(DecodeLoadAdmission.refusal(
-            modelDirectory: directory, maxContextTokens: 131_072,
-            hostMemoryBytes: eightGigabyteHost, environment: [:]))
-        #expect(refusal.contains("131,072"))
-        #expect(refusal.contains("needs 16 GB"))
-        let minimum: UInt64 = 131_072 * 20_480 + 2_684_354_560 + 67_108_864 + 3_221_225_472
-        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 131_072,
-                                            hostMemoryBytes: minimum - 1, environment: [:]) != nil)
-        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 131_072,
+        let minimum: UInt64 = 262_144 * 20_480 + 1_879_048_192 + 67_108_864 + 3_221_225_472
+        // The same host, sized with the 4-bit Gemma constants, refuses.
+        #expect(DecodeLoadAdmission.refusal(maxContextTokens: 262_144,
+                                            hostMemoryBytes: minimum,
+                                            environment: [:]) != nil)
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 262_144,
                                             hostMemoryBytes: minimum, environment: [:]) == nil)
+        #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 262_144,
+                                            hostMemoryBytes: minimum - 1, environment: [:]) != nil)
+        let refusal = try #require(DecodeLoadAdmission.refusal(
+            modelDirectory: directory, maxContextTokens: 262_144,
+            hostMemoryBytes: eightGigabyteHost, environment: [:]))
+        #expect(refusal.contains("262,144"))
+        #expect(refusal.contains("needs 16 GB"))
+        // 128K fits an 8 GB Mac on the measured figures (S27); it did not on
+        // the provisional ones.
         #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 131_072,
-                                            hostMemoryBytes: sixteenGigabyteHost, environment: [:]) == nil)
+                                            hostMemoryBytes: eightGigabyteHost, environment: [:]) == nil)
         // Small contexts sail through on both profiles.
         #expect(DecodeLoadAdmission.refusal(modelDirectory: directory, maxContextTokens: 4_096,
                                             hostMemoryBytes: eightGigabyteHost, environment: [:]) == nil)

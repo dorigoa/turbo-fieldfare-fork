@@ -10,14 +10,14 @@ import Foundation
 @Suite struct ContextAdmissionQwenTests {
 
     private let config = ArchConfig.qwen36_35B_A3B
-    private let footprint = ModelFootprint.qwen36Provisional
+    private let footprint = ModelFootprint.qwen36Measured
     private let eightGigabyteHost: UInt64 = 8_589_934_592
     private let sixteenGigabyteHost: UInt64 = 17_179_869_184
 
     /// The pinned figures the plan fixes for S24, so a later edit moves them
     /// through a test failure and not through a menu caption.
-    @Test func theProvisionalFootprintCarriesThePinnedFigures() {
-        #expect(footprint.nonKVRuntimeBytes == 2_684_354_560) // 2.5 GiB, provisional
+    @Test func theMeasuredFootprintCarriesThePinnedFigures() {
+        #expect(footprint.nonKVRuntimeBytes == 1_879_048_192) // 1.75 GiB, measured in S27
         #expect(footprint.linearStateBytes == 67_108_864)     // 64 MiB, constant
         #expect(footprint.hostReserveBytes == 3 << 30)
         #expect(footprint.expertStrideBytes == 1_769_472)
@@ -41,7 +41,7 @@ import Foundation
     func minimumHostMemoryAddsKVStateRuntimeAndReserve(context: Int) {
         let minimum = ContextAdmission.minimumHostMemoryBytes(config: config, maxContext: context,
                                                               footprint: footprint)
-        #expect(minimum == UInt64(context) * 20_480 + 2_684_354_560 + 67_108_864 + 3_221_225_472)
+        #expect(minimum == UInt64(context) * 20_480 + 1_879_048_192 + 67_108_864 + 3_221_225_472)
         // The boundary is inclusive, exactly as for Gemma.
         #expect(ContextAdmission.availability(config: config, maxContext: context,
                                               hostMemoryBytes: minimum - 1, footprint: footprint)
@@ -51,17 +51,18 @@ import Foundation
                 == .available)
     }
 
-    /// An 8 GB Mac backs the small contexts and is refused from 128K up —
-    /// 8,657,043,456 needs more than it has — while a 16 GB one backs every
-    /// size up to the checkpoint's 262,144-token ceiling.
-    @Test func eightGigabytesBacksUpTo32KAndSixteenBacksEverySize() {
-        for context in [4_096, 32_768] {
+    /// An 8 GB Mac backs every context up to 128K on the figures S27 measured
+    /// and is refused only the checkpoint's 262,144-token ceiling, which needs
+    /// 10,536,091,648 bytes; a 16 GB one backs every size. Before S27 the
+    /// provisional non-KV figure refused 128K here too.
+    @Test func eightGigabytesBacksUpTo128KAndSixteenBacksEverySize() {
+        for context in [4_096, 32_768, 131_072] {
             #expect(ContextAdmission.availability(config: config, maxContext: context,
                                                   hostMemoryBytes: eightGigabyteHost,
                                                   footprint: footprint) == .available,
                     "context \(context)")
         }
-        for context in [131_072, 262_144] {
+        for context in [262_144] {
             #expect(ContextAdmission.availability(config: config, maxContext: context,
                                                   hostMemoryBytes: eightGigabyteHost,
                                                   footprint: footprint) != .available,
@@ -73,7 +74,7 @@ import Foundation
                                                   footprint: footprint) == .available,
                     "context \(context)")
         }
-        let message = ContextAdmission.needDescription(config: config, maxContext: 131_072,
+        let message = ContextAdmission.needDescription(config: config, maxContext: 262_144,
                                                        hostMemoryBytes: eightGigabyteHost,
                                                        footprint: footprint)
         #expect(message.contains("needs 16 GB"))
@@ -103,10 +104,10 @@ import Foundation
     @Test func aQwenManifestAnswersWithTheFamilyProfile() throws {
         let directory = try writeQwenManifest()
         defer { try? FileManager.default.removeItem(at: directory) }
-        #expect(try ModelFootprint.forModelDirectory(directory) == .qwen36Provisional)
+        #expect(try ModelFootprint.forModelDirectory(directory) == .qwen36Measured)
         let (readConfig, readFootprint) = try ContextAdmission.admissionProfile(forModelDirectory: directory)
         #expect(readConfig == ArchConfig.qwen36_35B_A3B)
-        #expect(readFootprint == .qwen36Provisional)
+        #expect(readFootprint == .qwen36Measured)
     }
 
     /// Just the manifest, with the pinned Qwen constants (D1, C4): no weights,
