@@ -222,7 +222,7 @@ struct TurboFieldfareMacApp: App {
                 // admission; switching unloads the model and opens the other
                 // variant's install, or its install screen if there is none.
                 // Every catalog entry is selectable here, Qwen3.6 included.
-                Picker("Model Variant", selection: modelVariantBinding) {
+                Picker("Model", selection: modelVariantBinding) {
                     ForEach(AppModelVariant.allCases, id: \.self) { variant in
                         Text(variant.shortLabel).tag(variant)
                             .accessibilityIdentifier(AccessibilityID.modelVariantOption(variant))

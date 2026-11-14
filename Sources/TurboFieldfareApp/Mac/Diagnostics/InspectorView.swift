@@ -226,9 +226,9 @@ struct InspectorView: View {
 
     private var modelSection: some View {
         Section("Model") {
-            LabeledContent("Variant") {
+            LabeledContent("Model") {
                 // Every catalog entry is selectable here, Qwen3.6 included.
-                Picker("Variant", selection: modelVariantBinding) {
+                Picker("Model", selection: modelVariantBinding) {
                     ForEach(AppModelVariant.allCases, id: \.self) { variant in
                         Text(variant.shortLabel).tag(variant)
                     }
