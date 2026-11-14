@@ -25,6 +25,12 @@ public struct Args: Equatable, Sendable {
     /// an empty think block instead of inside one, so the model answers
     /// without a reasoning block.
     public var noThinking: Bool
+    /// Qwen only: how many tokens the model may spend inside its think block
+    /// before the runtime closes it and makes it answer. nil leaves the
+    /// reasoning unbounded, which is what every run did before the flag
+    /// existed. Mutually exclusive with `noThinking`: a depth for a turn that
+    /// does no reasoning is refused rather than silently dropped.
+    public var reasoningDepth: ReasoningDepth?
     public var quiet: Bool
     public var expertCacheSlots: Int
     public var expertCachePolicy: RuntimeExpertCachePolicy
@@ -54,6 +60,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 noThinking: Bool = false,
+                reasoningDepth: ReasoningDepth? = nil,
                 quiet: Bool = false,
                 expertCacheSlots: Int = RuntimeConfiguration.production.expertCacheSlots,
                 expertCachePolicy: RuntimeExpertCachePolicy = RuntimeConfiguration.production.expertCachePolicy,
@@ -80,6 +87,7 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.noThinking = noThinking
+        self.reasoningDepth = reasoningDepth
         self.quiet = quiet
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
@@ -162,6 +170,14 @@ extension Args {
       --no-thinking              Qwen only: start the turn after an empty think
                                  block, so the model answers without reasoning
                                  (default: reasoning on, streamed to stderr).
+      --reasoning-depth <level>  Qwen only: how deeply to reason before answering:
+                                 low (\(ReasoningDepth.low.budgetTokens) tokens), medium (\(ReasoningDepth.medium.budgetTokens)) or high (\(ReasoningDepth.high.budgetTokens)).
+                                 When the budget runs out the runtime closes the
+                                 think block so the model answers. Default:
+                                 unbounded, which on this checkpoint can spend
+                                 the whole --max-new reasoning and answer
+                                 nothing. Rejected together with --no-thinking
+                                 (reasoning off has no depth to bound).
       --quiet                    Suppress the footer: a variant line
                                  (variant=4-bit or variant=8-bit, plus the
                                  model family) and the timing line.
@@ -236,6 +252,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var noThinking = false
+        var reasoningDepth: ReasoningDepth?
         var quiet = false
         let runtimeDefaults = RuntimeConfiguration.production
         var expertCacheSlots = runtimeDefaults.expertCacheSlots
@@ -326,6 +343,12 @@ extension Args {
             case "--no-thinking":
                 noThinking = true
                 index += 1
+            case "--reasoning-depth":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = ReasoningDepth(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                reasoningDepth = parsed
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
@@ -385,6 +408,13 @@ extension Args {
         if prompt != nil, !images.isEmpty {
             throw ArgsError.mutuallyExclusive("--prompt", "--image")
         }
+        // A depth for a turn that does no reasoning at all has nothing to
+        // bound. Refusing is the fail-closed answer the rest of this parser
+        // gives: silently dropping one of the two would leave the caller
+        // believing a control they passed took effect.
+        if noThinking, reasoningDepth != nil {
+            throw ArgsError.mutuallyExclusive("--no-thinking", "--reasoning-depth")
+        }
         let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         if !images.isEmpty, expertCacheSlots < minimumSlots {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
@@ -425,6 +455,7 @@ extension Args {
                              seed: seed,
                              stops: stops,
                              noThinking: noThinking,
+                             reasoningDepth: reasoningDepth,
                              quiet: quiet,
                              expertCacheSlots: expertCacheSlots,
                              expertCachePolicy: expertCachePolicy,

@@ -104,6 +104,14 @@ func runQwenFamily(args: Args,
         }
         var decoderError: (any Error)?
 
+        // The reasoning cap. Only a chat turn has a think frame to bound, and
+        // only one whose prompt opened it: with `--no-thinking` the parser has
+        // already refused a depth, and without `--reasoning-depth` the budget
+        // is nil, which is the unbounded run this CLI has always done.
+        let reasoningBudget = chatMode && enableThinking
+            ? args.reasoningDepth.flatMap(tokenizer.reasoningBudget(depth:))
+            : nil
+
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: chatTokenizer,
@@ -113,6 +121,7 @@ func runQwenFamily(args: Args,
             context: context,
             scratch: scratch,
             prefillConfig: runtime.prefillConfig,
+            reasoningBudget: reasoningBudget,
             shouldStop: { decoderError != nil }) { progress in
                 switch progress {
                 case .prefill:

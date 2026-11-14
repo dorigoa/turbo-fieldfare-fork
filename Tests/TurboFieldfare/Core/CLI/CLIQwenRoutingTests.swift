@@ -164,6 +164,40 @@ import TurboFieldfare
         #expect(off.noThinking)
     }
 
+    /// Reasoning depth (D11): the depth parses to a level, and its absence is the unbounded run
+    /// this CLI has always done.
+    @Test func reasoningDepthParsesToALevelAndDefaultsToUnbounded() throws {
+        let plain = try Args.parse(["--model", "m.gturbo", "--chat-prompt", "hi"])
+        #expect(plain.reasoningDepth == nil)
+        for depth in ReasoningDepth.allCases {
+            let args = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--reasoning-depth", depth.rawValue,
+            ])
+            #expect(args.reasoningDepth == depth)
+        }
+    }
+
+    @Test func reasoningDepthRefusesAValueThatIsNotALevel() {
+        #expect(throws: ArgsError.invalidValue(flag: "--reasoning-depth", value: "deep")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--reasoning-depth", "deep",
+            ])
+        }
+    }
+
+    /// A depth for a turn that does no reasoning bounds nothing: refused,
+    /// rather than silently dropping one of the two flags.
+    @Test func reasoningDepthAndNoThinkingAreMutuallyExclusive() {
+        #expect(throws: ArgsError.mutuallyExclusive("--no-thinking", "--reasoning-depth")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--no-thinking", "--reasoning-depth", "low",
+            ])
+        }
+    }
+
     /// The knob-level tracking behind D10: a flag the user passed is recorded
     /// as set, and only a flag they passed; the parse-level defaults stay
     /// Gemma's either way.

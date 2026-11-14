@@ -517,6 +517,7 @@ public actor MultimodalConversation {
         images: [URL] = [],
         config: GenerationConfig,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        reasoningBudget: ReasoningBudget? = nil,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
         onThinking: (@Sendable (Bool) -> Void)? = nil,
@@ -525,6 +526,7 @@ public actor MultimodalConversation {
         try append(parts: parts, images: images)
         return try await generate(
             config: config, prefillConfig: prefillConfig,
+            reasoningBudget: reasoningBudget,
             checkCancellation: checkCancellation, shouldStop: shouldStop,
             onThinking: onThinking,
             onProgress: onProgress)
@@ -547,9 +549,14 @@ public actor MultimodalConversation {
     /// content closes the block or the turn ends. Text turns never carry a
     /// think block's text through `text` or `onProgress` (D11); Gemma never
     /// calls the callback at all.
+    /// `reasoningBudget` caps the tokens the turn may spend inside its
+    /// thinking block, forcing the block closed when it runs out (D11). nil is
+    /// the unbounded turn every caller had before the cap, and the only thing
+    /// Gemma ever passes.
     public func generate(
         config: GenerationConfig,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        reasoningBudget: ReasoningBudget? = nil,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
         onThinking: (@Sendable (Bool) -> Void)? = nil,
@@ -644,6 +651,7 @@ public actor MultimodalConversation {
             scratch: scratch,
             prefillConfig: effectivePrefill,
             start: cached == 0 ? .reset : .resume(cachedPromptTokens: cached),
+            reasoningBudget: reasoningBudget,
                 // Cancellation mid-decode ends the turn at a token boundary
                 // and returns the partial result; throwing here instead would
                 // condemn the lineage for a KV that is perfectly resumable.
