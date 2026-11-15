@@ -13,7 +13,7 @@ import TurboFieldfareMacPresentation
     func aRowNamesTheVariantItWasRecordedWith(_ variant: AppModelVariant) {
         #expect(ConversationRowPresentation.subtitle(
             meta(), state: .cannotReplay(reason: .differentModel), recordedVariant: variant)
-            == "recorded with the \(variant.shortLabel) model")
+            == "recorded with \(variant.shortLabel)")
     }
 
     /// Without a known variant the old wording stands, and only the
@@ -35,8 +35,8 @@ import TurboFieldfareMacPresentation
             for: .cannotReplay(reason: .differentModel), currentContext: 8_192,
             recordedVariant: .int4))
         #expect(content.title == "This chat can't be continued.")
-        #expect(content.message.contains("recorded with the 4-bit model"))
-        #expect(content.message.contains("Model Variant to 4-bit"))
+        #expect(content.message.contains("recorded with Gemma-4-26B-4bit,"))
+        #expect(content.message.contains("Model Variant to Gemma-4-26B-4bit"))
         // Still a re-read, still named as a different conversation.
         #expect(content.offersReread)
         #expect(content.requiredContext == nil)
@@ -85,7 +85,7 @@ import TurboFieldfareMacPresentation
 /// model would then refuse.
 @Suite struct ModelVariantPresentationStateTests {
     @Test func aRefusedModelOffersNoLoad() {
-        let refusal = "The 8-bit model can't be loaded on this Mac. "
+        let refusal = "The Gemma-4-26B-8bit model can't be loaded on this Mac. "
             + "A 4,096-token context needs 16 GB of memory; this Mac has 9 GB."
         let state = AppPresentationState.resolve(snapshot(memoryRefusal: refusal))
         #expect(state.label == "Needs more memory")

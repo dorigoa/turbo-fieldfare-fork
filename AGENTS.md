@@ -46,7 +46,7 @@ swift run -c release TurboFieldfareCLI \
   --max-new 256
 ```
 
-The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB for the default 4-bit model (`--variant int4`), about 27 GB for the experimental 8-bit one (`--variant int8`), which needs a 16 GB Mac or larger, and about 20 GB for Qwen3.6 35B-A3B 4-bit (`--variant qwen36`), which installs 47 files totalling 19.6 GB; do not download the 8-bit or the Qwen checkpoint unless the user asks. `--dry-run` reads only metadata and shard headers. Keep each variant in its own directory. Cancellation preserves verified completed ranges; continue them with `--resume` and the same `--variant`, or remove them with `--discard-partial --output scratch/gemma4.gturbo`. The CLI and server read the variant from the manifest of the `--model` directory and print it.
+The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The download is about 15 GB for the default 4-bit QAT model (`--variant int4`), about 27 GB for the experimental 8-bit one (`--variant int8`), which needs a 16 GB Mac or larger, and about 20 GB for Qwen3.6 35B-A3B 4-bit (`--variant qwen36`), which installs 47 files totalling 19.6 GB; do not download the 8-bit or the Qwen checkpoint unless the user asks. `--dry-run` reads only metadata and shard headers. Keep each variant in its own directory. Cancellation preserves verified completed ranges; continue them with `--resume` and the same `--variant`, or remove them with `--discard-partial --output scratch/gemma4.gturbo`. The CLI and server read the variant from the manifest of the `--model` directory and print it.
 
 ## Local server
 

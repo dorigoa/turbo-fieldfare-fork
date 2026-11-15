@@ -305,13 +305,30 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
         }
     }
 
+    // The pack's projector belongs to one text checkpoint, so its source is
+    // the text model's, read from that model's manifest. With no manifest
+    // there is nothing to bind a pack to, and the installer says so in its
+    // own order (missing install state first), as it always has.
+    let source: VisionCompanionSource
+    let textManifest = (textModel as NSString).appendingPathComponent("manifest.json")
+    if FileManager.default.fileExists(atPath: textManifest) {
+        do {
+            source = try VisionCompanionSource.forTextModel(directory: textModel)
+        } catch {
+            printError("vision install failed: \(error)")
+            return 1
+        }
+    } else {
+        source = .gemma4QAT4bit
+    }
+
     if arguments.activateVisionInstall {
         do {
             try RemoteVisionPackInstaller.activatePrepared(
                 outputDirectory: visionOutput,
                 textModelDirectory: textModel,
-                repoID: SupportedModelSource.repoID,
-                requestedRevision: SupportedModelSource.revision)
+                repoID: source.repoID,
+                requestedRevision: source.revision)
             print("Activated image pack \(visionOutput)")
             return 0
         } catch {
@@ -321,8 +338,8 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
     }
 
     let options = RemoteVisionPackInstallOptions(
-        repoID: SupportedModelSource.repoID,
-        revision: SupportedModelSource.revision,
+        repoID: source.repoID,
+        revision: source.revision,
         textModelDirectory: textModel,
         outputDirectory: visionOutput,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],

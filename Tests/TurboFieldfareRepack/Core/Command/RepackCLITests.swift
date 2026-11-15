@@ -122,7 +122,7 @@ struct RepackCLITests {
 
         let discarded = try run(["--discard-partial", "--output", output, "--variant", "int4"])
         #expect(discarded.status == 0)
-        #expect(discarded.stdout.contains("Discarded saved 4-bit download"))
+        #expect(discarded.stdout.contains("Discarded saved Gemma-4-26B-4bit download"))
         #expect(!FileManager.default.fileExists(atPath: output + ".resume.json"))
         #expect(!FileManager.default.fileExists(atPath: output + ".partial"))
     }

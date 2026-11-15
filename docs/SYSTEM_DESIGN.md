@@ -1,7 +1,7 @@
 # System design
 
 TurboFieldfare is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
-Silicon. The text installation is about 14.3 GB, but the target machine
+Silicon. The text installation is about 14.6 GB, but the target machine
 has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
@@ -56,11 +56,17 @@ The installer reads one of two pinned sources, chosen with `--variant`:
 
 | Variant | Repository | Revision | Source index SHA-256 |
 | --- | --- | --- | --- |
-| `int4` (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | `bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13` |
+| `int4` (default, QAT) | [`mlx-community/gemma-4-26B-A4B-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-qat-4bit) | `0e3cbab38ce568cf6e23543010d08d03b731910c` | `5455e83705bbdd4e3702c7d4f9d49d4900e84533036628f74500538075dd5c80` |
 | `int8` | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | `33c6d23798a0af159529890f79329206dbfbd73c` | `4b96ec862d7ae3f8d150b22b295cefcc9b5ef5e83f172f530dc1f2d2c11339cc` |
 
-Each variant is pinned by revision and source index hash. The two checkpoints
-have the same 1,697 tensor names; the 8-bit packed weights are twice as wide,
+Each variant is pinned by revision and source index hash. The `int4` source is
+the quantization-aware-trained upload; its dense MLP (`mlp.gate_proj`,
+`up_proj`, `down_proj`) is 8-bit like its router, which the `affine4` profile
+already admits. The plain post-training 4-bit upload
+(`mlx-community/gemma-4-26b-a4b-it-4bit` at `0d77464e`, index
+`bf198c9f…`) is no longer a text variant; it stays pinned as the 8-bit
+model's image-pack source, because the QAT upload ships a different vision
+projector. The two checkpoints have the same 1,697 tensor names; the 8-bit packed weights are twice as wide,
 and their scales and biases have the same shapes. The installer does not
 download a complete Hugging Face snapshot or write a complete safetensors
 shard to disk.
@@ -198,15 +204,15 @@ The 8-bit variant changes sizes, not structure. Its figures below are computed
 from the pinned checkpoint's metadata (the installer's `--dry-run`), not
 measured on a running model:
 
-| Resource | 4-bit (measured) | 8-bit (computed) |
+| Resource | 4-bit QAT (computed) | 8-bit (computed) |
 | --- | ---: | ---: |
-| Common model file | 1,353,771,068 bytes | 2,545,592,786 bytes |
+| Common model file | 1,621,403,708 bytes | 2,545,592,786 bytes |
 | Routed-expert payload per expert | 3,345,408 bytes | 6,319,104 bytes |
 | Expert stride (16 KiB pages) | 3,358,720 bytes | 6,324,224 bytes |
 | One `layer_XX.bin` (128 experts) | 429,916,160 bytes | 809,500,672 bytes |
 | All 30 layer files | 12,897,484,800 bytes (12.01 GiB) | 24,285,020,160 bytes (22.62 GiB) |
 | Slot capacity, 16 slots × 30 layers | About 1.50 GiB | About 2.83 GiB |
-| Installation | About 14.3 GB | About 26.9 GB |
+| Installation | About 14.6 GB | About 26.9 GB |
 
 The 8-bit expert blob keeps the planner's order, gate, up, and down, each as
 weights, scales, and biases. Every sub-tensor offset is a multiple of 16 bytes

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TurboFieldfare
 @testable import TurboFieldfareAppCore
+import TurboFieldfareRepackCore
 
 /// Image support with the 8-bit model (S10, option A): the companion pack is
 /// still downloaded from the 4-bit checkpoint, because the tower is BF16 in
@@ -29,9 +30,11 @@ import TurboFieldfare
         #expect(model.visionInstallationStatus == .missing,
                 "the 4-bit model's pack must not count as the 8-bit model's")
         #expect(!model.hasVisionPackDirectory)
-        #expect(model.visionInstallDescriptor == .visionCompanion)
-        #expect(model.visionInstallDescriptor.repoID == AppModelVariant.int4.repoID,
-                "option A downloads the image pack from the 4-bit checkpoint")
+        #expect(model.visionInstallDescriptor == .visionCompanion(for: .gemma4PTQ4bit))
+        #expect(model.visionInstallDescriptor.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit",
+                "option A downloads the 8-bit image pack from the plain 4-bit checkpoint")
+        #expect(model.visionInstallDescriptor.repoID != AppModelVariant.int4.repoID,
+                "the QAT projector belongs to the QAT text model only")
 
         let companion = try installFourBitSourcePack(boundTo: eightBit)
         #expect(companion.lastPathComponent == "gemma4-8bit.vision.gturbo")

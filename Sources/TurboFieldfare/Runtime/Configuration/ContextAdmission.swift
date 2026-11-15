@@ -42,6 +42,17 @@ public enum ContextAdmission {
         /// The 4-bit pack. The non-KV figure was measured at 1.75-1.94 GB
         /// across PR 156's five rungs and the M2-8 8K row at 16 cache slots;
         /// the pinned IT pack uses 3,358,720 bytes per routed expert.
+        ///
+        /// The pinned 4-bit pack is now the QAT upload, whose 8-bit dense MLP
+        /// makes the common file 1,621,403,708 bytes instead of 1,353,771,068.
+        /// Measured on 2026-11-15 on a 36 GB Mac16,9 as S27 measured Qwen —
+        /// `/usr/bin/time -l` peak memory footprint less the FP16 KV term
+        /// below, 16 slots, the 3,015-token community prompt, 256 tokens — it
+        /// held at 1.880-1.885 GiB at 4K over three runs and 1.882 GiB at 32K,
+        /// the same as S27's 1.883 GiB check, which ran on this same QAT
+        /// install. 2 GiB keeps about 6% over it, less than the 12% the other
+        /// profiles keep. The routed experts are still 4-bit, so the stride
+        /// and the reserve are unchanged.
         public static let affine4Measured = ModelFootprint(
             nonKVRuntimeBytes: 2 << 30,
             expertStrideBytes: 3_358_720,

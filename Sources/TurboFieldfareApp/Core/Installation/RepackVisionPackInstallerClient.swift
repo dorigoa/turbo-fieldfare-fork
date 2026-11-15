@@ -32,9 +32,11 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
                 forTextModel: textModelDirectory)
             let paths = try RemoteInstallPaths(outputDirectory: output.path)
             let resume = FileManager.default.fileExists(atPath: paths.checkpointFile)
+            let source = try VisionCompanionSource.forTextModel(
+                directory: textModelDirectory.path)
             let options = RemoteVisionPackInstallOptions(
-                repoID: descriptor.repoID,
-                revision: descriptor.revision,
+                repoID: source.repoID,
+                revision: source.revision,
                 textModelDirectory: textModelDirectory.path,
                 outputDirectory: output.path,
                 token: ProcessInfo.processInfo.environment["HF_TOKEN"],
@@ -76,10 +78,12 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     ) throws -> AppModelInstallRequirement {
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
+        let source = try VisionCompanionSource.forTextModel(
+            directory: textModelDirectory.path)
         let saved = try RemoteVisionPackInstaller.inspectPersistentInstall(
             outputDirectory: output.path,
-            repoID: descriptor.repoID,
-            requestedRevision: descriptor.revision)
+            repoID: source.repoID,
+            requestedRevision: source.revision)
         let reused = try saved?.validatedDestinationBytes(
             maximum: descriptor.installedBytes,
             path: RemoteInstallPaths(outputDirectory: output.path).checkpointFile) ?? 0
@@ -165,12 +169,16 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         let textModelDirectory = textModelDirectory.standardizedFileURL
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
-        try await runCancellableDetached { [descriptor] in
+        try await runCancellableDetached {
+            // The text model decides the source: its projector belongs with
+            // one checkpoint, and a pack prepared from another is refused.
+            let source = try VisionCompanionSource.forTextModel(
+                directory: textModelDirectory.path)
             try RemoteVisionPackInstaller.activatePrepared(
                 outputDirectory: output.path,
                 textModelDirectory: textModelDirectory.path,
-                repoID: descriptor.repoID,
-                requestedRevision: descriptor.revision,
+                repoID: source.repoID,
+                requestedRevision: source.revision,
                 onVerifyProgress: { hashed, total in
                     // Cancellation rides the progress callback: verification is
                     // the only phase that can be abandoned safely, and it is the

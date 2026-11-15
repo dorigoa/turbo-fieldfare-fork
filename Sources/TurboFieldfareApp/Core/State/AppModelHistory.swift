@@ -1022,78 +1022,114 @@ extension AppModel {
     /// first — an alert for something irreversible is the case the guidelines
     /// make an exception for.
     public func deleteConversation(id: UUID) {
-        guard canMutateConversation(id: id), let binding = conversationBinding else { return }
+        guard canMutateConversation(id: id) else { return }
+        deleteConversations(ids: [id])
+    }
+
+    /// Deletes several conversations, permanently, as one operation: the
+    /// sidebar's Delete All and Delete Selected.
+    ///
+    /// The same steps a single delete takes, run once per conversation inside
+    /// one task, so the gate that refuses a second delete holds for the whole
+    /// batch and the list is re-read once at the end. Ids no longer listed are
+    /// skipped. The conversation the KV is holding goes first: once its
+    /// lineage has ended there is no held chat for a later deletion to fall
+    /// back to, so the batch never reopens a stored copy it is about to
+    /// delete. One conversation that fails to delete is reported and the rest
+    /// still go.
+    public func deleteConversations(ids: [UUID]) {
+        var seen = Set<UUID>()
+        var targets = ids.filter { history.entry($0) != nil && seen.insert($0).inserted }
+        guard canMutateConversations, !targets.isEmpty,
+              let binding = conversationBinding else { return }
+        if let held = storedConversationID, let index = targets.firstIndex(of: held) {
+            targets.insert(targets.remove(at: index), at: 0)
+        }
         let store = binding.store
         let generation = binding.generation
-        conversationDeletionTask = Task { [weak self] in
+        conversationDeletionTask = Task { [weak self, targets] in
             guard let self else { return }
             defer { conversationDeletionTask = nil }
-            // The last turn's write may still be running: its image copies
-            // are made after the reply lands, and `isTurnInFlight` is already
-            // false by then. Deleting under it had the writer recreate the
-            // directory and the append leave a headerless transcript behind,
-            // which the list then counted as unreadable forever.
-            await awaitPendingPersistence()
-            guard isCurrentConversationBinding(generation: generation, store: store) else {
-                return
-            }
-            do {
-                try await store.delete(id: id)
+            for id in targets {
+                // The last turn's write may still be running: its image copies
+                // are made after the reply lands, and `isTurnInFlight` is
+                // already false by then. Deleting under it had the writer
+                // recreate the directory and the append leave a headerless
+                // transcript behind, which the list then counted as unreadable
+                // forever.
+                await awaitPendingPersistence()
                 guard isCurrentConversationBinding(generation: generation, store: store) else {
                     return
                 }
-                if storedConversationID == id {
-                    // The open chat was the one deleted, so its lineage ends
-                    // here. Keeping the KV and letting the next turn open a
-                    // fresh file broke the rule the whole design rests on —
-                    // the transcript equals the model's context. The new file
-                    // held one exchange while its meta described the whole
-                    // conversation behind it: a row reading "1,065 tokens" over
-                    // 22 tokens of record, which the sidebar believes, the
-                    // context gauge believes, and continuability decides
-                    // against. Deleting a conversation ends it.
-                    if let viewed = screen.conversationID, viewed != id {
-                        // Only the deleted lineage ends. The reader and its
-                        // composer belong to a different, still-durable chat.
-                        prepareServiceRecoveryForReplay(includingLiveTurn: true)
-                        storedConversationID = nil
-                        pendingServiceRecoveryConversationID = nil
-                        quarantinedPersistenceLineages.removeAll()
-                        diagnostics = nil
-                    } else {
-                        newChat()
+                do {
+                    try await store.delete(id: id)
+                    guard isCurrentConversationBinding(generation: generation, store: store) else {
+                        return
                     }
+                    endDeletedConversation(id: id)
+                } catch {
+                    guard isCurrentConversationBinding(generation: generation, store: store) else {
+                        return
+                    }
+                    recordHistoryDiagnostic("\(error)")
                 }
-                // If the chat being read is the one deleted, what comes back on
-                // screen is the chat the KV is still holding, and that is the
-                // row the sidebar highlights: nil left the window showing a
-                // conversation whose row was not selected, which is the one
-                // state every other path here is careful not to produce. Never
-                // the row just deleted, which `newChat` above has usually
-                // already cleared.
-                let remainingHeldID = storedConversationID == id
-                    ? nil : storedConversationID
-                let deletedViewedRow = screen.conversationID == id
-                perform(machine.apply(.deleted(id: id, heldID: remainingHeldID)))
-                // The machine's deleted transition returns to a live held row.
-                // After an unload there is still a held durable row but no KV;
-                // return to its stored copy instead so the next send replays it.
-                if deletedViewedRow, let remainingHeldID,
-                   serviceEpoch != conversation.epoch {
-                    openConversation(id: remainingHeldID)
-                }
-            } catch {
-                guard isCurrentConversationBinding(generation: generation, store: store) else {
-                    return
-                }
-                recordHistoryDiagnostic("\(error)")
             }
             await refreshHistory(store: store, generation: generation)
         }
     }
 
+    /// What the window does once a conversation's files are gone.
+    private func endDeletedConversation(id: UUID) {
+        if storedConversationID == id {
+            // The open chat was the one deleted, so its lineage ends
+            // here. Keeping the KV and letting the next turn open a
+            // fresh file broke the rule the whole design rests on —
+            // the transcript equals the model's context. The new file
+            // held one exchange while its meta described the whole
+            // conversation behind it: a row reading "1,065 tokens" over
+            // 22 tokens of record, which the sidebar believes, the
+            // context gauge believes, and continuability decides
+            // against. Deleting a conversation ends it.
+            if let viewed = screen.conversationID, viewed != id {
+                // Only the deleted lineage ends. The reader and its
+                // composer belong to a different, still-durable chat.
+                prepareServiceRecoveryForReplay(includingLiveTurn: true)
+                storedConversationID = nil
+                pendingServiceRecoveryConversationID = nil
+                quarantinedPersistenceLineages.removeAll()
+                diagnostics = nil
+            } else {
+                newChat()
+            }
+        }
+        // If the chat being read is the one deleted, what comes back on
+        // screen is the chat the KV is still holding, and that is the
+        // row the sidebar highlights: nil left the window showing a
+        // conversation whose row was not selected, which is the one
+        // state every other path here is careful not to produce. Never
+        // the row just deleted, which `newChat` above has usually
+        // already cleared.
+        let remainingHeldID = storedConversationID == id
+            ? nil : storedConversationID
+        let deletedViewedRow = screen.conversationID == id
+        perform(machine.apply(.deleted(id: id, heldID: remainingHeldID)))
+        // The machine's deleted transition returns to a live held row.
+        // After an unload there is still a held durable row but no KV;
+        // return to its stored copy instead so the next send replays it.
+        if deletedViewedRow, let remainingHeldID,
+           serviceEpoch != conversation.epoch {
+            openConversation(id: remainingHeldID)
+        }
+    }
+
     public func canMutateConversation(id: UUID) -> Bool {
-        !isChangingModelLocation && conversationStore != nil && history.entry(id) != nil
+        canMutateConversations && history.entry(id) != nil
+    }
+
+    /// Whether stored conversations can be renamed or deleted right now: the
+    /// store is open and writable, and no turn or other delete is running.
+    public var canMutateConversations: Bool {
+        !isChangingModelLocation && conversationStore != nil
             && !history.isReadOnlyStore && !isTurnInFlight
             && conversationDeletionTask == nil
     }

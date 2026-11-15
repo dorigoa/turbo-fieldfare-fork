@@ -88,7 +88,7 @@ import TurboFieldfare
 
         #expect(model.canInstallModel)
         let refusal = try #require(model.modelVariantMemoryRefusal)
-        #expect(refusal.contains("8-bit"))
+        #expect(refusal.contains("Gemma-4-26B-8bit"))
         #expect(refusal.contains("4,096"))
         #expect(refusal.contains("16 GB"))
         #expect(refusal.contains("8 GB"))
@@ -331,7 +331,7 @@ import TurboFieldfare
         #expect(AppModel.modelVariantMemoryRefusal(variant: .int8, hostMemoryBytes: sixteenGigabyteHost) == nil)
         let refusal = try #require(AppModel.modelVariantMemoryRefusal(variant: .int8,
                                                                       hostMemoryBytes: eightGigabyteHost))
-        #expect(refusal == "The 8-bit model can't be loaded on this Mac. "
+        #expect(refusal == "The Gemma-4-26B-8bit model can't be loaded on this Mac. "
             + AppContextLengthOption.fourK.needDescription(hostMemoryBytes: eightGigabyteHost,
                                                            footprint: .affine8Provisional))
         // The clamp leaves a context alone when no size would fit anyway.

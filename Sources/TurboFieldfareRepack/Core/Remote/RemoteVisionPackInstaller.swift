@@ -339,9 +339,10 @@ public final class RemoteVisionPackInstaller {
         let snapshot = try await RemoteSnapshotLoader.load(
             remote: remote,
             requireKnownSource: true,
+            knownFingerprints: SourceFingerprint.knownVisionFingerprints,
             metadataDirectory: paths.metadataDirectory,
             audit: audit)
-        guard SourceFingerprint.modelID(forIndexSha256: snapshot.metadata.indexSha256Hex)
+        guard SourceFingerprint.visionModelID(forIndexSha256: snapshot.metadata.indexSha256Hex)
                 == options.repoID else {
             throw RepackError.sourceFingerprintRejected(
                 path: snapshot.metadata.indexPath,

@@ -331,13 +331,13 @@ import TurboFieldfareRepackCore
   @MainActor
   @Test func defaultInstallDescriptorMatchesPinnedAudit() {
     let descriptor = AppModelInstallDescriptor.default
-    #expect(descriptor.displayName == "Gemma 4 26B-A4B IT 4-bit")
-    #expect(descriptor.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
-    #expect(descriptor.revision == "0d77464eeb233a2da68ebf9d7dc4edaac7db956d")
-    #expect(descriptor.sourceIndexSHA256 == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-    #expect(descriptor.approximateDownloadBytes == 14_620_479_420)
-    #expect(descriptor.installedBytes == 14_291_921_884)
-    #expect(descriptor.requiredFreeBytes == 15_432_772_572)
+    #expect(descriptor.displayName == "Gemma 4 26B-A4B IT QAT 4-bit")
+    #expect(descriptor.repoID == "mlx-community/gemma-4-26B-A4B-it-qat-4bit")
+    #expect(descriptor.revision == "0e3cbab38ce568cf6e23543010d08d03b731910c")
+    #expect(descriptor.sourceIndexSHA256 == "5455e83705bbdd4e3702c7d4f9d49d4900e84533036628f74500538075dd5c80")
+    #expect(descriptor.approximateDownloadBytes == 14_985_582_430)
+    #expect(descriptor.installedBytes == 14_559_600_000)
+    #expect(descriptor.requiredFreeBytes == 15_700_450_688)
   }
 
   @MainActor

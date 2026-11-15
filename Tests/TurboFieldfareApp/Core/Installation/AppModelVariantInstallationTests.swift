@@ -214,9 +214,9 @@ import TurboFieldfare
         #expect(fourBit.variant == .int4)
         #expect(eightBit.variant == .int8)
         #expect(fourBit.canSelect && eightBit.canSelect)
-        #expect(eightBit.variantSummary == "8-bit model")
+        #expect(eightBit.variantSummary == "Gemma-4-26B-8bit model")
         #expect(eightBit.variantSwitchNote(from: .int4)
-            == "Using this model switches Model Variant to 8-bit.")
+            == "Using this model switches Model Variant to Gemma-4-26B-8bit.")
         #expect(eightBit.variantSwitchNote(from: .int8) == nil)
         #expect(fourBit.variantSwitchNote(from: .int4) == nil)
         // Two usable models: the user picks, nothing is chosen for them.

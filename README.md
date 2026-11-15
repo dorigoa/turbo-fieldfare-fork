@@ -306,6 +306,11 @@ sidebar. Every launch opens an empty chat. Only one conversation's model context
 Browsing other chats keeps that cache intact; continuing another chat replaces
 it. **New Chat** starts fresh.
 
+To delete chats, use a row's **⋯** menu for one, or the buttons at the foot of
+the sidebar for many: **Delete All…** deletes every chat the list shows (only
+the matches while a search is typed), and **Select** lets you tick the chats
+that **Delete** then removes. Each asks first; deletion cannot be undone.
+
 Settings and chats live in `~/Library/Application Support/TurboFieldfare/`
 (`mac-app-settings.json` and `conversations/`). A standalone app also uses
 this folder for new model downloads by default. Moving the app does not move

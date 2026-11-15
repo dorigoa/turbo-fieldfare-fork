@@ -23,11 +23,15 @@ included for broader design context rather than a line-level claim.
   and [MLX-VLM Gemma 4](https://github.com/Blaizzy/mlx-vlm/blob/84f43753380355c0455a2bafb291d4b7cbcf81d1/mlx_vlm/models/gemma4/language.py)
   supplied independent implementation checks. MLX-LM also served as the
   bounded logit and quality reference.
-- [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit),
+- [`mlx-community/gemma-4-26B-A4B-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-qat-4bit),
   pinned at
+  [`0e3cbab3`](https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-qat-4bit/tree/0e3cbab38ce568cf6e23543010d08d03b731910c),
+  is the source of the 4-bit weights, configuration, tokenizer, and
+  chat-template sidecars. Until 2026-11-15 it was
+  [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit)
+  at
   [`0d77464e`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit/tree/0d77464eeb233a2da68ebf9d7dc4edaac7db956d),
-  is the source of the weights, configuration, tokenizer, and chat-template
-  sidecars. The repacker preserves its group-64 MLX affine values rather than
+  which remains the 8-bit model's image-pack source. The repacker preserves its group-64 MLX affine values rather than
   requantizing them.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
   is the direct tokenizer dependency. TurboFieldfare adds bounded streaming

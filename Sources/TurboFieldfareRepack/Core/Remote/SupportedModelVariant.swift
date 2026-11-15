@@ -25,11 +25,14 @@ public enum SupportedModelVariant: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// The name the app's model pickers and messages use: family, size and,
+    /// where the family has two, the bit width — so a picker entry says which
+    /// model it loads rather than only how it was quantized.
     public var shortLabel: String {
         switch self {
-        case .int4: "4-bit"
-        case .int8: "8-bit"
-        case .qwen36: "Qwen3.6"
+        case .int4: "Gemma-4-26B-4bit"
+        case .int8: "Gemma-4-26B-8bit"
+        case .qwen36: "Qwen3.6-35B-A3B"
         }
     }
 

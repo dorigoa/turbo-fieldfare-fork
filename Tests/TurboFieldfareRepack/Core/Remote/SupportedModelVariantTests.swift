@@ -59,7 +59,7 @@ import TurboFieldfareFormat
     @Test func qwen36VariantIsPinnedWithDryRunSizes() {
         let variant = SupportedModelVariant.qwen36
         #expect(variant.displayName == "Qwen3.6 35B-A3B 4-bit")
-        #expect(variant.shortLabel == "Qwen3.6")
+        #expect(variant.shortLabel == "Qwen3.6-35B-A3B")
         #expect(variant.repoID == "mlx-community/Qwen3.6-35B-A3B-4bit")
         #expect(variant.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
         #expect(variant.sourceIndexSHA256

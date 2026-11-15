@@ -35,8 +35,7 @@ public enum VisionPackWriter {
         audit: RepackAudit = RepackAudit()
     ) throws -> VisionPackWriteResult {
         let meta = try IndexLoader.load(snapshotDir: options.inputDirectory)
-        guard let modelID = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex),
-              modelID == "mlx-community/gemma-4-26b-a4b-it-4bit" else {
+        guard let modelID = SourceFingerprint.visionModelID(forIndexSha256: meta.indexSha256Hex) else {
             throw RepackError.sourceFingerprintRejected(
                 path: meta.indexPath, sha256: meta.indexSha256Hex)
         }

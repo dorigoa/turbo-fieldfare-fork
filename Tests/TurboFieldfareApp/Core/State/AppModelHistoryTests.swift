@@ -2492,6 +2492,88 @@ import TurboFieldfare
         #expect(model.history.selection != nil)
     }
 
+    /// Delete Selected takes exactly the chats it was given, in one pass,
+    /// even when one is the chat the KV holds and another is the one on
+    /// screen: both lineages end, the untouched chat stays, and the next send
+    /// opens a new file rather than writing into a deleted one.
+    @MainActor
+    @Test func deletingSeveralChatsEndsTheHeldAndTheReadOneAndKeepsTheRest() async throws {
+        let client = FakeInferenceClient(eventDelay: .milliseconds(1))
+        let (model, root) = try await readyModel(client)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var ids: [UUID] = []
+        for prompt in ["first", "second", "third"] {
+            if !ids.isEmpty { model.newChat() }
+            model.promptText = prompt
+            model.send()
+            try await finish(model)
+            ids.append(try #require(model.history.selection))
+        }
+        let (first, second, third) = (ids[0], ids[1], ids[2])
+        #expect(model.storedConversationID == third)
+        let firstFolder = try #require(await model.conversationFolderURL(for: first))
+        let thirdFolder = try #require(await model.conversationFolderURL(for: third))
+
+        // Reading the first while the KV holds the third.
+        model.openConversation(id: first)
+        try await waitUntil { await !model.transcriptHistory.isEmpty }
+        #expect(model.isShowingStoredCopy)
+
+        model.deleteConversations(ids: [first, third])
+        try await model.waitForHistory(count: 1)
+
+        #expect(model.history.entries.map(\.id) == [second])
+        #expect(!FileManager.default.fileExists(atPath: firstFolder.path))
+        #expect(!FileManager.default.fileExists(atPath: thirdFolder.path))
+        #expect(model.storedConversationID == nil)
+        #expect(model.screen == .live)
+        #expect(model.history.selection == nil)
+        #expect(model.historyDiagnostic == nil)
+
+        model.promptText = "after the delete"
+        model.send()
+        try await finish(model)
+        let newID = try #require(model.history.selection)
+        #expect(![first, second, third].contains(newID))
+        #expect(model.history.entries.count == 2)
+    }
+
+    /// Delete All empties the list and the disk and leaves an empty chat, the
+    /// same end state as deleting the open chat on its own.
+    @MainActor
+    @Test func deletingEveryChatLeavesAnEmptyStore() async throws {
+        let client = FakeInferenceClient(eventDelay: .milliseconds(1))
+        let (model, root) = try await readyModel(client)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for (index, prompt) in ["one", "two", "three"].enumerated() {
+            if index > 0 { model.newChat() }
+            model.promptText = prompt
+            model.send()
+            try await finish(model)
+        }
+        try await model.waitForHistory(count: 3)
+        var folders: [URL] = []
+        for entry in model.history.entries {
+            folders.append(try #require(await model.conversationFolderURL(for: entry.id)))
+        }
+        #expect(model.canMutateConversations)
+
+        model.deleteConversations(ids: model.history.entries.map(\.id))
+        // The gate holds for the whole batch, so a second delete is refused.
+        #expect(!model.canMutateConversations)
+        try await model.waitForHistory(count: 0)
+
+        for folder in folders {
+            #expect(!FileManager.default.fileExists(atPath: folder.path))
+        }
+        #expect(model.conversation.turns.isEmpty, "a deleted chat is still live")
+        #expect(model.storedConversationID == nil)
+        #expect(model.history.selection == nil)
+        #expect(model.canMutateConversations)
+    }
+
     /// A turn carrying an epoch the service is no longer holding is refused
     /// before anything runs.
     ///
