@@ -52,7 +52,10 @@ public actor TurboFieldfareHTTPServer {
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
-    public func start(port: Int) async throws -> Channel {
+    /// Binds loopback unless `host` names another address; the caller owns
+    /// that decision, which `ServerArguments` validates and warns about.
+    public func start(host: String = ServerArguments.defaultHost,
+                      port: Int) async throws -> Channel {
         let modelID = self.modelID
         let family = self.family
         let backend = self.backend
@@ -91,7 +94,7 @@ public actor TurboFieldfareHTTPServer {
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-        let channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
+        let channel = try await bootstrap.bind(host: host, port: port).get()
         self.channel = channel
         return channel
     }

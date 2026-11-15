@@ -43,7 +43,10 @@ do {
         backend: backend,
         visionCapability: backend.visionCapability,
         family: backend.family)
-    _ = try await server.start(port: arguments.port)
+    if let warning = arguments.exposureWarning {
+        FileHandle.standardError.write(Data("\(warning)\n".utf8))
+    }
+    _ = try await server.start(host: arguments.host, port: arguments.port)
     print(arguments.readyLine(servedVariant: backend.modelVariant,
                               visionCapability: backend.visionCapability))
 

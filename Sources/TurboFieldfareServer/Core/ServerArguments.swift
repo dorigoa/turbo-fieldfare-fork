@@ -3,6 +3,9 @@ import TurboFieldfare
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
+    /// The address the listening socket binds to. Loopback unless the
+    /// operator names another one with `--host`.
+    public let host: String
     public let port: Int
     public let modelID: String
     public let maxContext: Int
@@ -24,6 +27,7 @@ public struct ServerArguments: Equatable, Sendable {
         4_096, 8_192, 16_384, 32_768, 65_536, 98_304, 131_072, 196_608, 262_144,
     ]
     public static let unbackedContextOverrideVariable = "TURBO_FIELDFARE_ALLOW_UNBACKED_CONTEXT"
+    public static let defaultHost = "127.0.0.1"
 
     public static let usage = """
     usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
@@ -32,7 +36,12 @@ public struct ServerArguments: Equatable, Sendable {
       --vision-pack <dir>        Vision companion pack (default beside text model).
       --vision-residency <on-demand|keep-ready>
                                  Routed-expert residency during vision (default on-demand).
-      --port <1...65535>         Loopback port (default 8080).
+      --host <address>           Address to listen on (default 127.0.0.1): an
+                                 IPv4 or IPv6 address, or localhost. 0.0.0.0
+                                 listens on every IPv4 interface. The server has
+                                 no authentication or TLS, so any other address
+                                 lets every machine that reaches it run the model.
+      --port <1...65535>         Port (default 8080).
       --model-id <id>            API model identifier (default gemma-4-26b-a4b-it
                                  for a 4-bit model; an 8-bit model uses its
                                  manifest's model ID).
@@ -107,6 +116,7 @@ public struct ServerArguments: Equatable, Sendable {
         }
     ) throws -> ServerArguments {
         var model: String?
+        var host = defaultHost
         var port = 8080
         var modelID: String?
         var maxContext = 16_384
@@ -132,6 +142,12 @@ public struct ServerArguments: Equatable, Sendable {
             switch flag {
             case "--model":
                 model = value
+            case "--host":
+                guard isValidHost(value) else {
+                    throw ServerArgumentError.invalid(
+                        "--host must be an IPv4 or IPv6 address, or localhost")
+                }
+                host = value
             case "--port":
                 guard let parsed = Int(value), (1...65_535).contains(parsed) else {
                     throw ServerArgumentError.invalid("--port must be between 1 and 65535")
@@ -256,6 +272,7 @@ public struct ServerArguments: Equatable, Sendable {
                     + " Set \(unbackedContextOverrideVariable)=1 to start anyway.")
         }
         return ServerArguments(model: model,
+                               host: host,
                                port: port,
                                modelID: modelID
                                    ?? modelVariant?.defaultAPIModelID
@@ -279,10 +296,54 @@ public struct ServerArguments: Equatable, Sendable {
     /// API model ID requests must name; `manifest_model_id` is the source the
     /// loaded pack was built from.
     public func readyLine(servedVariant: ServerModelVariant, visionCapability: String) -> String {
-        "TurboFieldfareServer ready at http://127.0.0.1:\(port) model=\(modelID) "
+        "TurboFieldfareServer ready at http://\(urlHost):\(port) model=\(modelID) "
             + "context=\(maxContext) prompt_cache=\(promptCacheMode.rawValue) "
             + "vision=\(visionCapability) vision_residency=\(visionResidency.rawValue) "
             + "variant=\(servedVariant.label) manifest_model_id=\(servedVariant.manifestModelID)"
+    }
+
+    /// The host as it appears in a URL: an IPv6 address goes in brackets.
+    var urlHost: String {
+        host.contains(":") ? "[\(host)]" : host
+    }
+
+    /// Printed to stderr before the port opens when `--host` names an address
+    /// other machines can reach; nil on loopback. The server answers anyone
+    /// who connects, with no authentication or TLS.
+    public var exposureWarning: String? {
+        guard !Self.isLoopback(host) else { return nil }
+        return "warning: listening on \(urlHost):\(port) without authentication or TLS; "
+            + "anyone who can reach this address can run the model and read its replies"
+    }
+
+    /// `localhost`, or an address `inet_pton` accepts. A host name would be
+    /// resolved only when the socket binds, after the model has loaded, so
+    /// one that does not resolve is refused here instead.
+    static func isValidHost(_ host: String) -> Bool {
+        host == "localhost" || ipv4Bytes(host) != nil || ipv6Bytes(host) != nil
+    }
+
+    /// Whether `host` reaches only this Mac: `localhost`, 127.0.0.0/8, `::1`,
+    /// or an IPv4-mapped 127.0.0.0/8 address.
+    static func isLoopback(_ host: String) -> Bool {
+        if host == "localhost" { return true }
+        if let bytes = ipv4Bytes(host) { return bytes[0] == 127 }
+        guard let bytes = ipv6Bytes(host) else { return false }
+        if bytes == [UInt8](repeating: 0, count: 15) + [1] { return true }
+        let mappedPrefix = [UInt8](repeating: 0, count: 10) + [0xff, 0xff]
+        return Array(bytes.prefix(12)) == mappedPrefix && bytes[12] == 127
+    }
+
+    private static func ipv4Bytes(_ host: String) -> [UInt8]? {
+        var address = in_addr()
+        guard inet_pton(AF_INET, host, &address) == 1 else { return nil }
+        return withUnsafeBytes(of: &address) { Array($0) }
+    }
+
+    private static func ipv6Bytes(_ host: String) -> [UInt8]? {
+        var address = in6_addr()
+        guard inet_pton(AF_INET6, host, &address) == 1 else { return nil }
+        return withUnsafeBytes(of: &address) { Array($0) }
     }
 }
 

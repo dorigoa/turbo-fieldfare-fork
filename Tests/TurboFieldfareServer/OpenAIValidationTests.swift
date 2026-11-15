@@ -946,6 +946,8 @@ struct ServerArgumentTests {
 
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
+        #expect(arguments.host == "127.0.0.1")
+        #expect(arguments.exposureWarning == nil)
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
@@ -957,6 +959,40 @@ struct ServerArgumentTests {
         #expect(arguments.rdadvisePolicy == .off)
         #expect(arguments.earlyExpertRead == .off)
         #expect(ServerArguments.usage.contains("off or router (default off)"))
+    }
+
+    @Test(arguments: ["0.0.0.0", "192.168.1.10", "::", "fd00::7", "fe80::1%en0", "::1",
+                      "127.0.0.1", "localhost"])
+    func acceptsAddressHosts(_ host: String) throws {
+        let arguments = try ServerArguments.parse(
+            ["--model", "model.gturbo", "--host", host])
+        #expect(arguments.host == host)
+    }
+
+    /// A name is resolved only when the socket binds, after the model has
+    /// loaded, so anything but an address or `localhost` stops at the parser.
+    @Test(arguments: ["", "example.com", "300.1.1.1", "127.0.0.1:8080", "[::1]"])
+    func rejectsOtherHosts(_ host: String) {
+        #expect(throws: ServerArgumentError.invalid(
+            "--host must be an IPv4 or IPv6 address, or localhost")) {
+            _ = try ServerArguments.parse(["--model", "model.gturbo", "--host", host])
+        }
+    }
+
+    @Test(arguments: ["127.0.0.1", "127.8.9.10", "::1", "::ffff:127.0.0.1", "localhost"])
+    func loopbackHostsDoNotWarn(_ host: String) throws {
+        let arguments = try ServerArguments.parse(
+            ["--model", "model.gturbo", "--host", host])
+        #expect(arguments.exposureWarning == nil)
+    }
+
+    @Test(arguments: ["0.0.0.0", "192.168.1.10", "::", "::ffff:192.168.1.10"])
+    func reachableHostsWarn(_ host: String) throws {
+        let arguments = try ServerArguments.parse(
+            ["--model", "model.gturbo", "--host", host, "--port", "8181"])
+        let warning = try #require(arguments.exposureWarning)
+        #expect(warning.contains("without authentication or TLS"))
+        #expect(warning.contains(host.contains(":") ? "[\(host)]:8181" : "\(host):8181"))
     }
 
     /// The server rejected `--prefill-chunk-tokens auto` while the CLI accepted
@@ -1275,6 +1311,7 @@ struct ServerArgumentTests {
                      namesAuto: Bool)] = [
             (flag: "--expert-cache-slots",
              arguments: ServerArguments(model: "model.gturbo",
+                                        host: "127.0.0.1",
                                         port: 8080,
                                         modelID: "gemma-4-26b-a4b-it",
                                         maxContext: 16_384,
@@ -1293,6 +1330,7 @@ struct ServerArgumentTests {
              namesAuto: false),
             (flag: "--prefill-chunk-tokens",
              arguments: ServerArguments(model: "model.gturbo",
+                                        host: "127.0.0.1",
                                         port: 8080,
                                         modelID: "gemma-4-26b-a4b-it",
                                         maxContext: 16_384,

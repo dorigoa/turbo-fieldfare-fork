@@ -1,8 +1,10 @@
 # Local OpenAI-compatible server
 
 `TurboFieldfareServer` exposes a local Chat Completions API for one model,
-Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` without authentication
-or TLS. Do not expose it through a proxy or tunnel.
+Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` by default and has no
+authentication or TLS. Do not expose it through a proxy or tunnel; to reach it
+from another machine on a network you trust, see
+[Listen on another address](#listen-on-another-address).
 
 ## Start the server
 
@@ -62,6 +64,30 @@ By default, the server runs one generation and admits up to four additional
 requests for preparation or queueing. The limit is enforced before prompt
 rendering and tokenization. Use `--queue-limit` to change it. Press Control-C
 to stop the server.
+
+## Listen on another address
+
+`--host` sets the address the server listens on, so other machines can reach
+it without a port forwarder such as `socat`. It takes an IPv4 or IPv6 address
+or `localhost`; `0.0.0.0` listens on every IPv4 interface and `::` on every
+IPv6 one. A host name is refused, because it would be resolved only after the
+model has loaded.
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/gemma4.gturbo \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+The server still has no authentication or TLS. Anyone who can reach the
+address can run the model, read its replies, and keep the queue full, and
+requests and replies cross the network in clear text. Use it only on a network
+you trust, and allow the port in the macOS firewall if it asks. For any
+address other than loopback the server prints a warning to stderr before it
+opens the port, and the ready line names the address it bound, for example
+`ready at http://0.0.0.0:8080`. Clients on other machines use this Mac's
+address in the base URL, such as `http://192.168.1.20:8080/v1`.
 
 ## Runtime settings
 

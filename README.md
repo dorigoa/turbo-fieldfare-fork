@@ -490,8 +490,10 @@ swift build -c release --product TurboFieldfareServer
 
 It listens on `http://127.0.0.1:8080/v1` and supports Chat Completions,
 streaming, function tools, and single-prefix prompt reuse. The client must
-authorize and run every tool call. Keep the server on loopback; it has no
-remote authentication or TLS.
+authorize and run every tool call. `--host` listens on another address, such as
+`0.0.0.0` to reach the server from other machines; it has no authentication or
+TLS, so do this only on a network you trust. See
+[Listen on another address](docs/OPENAI_SERVER.md#listen-on-another-address).
 
 Requests name the 4-bit model as `gemma-4-26b-a4b-it`. An 8-bit model answers
 to its manifest's model ID, `mlx-community/gemma-4-26b-a4b-it-8bit`;

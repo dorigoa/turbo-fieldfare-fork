@@ -306,6 +306,31 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// The default binds IPv4 loopback; a `host` reaches the socket. `::1`
+    /// stands in for any other address because it is still loopback, so the
+    /// test opens nothing to the network.
+    @Test func startBindsTheRequestedHost() async throws {
+        let loopback = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let defaultChannel = try await loopback.start(port: 0)
+        #expect(defaultChannel.localAddress?.ipAddress == "127.0.0.1")
+        try await loopback.shutdown()
+
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(host: "::1", port: 0)
+        #expect(channel.localAddress?.ipAddress == "::1")
+        let port = try #require(channel.localAddress?.port)
+        let health = try await URLSession.shared.data(
+            from: URL(string: "http://[::1]:\(port)/health")!).0
+        #expect(String(decoding: health, as: UTF8.self).contains(#""status":"ok""#))
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",

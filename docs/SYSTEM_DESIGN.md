@@ -582,7 +582,8 @@ newer; text-only inference remains available on M1. See [Images](#images).
 The Mac app offers 4K, 8K, 16K, 32K, and 64K context lengths. Manual acceptance
 covers the Mac app at 8K and CLI stress at 64K. Audio input, video input,
 training, fine-tuning, server batching, remote serving, and general model
-support are outside the current scope. The optional HTTP server is loopback-only, owns one
+support are outside the current scope. The optional HTTP server listens on loopback unless `--host` names another
+address, owns one
 warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It retains only that prefix. See the
 [local server guide](OPENAI_SERVER.md).

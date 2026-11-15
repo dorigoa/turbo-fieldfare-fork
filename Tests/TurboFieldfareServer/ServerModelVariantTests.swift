@@ -186,6 +186,19 @@ struct ServerModelVariantTests {
             + " variant=8-bit manifest_model_id=mlx-community/gemma-4-26b-a4b-it-8bit")
     }
 
+    /// `--host` changes only the address in the URL; an IPv6 one is
+    /// bracketed so the URL stays usable.
+    @Test func readyLineNamesTheBoundHost() throws {
+        let anyIPv4 = try Self.parse(["--host", "0.0.0.0", "--port", "8181"],
+                                     variant: Self.eightBit)
+        #expect(anyIPv4.readyLine(servedVariant: Self.eightBit, visionCapability: "missing")
+            .hasPrefix("TurboFieldfareServer ready at http://0.0.0.0:8181 model="))
+        let anyIPv6 = try Self.parse(["--host", "::", "--port", "8181"],
+                                     variant: Self.eightBit)
+        #expect(anyIPv6.readyLine(servedVariant: Self.eightBit, visionCapability: "missing")
+            .hasPrefix("TurboFieldfareServer ready at http://[::]:8181 model="))
+    }
+
     @Test func modelOpenedLogNamesTheVariant() {
         // S23 appends the family so the operator sees what was opened;
         // the fields before it are untouched.
