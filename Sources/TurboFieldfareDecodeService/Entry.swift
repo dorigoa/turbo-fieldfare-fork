@@ -419,7 +419,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
             committedTurns: request.committedTurns)
     }
 
-    private static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws
+    static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws
         -> AppRuntimeOptions {
         guard let cachePolicy = AppExpertCachePolicy(
             rawValue: options.expertCachePolicy) else {
@@ -448,6 +448,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
             expertCacheSlots: options.expertCacheSlots,
             expertCachePolicy: cachePolicy,
             prefillEnabled: options.prefillEnabled,
+            expertPrefetchEnabled: options.expertPrefetchEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,

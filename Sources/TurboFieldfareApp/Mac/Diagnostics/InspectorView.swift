@@ -469,6 +469,19 @@ struct InspectorView: View {
         Section("Runtime") {
             Toggle("Prefill", isOn: $model.runtimeOptions.prefillEnabled)
                 .accessibilityIdentifier(.inspectorPrefill)
+            // Only Gemma's runner reads experts ahead; Qwen's never receives
+            // the runtime configuration, so the switch would do nothing there.
+            if model.isExpertPrefetchAvailable {
+                Toggle("Expert prefetch", isOn: Binding(
+                    get: { model.runtimeOptions.expertPrefetchEnabled },
+                    set: { model.setExpertPrefetchEnabled($0) }))
+                    .toggleStyle(.switch)
+                    .accessibilityIdentifier(.inspectorExpertPrefetch)
+                    .help("Read predicted experts ahead during generation. Reload the model to apply changes.")
+                Text("Expert prefetch can speed up generation on devices with less RAM, but may slow it down on devices with more RAM.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent("RDADVISE") {
                 Picker("RDADVISE", selection: $model.runtimeOptions.rdadvisePolicy) {
                     ForEach(AppRDAdvicePolicy.allCases) { policy in

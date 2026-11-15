@@ -361,6 +361,7 @@ public final class AppModel {
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
+            expertPrefetchEnabled: settings.expertPrefetchEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
         let admitted = Self.admittedContext(settings.contextTokens,
@@ -1356,6 +1357,22 @@ public final class AppModel {
             setMaxContextTokens(admitted.tokens)
             contextClampNotice = admitted.notice
         }
+        persistSettings()
+    }
+
+    /// Whether the Inspector offers the expert prefetch switch.
+    ///
+    /// The early read lives in Gemma's runner (`RealForwardRunner`), sized
+    /// from the loaded model's expert stride, so it serves both Gemma
+    /// variants. `LanguageModelRunnerFactory` never hands Qwen's runner the
+    /// runtime configuration, so for Qwen the switch would change nothing.
+    public var isExpertPrefetchAvailable: Bool {
+        modelVariant != .qwen36
+    }
+
+    public func setExpertPrefetchEnabled(_ enabled: Bool) {
+        guard runtimeOptions.expertPrefetchEnabled != enabled else { return }
+        runtimeOptions.expertPrefetchEnabled = enabled
         persistSettings()
     }
 
@@ -2538,6 +2555,7 @@ public final class AppModel {
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            expertPrefetchEnabled: runtimeOptions.expertPrefetchEnabled,
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
             textSize: textSize,

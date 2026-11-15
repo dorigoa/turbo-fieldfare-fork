@@ -40,6 +40,7 @@ public struct Args: Equatable, Sendable {
     /// is known, which needs the tokenizer and, for images, their geometry.
     public var prefillChunkTokensAuto: Bool
     public var rdadvisePolicy: RDAdvicePolicyMode
+    public var earlyExpertRead: RuntimeEarlyExpertRead
 
     public init(model: String,
                 prompt: String? = nil,
@@ -67,7 +68,8 @@ public struct Args: Equatable, Sendable {
                 prefillPolicy: RuntimePrefillPolicy = RuntimeConfiguration.production.prefillPolicy,
                 prefillChunkTokens: Int = RuntimeConfiguration.production.prefillChunkTokens,
                 prefillChunkTokensAuto: Bool = false,
-                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy) {
+                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy,
+                earlyExpertRead: RuntimeEarlyExpertRead = RuntimeConfiguration.production.earlyExpertRead) {
         self.model = model
         self.prompt = prompt
         self.chatPrompt = chatPrompt
@@ -95,6 +97,7 @@ public struct Args: Equatable, Sendable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillChunkTokensAuto = prefillChunkTokensAuto
         self.rdadvisePolicy = rdadvisePolicy
+        self.earlyExpertRead = earlyExpertRead
     }
 }
 
@@ -191,6 +194,8 @@ extension Args {
                                  expert pool, so larger chunks read less; auto
                                  picks the smallest size that covers the prompt.
       --rdadvise <s>             Read-advice policy: off, default, bounded, or adaptive (default off).
+      --early-expert-read <s>    Prefetch predicted next-layer expert weights:
+                                 off or router (default off).
       --help                     Show this message.
     """
 
@@ -229,7 +234,8 @@ extension Args {
             rdadvisePolicy: rdadvisePolicy,
             prefillEnabled: prefillPolicy == .chunked,
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: forceLogitsHead)
+            forceLogitsHead: forceLogitsHead,
+            earlyExpertRead: earlyExpertRead)
     }
 
     public static func parse(_ argv: [String]) throws -> Args {
@@ -261,6 +267,7 @@ extension Args {
         var prefillChunkTokens = runtimeDefaults.prefillChunkTokens
         var prefillChunkTokensAuto = false
         var rdadvisePolicy = runtimeDefaults.rdadvisePolicy
+        var earlyExpertRead = runtimeDefaults.earlyExpertRead
 
         var index = 0
         while index < argv.count {
@@ -390,6 +397,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 rdadvisePolicy = parsed
+            case "--early-expert-read":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = RuntimeEarlyExpertRead(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                earlyExpertRead = parsed
             default:
                 throw ArgsError.unknownFlag(flag)
             }
@@ -462,7 +475,8 @@ extension Args {
                              prefillPolicy: prefillPolicy,
                              prefillChunkTokens: prefillChunkTokens,
                              prefillChunkTokensAuto: prefillChunkTokensAuto,
-                             rdadvisePolicy: rdadvisePolicy)
+                             rdadvisePolicy: rdadvisePolicy,
+                             earlyExpertRead: earlyExpertRead)
         _ = try arguments.resolvedRuntimeConfiguration(forceLogitsHead: false)
         return arguments
     }

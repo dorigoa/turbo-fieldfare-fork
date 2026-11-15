@@ -36,7 +36,7 @@ I will do my utmost to incorporate the most significant changes made to the orig
 
 --------------------------
 
-![TurboFieldfare Mac app generating text with Gemma 4 26B-A4B](docs/assets/turbofieldfare-app.webp)
+![TurboFieldfare Mac app with local chat history, LaTeX rendering, and run statistics](docs/assets/turbofieldfare-app.webp)
 
 Memory got expensive. So I gave a 26-billion-parameter model a ~2 GB budget.
 
@@ -82,8 +82,8 @@ your prompt, and press **Generate**. The 4-bit model is the default; see
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
 | 8-bit variant   | Experimental: MLX affine 8-bit in every slot; about 26.9 GB installed; needs 16 GB of RAM; [7.6-9.7 tok/s](docs/BENCHMARKS.md#m5-8-bit-and-4-bit-measured-decode) on a 32 GB M5 MacBook Air, where the 4-bit model measured 15.9-18.0 tok/s. See [Model variants](#model-variants) |
 | Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
-| M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
-| M5 measured decode | [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
+| M2 measured decode | [5.5–6.8 tok/s](docs/BENCHMARKS.md#full-generation-measurements) on an 8 GB M2 MacBook Air, expert prefetch on |
+| M5 measured decode | [35.3–39.2 tok/s](docs/BENCHMARKS.md#full-generation-measurements) on a 24 GB M5 Pro, expert prefetch off |
 | Community Reports | [Here](docs/COMMUNITY_BENCHMARKS.md#community-results) |
 
 Apart from the 8-bit row, the table describes the default 4-bit model, and
@@ -300,6 +300,8 @@ The status bar shows generation progress, decode speed, and memory use. Use the
 right pane to configure sampling, context length, expert-cache slots, and
 runtime options. See [Runtime controls](docs/RUNTIME_CONTROLS.md) for details
 and defaults.
+
+**Expert prefetch** is off by default. Enable it in Runtime, then reload the model.
 
 Use **Settings → Text Size** to enlarge conversation and message-editor text
 from 100% to 200%. Changes apply immediately and are remembered across launches.

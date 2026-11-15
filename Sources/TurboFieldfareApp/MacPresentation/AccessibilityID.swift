@@ -113,6 +113,7 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case inspectorThinking = "inspector.thinking"
     case inspectorReasoningDepth = "inspector.reasoningDepth"
     case inspectorPrefill = "inspector.prefill"
+    case inspectorExpertPrefetch = "inspector.expertPrefetch"
     case inspectorRDAdvise = "inspector.rdadvise"
     case inspectorCopyPath = "inspector.copyPath"
     case inspectorVariant = "inspector.variant"

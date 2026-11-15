@@ -17,6 +17,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
+    var expertPrefetchEnabled: Bool = false
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var textSize: AppTextSize = .standard
@@ -72,6 +73,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topPEnabled
         case topP
         case prefillEnabled
+        case expertPrefetchEnabled
         case newlineShortcut
         case showPromptExamples
         case textSize
@@ -103,6 +105,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
+         expertPrefetchEnabled: Bool = false,
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
          textSize: AppTextSize = .standard,
@@ -132,6 +135,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topPEnabled = topPEnabled
         self.topP = topP
         self.prefillEnabled = prefillEnabled
+        self.expertPrefetchEnabled = expertPrefetchEnabled
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.textSize = textSize
@@ -165,6 +169,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topPEnabled = try container.decode(Bool.self, forKey: .topPEnabled)
         topP = try container.decode(Double.self, forKey: .topP)
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
+        expertPrefetchEnabled = container.contains(.expertPrefetchEnabled)
+            ? try container.decode(Bool.self, forKey: .expertPrefetchEnabled) : false
         newlineShortcut = try container.decodeIfPresent(
             AppNewlineShortcut.self,
             forKey: .newlineShortcut) ?? .return
