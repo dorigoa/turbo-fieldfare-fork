@@ -45,7 +45,7 @@ import TurboFieldfare
         #expect(qwenIdentity.modelID == AppModelVariant.qwen36.repoID)
         #expect(gemmaIdentity.modelID == AppModelVariant.int4.repoID)
         // Both modelIDs name a catalog variant, so a refused row can say
-        // "recorded with the Qwen3.6 model" instead of "a different model".
+        // "recorded with Qwen3.6-35B-A3B" instead of "a different model".
         #expect(AppModelVariant.variant(forRepoID: qwenIdentity.modelID) == .qwen36)
         #expect(AppModelVariant.variant(forRepoID: gemmaIdentity.modelID) == .int4)
 

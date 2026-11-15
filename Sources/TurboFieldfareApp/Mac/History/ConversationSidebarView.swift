@@ -23,6 +23,14 @@ struct ConversationSidebarView: View {
     @StoredState private var renameTarget: ConversationMeta?
     @StoredState private var renameText = ""
     @StoredState private var deleteTarget: ConversationMeta?
+    /// Selection mode: rows tick instead of opening, and the footer's Delete
+    /// reaches only the ticked rows.
+    @StoredState private var isSelecting = false
+    @StoredState private var selectedIDs: Set<UUID> = []
+    /// The chats the footer's Delete was pressed for, waiting on its alert.
+    /// Captured at the click, so a list that changes under the alert cannot
+    /// widen what the confirmation deletes.
+    @StoredState private var bulkDeleteTargets: [UUID]?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -49,6 +57,31 @@ struct ConversationSidebarView: View {
             } else {
                 list
             }
+
+            if !model.history.entries.isEmpty {
+                footer
+            }
+        }
+        .onChange(of: model.history.entries.isEmpty) { _, isEmpty in
+            if isEmpty { endSelecting() }
+        }
+        .alert(
+            ConversationBulkDeletePresentation.alertTitle(
+                count: bulkDeleteTargets?.count ?? 0),
+            isPresented: isBulkDeleting,
+            presenting: bulkDeleteTargets
+        ) { targets in
+            Button("Delete", role: .destructive) {
+                model.deleteConversations(ids: targets)
+                bulkDeleteTargets = nil
+                endSelecting()
+            }
+            .disabled(!model.canMutateConversations)
+            .accessibilityIdentifier(.historyDeleteManyConfirm)
+            Button("Cancel", role: .cancel) { bulkDeleteTargets = nil }
+        } message: { targets in
+            Text(ConversationBulkDeletePresentation.alertMessage(
+                count: targets.count, isSelecting: isSelecting, query: trimmedSearch))
         }
         .alert("Rename Chat", isPresented: isRenaming, presenting: renameTarget) { target in
             TextField("Name", text: $renameText)
@@ -81,6 +114,12 @@ struct ConversationSidebarView: View {
             Text("\u{201C}\(ConversationRowPresentation.title(target))\u{201D} and "
                  + "everything in it will be deleted. This cannot be undone.")
         }
+    }
+
+    private var isBulkDeleting: Binding<Bool> {
+        Binding(
+            get: { bulkDeleteTargets != nil },
+            set: { presented in if !presented { bulkDeleteTargets = nil } })
     }
 
     private var isDeleting: Binding<Bool> {
@@ -227,80 +266,203 @@ struct ConversationSidebarView: View {
     }
 
     private var visibleSections: [(group: ConversationDateGroup, entries: [ConversationMeta])] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let entries = query.isEmpty
+        ConversationDateGroup.sections(visibleEntries, now: Date())
+    }
+
+    private var trimmedSearch: String {
+        search.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The rows the list is showing: every chat, or the ones the search
+    /// matches.
+    private var visibleEntries: [ConversationMeta] {
+        let query = trimmedSearch
+        return query.isEmpty
             ? model.history.entries
             : model.history.entries.filter {
                 $0.title.localizedCaseInsensitiveContains(query)
             }
-        return ConversationDateGroup.sections(entries, now: Date())
+    }
+
+    // MARK: - Select and delete many
+
+    /// What the footer's Delete would remove: the ticked rows in selection,
+    /// every listed row otherwise. Only rows the list is showing, so a search
+    /// typed after ticking cannot delete something out of sight.
+    private var deleteScope: [UUID] {
+        let visible = visibleEntries.map(\.id)
+        return isSelecting ? visible.filter { selectedIDs.contains($0) } : visible
+    }
+
+    private var allVisibleSelected: Bool {
+        let visible = visibleEntries
+        return !visible.isEmpty && visible.allSatisfy { selectedIDs.contains($0.id) }
+    }
+
+    private func endSelecting() {
+        isSelecting = false
+        selectedIDs = []
+    }
+
+    private func toggleSelection(_ id: UUID) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    /// Select on the left, Delete on the right, and Select All between them
+    /// while selecting. One Delete rather than two: Select decides its reach,
+    /// so there is never a question of which of two red buttons is which.
+    private var footer: some View {
+        let scope = deleteScope
+        return VStack(spacing: 0) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+            HStack(spacing: 8) {
+                Button(ConversationBulkDeletePresentation.selectTitle(
+                    isSelecting: isSelecting)) {
+                    if isSelecting {
+                        endSelecting()
+                    } else {
+                        selectedIDs = []
+                        isSelecting = true
+                    }
+                }
+                .disabled(model.history.isReadOnlyStore)
+                .accessibilityIdentifier(.historySelect)
+
+                if isSelecting {
+                    Spacer(minLength: 0)
+                    let allSelected = allVisibleSelected
+                    Button(ConversationBulkDeletePresentation.selectAllTitle(
+                        allSelected: allSelected)) {
+                        if allSelected {
+                            selectedIDs.subtract(visibleEntries.map(\.id))
+                        } else {
+                            selectedIDs.formUnion(visibleEntries.map(\.id))
+                        }
+                    }
+                    .disabled(visibleEntries.isEmpty)
+                    .accessibilityIdentifier(.historySelectAll)
+                }
+
+                Spacer(minLength: 0)
+
+                Button(role: .destructive) {
+                    bulkDeleteTargets = scope
+                } label: {
+                    Text(ConversationBulkDeletePresentation.deleteTitle(
+                        isSelecting: isSelecting, count: scope.count))
+                }
+                .foregroundStyle(scope.isEmpty || !model.canMutateConversations
+                                 ? Color.secondary : Color.red)
+                .disabled(scope.isEmpty || !model.canMutateConversations)
+                .help(ConversationBulkDeletePresentation.deleteHelp(
+                    isSelecting: isSelecting, isFiltered: !trimmedSearch.isEmpty))
+                .accessibilityIdentifier(.historyDeleteMany)
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .font(.callout)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
     }
 
     private func row(_ entry: ConversationMeta) -> some View {
-        let state = model.continuability(of: entry)
-        let isSelected = model.history.selection == entry.id
+        let isTicked = isSelecting && selectedIDs.contains(entry.id)
+        let isSelected = isSelecting ? isTicked : model.history.selection == entry.id
         return HStack(spacing: 4) {
             Button {
-                model.openConversation(id: entry.id)
+                if isSelecting {
+                    toggleSelection(entry.id)
+                } else {
+                    model.openConversation(id: entry.id)
+                }
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(ConversationRowPresentation.title(entry))
-                        .lineLimit(1)
-                        .foregroundStyle(.primary)
-                    Text(ConversationRowPresentation.subtitle(
-                        entry, state: state,
-                        recordedVariant: model.recordedOtherVariant(of: entry)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                // The whole row is the target, not just the text it happens
-                // to contain.
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier(AccessibilityID.row(entry.id))
-
-            // Rename and Delete on an explicit menu rather than only on a
-            // right-click. A plain-styled button takes the control-click for
-            // itself, so a context menu alone left both actions with no
-            // reliable way in.
-            Menu {
-                Button("Rename") {
-                    renameText = entry.title
-                    renameTarget = entry
-                }
-                .disabled(!model.canMutateConversation(id: entry.id))
-                // Not gated on the store being writable: looking at a
-                // conversation's files is a read, and a second window holding
-                // the lock is no reason to refuse it.
-                Button("Open Folder in Finder") { openFolder(entry) }
-                Divider()
-                Button("Delete\u{2026}", role: .destructive) {
-                    deleteTarget = entry
-                }
-                .disabled(!model.canMutateConversation(id: entry.id))
-            } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22, height: 22)
+                rowLabel(entry, isTicked: isTicked)
+                    // The whole row is the target, not just the text it
+                    // happens to contain.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            // The window's accent tint reaches in here and painted the glyph
-            // green, which reads as a primary action rather than the secondary
-            // affordance it is.
-            .tint(.secondary)
-            .help("Rename or delete this chat")
-            .accessibilityIdentifier(AccessibilityID.rowMenu(entry.id))
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(isTicked ? .isSelected : [])
+            .accessibilityIdentifier(AccessibilityID.row(entry.id))
+
+            // Hidden while selecting: a click on a row then ticks it, and a
+            // per-row Delete beside the batch one would put two different
+            // deletes one click apart.
+            if !isSelecting {
+                rowMenu(entry)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(rowBackground(isSelected: isSelected))
         .padding(.horizontal, 8)
+    }
+
+    private func rowLabel(_ entry: ConversationMeta, isTicked: Bool) -> some View {
+        HStack(spacing: 8) {
+            if isSelecting {
+                Image(systemName: isTicked ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isTicked
+                                     ? TurboFieldfareMacTheme.accentColor
+                                     : Color.secondary)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ConversationRowPresentation.title(entry))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                Text(ConversationRowPresentation.subtitle(
+                    entry, state: model.continuability(of: entry),
+                    recordedVariant: model.recordedOtherVariant(of: entry)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    /// Rename and Delete on an explicit menu rather than only on a
+    /// right-click. A plain-styled button takes the control-click for itself,
+    /// so a context menu alone left both actions with no reliable way in.
+    private func rowMenu(_ entry: ConversationMeta) -> some View {
+        Menu {
+            Button("Rename") {
+                renameText = entry.title
+                renameTarget = entry
+            }
+            .disabled(!model.canMutateConversation(id: entry.id))
+            // Not gated on the store being writable: looking at a
+            // conversation's files is a read, and a second window holding
+            // the lock is no reason to refuse it.
+            Button("Open Folder in Finder") { openFolder(entry) }
+            Divider()
+            Button("Delete\u{2026}", role: .destructive) {
+                deleteTarget = entry
+            }
+            .disabled(!model.canMutateConversation(id: entry.id))
+        } label: {
+            Image(systemName: "ellipsis")
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        // The window's accent tint reaches in here and painted the glyph
+        // green, which reads as a primary action rather than the secondary
+        // affordance it is.
+        .tint(.secondary)
+        .help("Rename or delete this chat")
+        .accessibilityIdentifier(AccessibilityID.rowMenu(entry.id))
     }
 
     /// Opens the folder itself rather than selecting it in its parent. The

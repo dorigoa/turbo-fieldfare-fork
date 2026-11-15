@@ -75,7 +75,10 @@ public enum ConversationRowPresentation {
             case .newerFormat: return "recorded with a newer app version"
             case .differentModel:
                 if let recordedVariant {
-                    return "recorded with the \(recordedVariant.shortLabel) model"
+                    // Without "the … model": the row is one line in a narrow
+                    // sidebar, and the bit width at the end is the part that
+                    // tells the two Gemma variants apart.
+                    return "recorded with \(recordedVariant.shortLabel)"
                 }
                 return "recorded with a different model"
             case .differentCheckpoint: return "recorded with a different checkpoint"
@@ -100,6 +103,56 @@ public enum ConversationRowPresentation {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
+
+/// Copy for the sidebar's footer: Select, and the one Delete button whose
+/// reach Select decides.
+///
+/// Out of selection the button deletes every chat the list is showing, so
+/// with a search typed it deletes the matches and nothing the search hides;
+/// in selection it deletes the ticked rows the list is showing. The alert
+/// names the count either way, because a click that removes forty chats
+/// should not read like one that removes one.
+public enum ConversationBulkDeletePresentation {
+    public static func selectTitle(isSelecting: Bool) -> String {
+        isSelecting ? "Done" : "Select"
+    }
+
+    public static func selectAllTitle(allSelected: Bool) -> String {
+        allSelected ? "Select None" : "Select All"
+    }
+
+    public static func deleteTitle(isSelecting: Bool, count: Int) -> String {
+        guard isSelecting else { return "Delete All\u{2026}" }
+        return count == 0 ? "Delete" : "Delete (\(count))\u{2026}"
+    }
+
+    public static func deleteHelp(isSelecting: Bool, isFiltered: Bool) -> String {
+        if isSelecting { return "Delete the selected chats" }
+        return isFiltered ? "Delete every chat that matches the search"
+            : "Delete every chat"
+    }
+
+    public static func alertTitle(count: Int) -> String {
+        count == 1 ? "Delete 1 chat?" : "Delete \(count) chats?"
+    }
+
+    public static func alertMessage(count: Int, isSelecting: Bool,
+                                    query: String) -> String {
+        let subject: String
+        if isSelecting {
+            subject = count == 1 ? "The selected chat" : "The \(count) selected chats"
+        } else if !query.isEmpty {
+            subject = count == 1
+                ? "The chat whose title contains \u{201C}\(query)\u{201D}"
+                : "All \(count) chats whose title contains \u{201C}\(query)\u{201D}"
+        } else {
+            subject = count == 1 ? "Your only chat" : "All \(count) chats"
+        }
+        return subject + " and everything in "
+            + (count == 1 ? "it" : "them")
+            + " will be deleted. This cannot be undone."
     }
 }
 
@@ -152,7 +205,7 @@ public enum ConversationStateNotice {
                                 recordedVariant: AppModelVariant?) -> String {
         if reason == .differentModel, let recordedVariant {
             let label = recordedVariant.shortLabel
-            return "It was recorded with the \(label) model, and a chat continues "
+            return "It was recorded with \(label), and a chat continues "
                 + "only on the model that recorded it. To continue it, set "
                 + "Settings > Model Variant to \(label). You can also read it here, "
                 + "or re-read it into a new chat, which starts a different "

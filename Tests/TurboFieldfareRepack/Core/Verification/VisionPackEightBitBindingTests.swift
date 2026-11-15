@@ -4,11 +4,14 @@ import Testing
 @testable import TurboFieldfareRepackCore
 
 /// Image support with the 8-bit text model (S10, option A). The companion pack
-/// comes from the pinned 4-bit checkpoint — the tower is BF16 in both, only the
-/// projector differs — and is bound to the 8-bit model's manifest, which is
-/// what the verifier and the runtime check. These cases pin that a 4-bit-source
-/// pack beside `gemma4-8bit.gturbo` verifies and activates, and that the
-/// binding still refuses the other variant's text model.
+/// comes from the plain post-training 4-bit checkpoint — the tower is BF16 in
+/// both, only the projector differs — and is bound to the 8-bit model's
+/// manifest, which is what the verifier and the runtime check. That checkpoint
+/// is no longer a text variant (the 4-bit variant is now the QAT upload, whose
+/// own projector its pack carries), but it stays pinned as the 8-bit model's
+/// image source. These cases pin that such a pack beside
+/// `gemma4-8bit.gturbo` verifies and activates, and that the binding still
+/// refuses the other variant's text model.
 @Suite struct VisionPackEightBitBindingTests {
     @Test func aFourBitSourcePackVerifiesAgainstTheEightBitTextModel() throws {
         let fixture = try Fixture.make(tag: "verify")
@@ -18,8 +21,8 @@ import Testing
         let verification = try VisionPackVerifier.verify(
             directory: pack, textModelDirectory: fixture.eightBit)
 
-        #expect(verification.sourceIndexSha256 == SupportedModelVariant.int4.sourceIndexSHA256)
-        #expect(verification.sourceRevision == SupportedModelVariant.int4.revision)
+        #expect(verification.sourceIndexSha256 == VisionCompanionSource.gemma4PTQ4bit.sourceIndexSHA256)
+        #expect(verification.sourceRevision == VisionCompanionSource.gemma4PTQ4bit.revision)
         #expect(verification.compatibleTextManifestSha256 == fixture.eightBitManifestSHA)
     }
 
@@ -41,8 +44,7 @@ import Testing
     }
 
     /// What `--activate-vision-install` and the app do after a download: the
-    /// pinned 4-bit source identity activates a pack prepared for the 8-bit
-    /// model.
+    /// 8-bit model's pinned image source activates a pack prepared for it.
     @Test func aPreparedPackActivatesBesideTheEightBitModelWithTheFourBitSource() throws {
         let fixture = try Fixture.make(tag: "activate")
         defer { fixture.remove() }
@@ -51,11 +53,13 @@ import Testing
             boundTo: fixture.eightBit,
             in: URL(fileURLWithPath: paths.partialDirectory, isDirectory: true),
             receiptDirectory: fixture.eightBitCompanion)
+        let source = try VisionCompanionSource.forTextModel(directory: fixture.eightBit.path)
+        #expect(source == .gemma4PTQ4bit)
         try RemoteInstallCheckpoint(
-            repoID: SupportedModelSource.repoID,
-            requestedRevision: SupportedModelSource.revision,
-            resolvedCommit: SupportedModelVariant.int4.revision,
-            sourceIndexSHA256: SupportedModelVariant.int4.sourceIndexSHA256,
+            repoID: source.repoID,
+            requestedRevision: source.revision,
+            resolvedCommit: source.revision,
+            sourceIndexSHA256: source.sourceIndexSHA256,
             planFingerprint: String(repeating: "c", count: 64),
             totalSourceBytes: 2).write(to: paths.checkpointFile,
                                        parentDirectory: paths.parentDirectory)
@@ -63,8 +67,8 @@ import Testing
         try RemoteVisionPackInstaller.activatePrepared(
             outputDirectory: fixture.eightBitCompanion.path,
             textModelDirectory: fixture.eightBit.path,
-            repoID: SupportedModelSource.repoID,
-            requestedRevision: SupportedModelSource.revision)
+            repoID: source.repoID,
+            requestedRevision: source.revision)
 
         #expect(FileManager.default.fileExists(atPath: fixture.eightBitCompanion.path))
         #expect(!FileManager.default.fileExists(atPath: paths.partialDirectory))
@@ -145,7 +149,7 @@ private struct Fixture {
             GTurboVisionFormatV1.processorFile: GTurboManifestFileV1(
                 size: UInt64(processor.count), sha256: Self.hash(processor)),
         ]
-        let source = SupportedModelVariant.int4
+        let source = VisionCompanionSource.gemma4PTQ4bit
         let manifest = GTurboVisionManifestV1(
             modelID: source.repoID, sourceRevision: source.revision,
             sourceIndexSha256: source.sourceIndexSHA256,

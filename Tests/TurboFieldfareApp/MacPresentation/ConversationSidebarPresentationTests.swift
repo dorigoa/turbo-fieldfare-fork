@@ -195,3 +195,38 @@ import TurboFieldfare
         #expect(coordinator.popover.behavior == .transient)
     }
 }
+
+/// The footer's copy says what Delete will remove before it is pressed, and
+/// the alert says how many.
+@Suite struct ConversationBulkDeletePresentationTests {
+    @Test func selectDecidesWhatTheDeleteButtonSays() {
+        #expect(ConversationBulkDeletePresentation.selectTitle(isSelecting: false) == "Select")
+        #expect(ConversationBulkDeletePresentation.selectTitle(isSelecting: true) == "Done")
+        #expect(ConversationBulkDeletePresentation.deleteTitle(isSelecting: false, count: 7)
+            == "Delete All\u{2026}")
+        #expect(ConversationBulkDeletePresentation.deleteTitle(isSelecting: true, count: 0)
+            == "Delete")
+        #expect(ConversationBulkDeletePresentation.deleteTitle(isSelecting: true, count: 3)
+            == "Delete (3)\u{2026}")
+        #expect(ConversationBulkDeletePresentation.selectAllTitle(allSelected: false) == "Select All")
+        #expect(ConversationBulkDeletePresentation.selectAllTitle(allSelected: true) == "Select None")
+    }
+
+    @Test func theAlertNamesTheCountAndWhatItCovers() {
+        #expect(ConversationBulkDeletePresentation.alertTitle(count: 1) == "Delete 1 chat?")
+        #expect(ConversationBulkDeletePresentation.alertTitle(count: 12) == "Delete 12 chats?")
+        #expect(ConversationBulkDeletePresentation.alertMessage(
+            count: 12, isSelecting: false, query: "")
+            == "All 12 chats and everything in them will be deleted. This cannot be undone.")
+        #expect(ConversationBulkDeletePresentation.alertMessage(
+            count: 2, isSelecting: false, query: "swift")
+            == "All 2 chats whose title contains \u{201C}swift\u{201D} and everything in "
+                + "them will be deleted. This cannot be undone.")
+        #expect(ConversationBulkDeletePresentation.alertMessage(
+            count: 1, isSelecting: true, query: "swift")
+            == "The selected chat and everything in it will be deleted. This cannot be undone.")
+        #expect(ConversationBulkDeletePresentation.alertMessage(
+            count: 4, isSelecting: true, query: "")
+            .hasPrefix("The 4 selected chats and everything in them"))
+    }
+}

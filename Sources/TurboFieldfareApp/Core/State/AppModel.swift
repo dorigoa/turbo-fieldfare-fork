@@ -642,8 +642,11 @@ public final class AppModel {
 
     public var isInstallingVisionPack: Bool { visionInstallState.isInstalling }
 
+    /// The selected variant's image companion; the installer resolves the
+    /// same source from the text model's manifest when it runs.
     public var visionInstallDescriptor: AppModelInstallDescriptor {
-        visionInstaller.descriptor
+        modelVariant.visionCompanionSource.map(AppModelInstallDescriptor.visionCompanion(for:))
+            ?? visionInstaller.descriptor
     }
 
     /// Any companion operation currently owns the installer transaction.

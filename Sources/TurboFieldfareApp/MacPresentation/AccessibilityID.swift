@@ -68,6 +68,10 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case historyRenameField = "history.rename.field"
     case historyRenameConfirm = "history.rename.confirm"
     case historyDeleteConfirm = "history.delete.confirm"
+    case historySelect = "history.select"
+    case historySelectAll = "history.selectAll"
+    case historyDeleteMany = "history.deleteMany"
+    case historyDeleteManyConfirm = "history.deleteMany.confirm"
 
     case composerMessage = "composer.message"
     case composerGenerate = "composer.generate"

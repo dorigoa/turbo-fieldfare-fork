@@ -4,16 +4,18 @@ import TurboFieldfareFormat
 @testable import TurboFieldfareRepackCore
 
 @Suite struct SupportedModelVariantTests {
-    /// `SupportedModelSource` is public API and the 4-bit default; turning it
-    /// into a facade over the catalog must not move a single value.
-    @Test func defaultSourceKeepsTheFourBitPin() {
-        #expect(SupportedModelSource.displayName == "Gemma 4 26B-A4B IT 4-bit")
-        #expect(SupportedModelSource.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
-        #expect(SupportedModelSource.revision == "0d77464eeb233a2da68ebf9d7dc4edaac7db956d")
+    /// `SupportedModelSource` is public API and the 4-bit default, which is
+    /// the QAT upload: pinned by revision and index, sized from its dry run.
+    @Test func defaultSourceIsTheQATFourBitPin() {
+        #expect(SupportedModelSource.displayName == "Gemma 4 26B-A4B IT QAT 4-bit")
+        #expect(SupportedModelSource.repoID == "mlx-community/gemma-4-26B-A4B-it-qat-4bit")
+        #expect(SupportedModelSource.revision == "0e3cbab38ce568cf6e23543010d08d03b731910c")
         #expect(SupportedModelSource.sourceIndexSHA256
-                == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-        #expect(SupportedModelSource.approximateDownloadBytes == 14_620_479_420)
-        #expect(SupportedModelSource.installedBytes == 14_291_921_884)
+                == "5455e83705bbdd4e3702c7d4f9d49d4900e84533036628f74500538075dd5c80")
+        #expect(SupportedModelSource.approximateDownloadBytes
+                == 14_952_958_284 + 434_846 + 32_189_300)
+        #expect(SupportedModelSource.installedBytes == 14_559_600_000)
+        #expect(SupportedModelSource.installedBytes >= 14_559_561_370)
         #expect(SupportedModelSource.reserveBytes == 1_073_741_824)
         #expect(SupportedModelSource.variant == .int4)
     }
@@ -59,7 +61,7 @@ import TurboFieldfareFormat
     @Test func qwen36VariantIsPinnedWithDryRunSizes() {
         let variant = SupportedModelVariant.qwen36
         #expect(variant.displayName == "Qwen3.6 35B-A3B 4-bit")
-        #expect(variant.shortLabel == "Qwen3.6")
+        #expect(variant.shortLabel == "Qwen3.6-35B-A3B")
         #expect(variant.repoID == "mlx-community/Qwen3.6-35B-A3B-4bit")
         #expect(variant.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
         #expect(variant.sourceIndexSHA256
@@ -121,6 +123,30 @@ import TurboFieldfareFormat
                 == nil)
         #expect(SupportedModelVariant.variant(forRepoID: "mlx-community/gemma-4-26b-a4b-it-6bit")
                 == nil)
+    }
+
+    /// The image companion's projector belongs with one checkpoint: the QAT
+    /// text model takes the QAT upload's, the 8-bit keeps the plain 4-bit
+    /// upload's (S10, option A), and Qwen has none. The plain upload is a
+    /// vision source only — never a text variant again.
+    @Test func eachGemmaVariantNamesItsOwnImageSource() {
+        #expect(SupportedModelVariant.int4.visionCompanionSource == .gemma4QAT4bit)
+        #expect(VisionCompanionSource.gemma4QAT4bit.repoID == SupportedModelVariant.int4.repoID)
+        #expect(SupportedModelVariant.int8.visionCompanionSource == .gemma4PTQ4bit)
+        #expect(VisionCompanionSource.gemma4PTQ4bit.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
+        #expect(VisionCompanionSource.gemma4PTQ4bit.sourceIndexSHA256
+                == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
+        #expect(SupportedModelVariant.qwen36.visionCompanionSource == nil)
+
+        #expect(SourceFingerprint.visionModelID(
+            forIndexSha256: VisionCompanionSource.gemma4PTQ4bit.sourceIndexSHA256)
+            == VisionCompanionSource.gemma4PTQ4bit.repoID)
+        #expect(SourceFingerprint.modelID(
+            forIndexSha256: VisionCompanionSource.gemma4PTQ4bit.sourceIndexSHA256) == nil)
+        #expect(SupportedModelVariant.variant(
+            forRepoID: VisionCompanionSource.gemma4PTQ4bit.repoID) == nil)
+        #expect(SourceFingerprint.visionModelID(
+            forIndexSha256: SupportedModelVariant.qwen36.sourceIndexSHA256) == nil)
     }
 
     @Test func fingerprintsAdmitBothPinnedSources() {
