@@ -42,8 +42,8 @@ Memory got expensive. So I gave a 26-billion-parameter model a ~2 GB budget.
 
 TurboFieldfare runs the instruction-tuned
 **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)**
-without loading the entire 14.3 GB model into memory. It keeps the shared
-1.35 GB core and FP16 KV cache in memory, then streams only the experts needed
+without loading the entire 14.6 GB model into memory. It keeps the shared
+1.62 GB core and FP16 KV cache in memory, then streams only the experts needed
 for each token from SSD. This is what lets the model run on Macs with 8 GB of
 RAM.
 
@@ -78,7 +78,7 @@ your prompt, and press **Generate**. The 4-bit model is the default; see
 | Model           | Gemma 4 26B-A4B IT, 26B total parameters, about 3.88B active per token                                                   |
 | Weights         | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts                                                |
 | Memory          | ~2 GB of weights and 4K KV cache                                                                                         |
-| Storage         | About 14.3 GB for the text model, plus about 1.1 GB for the optional image pack                                          |
+| Storage         | About 14.6 GB for the text model, plus about 1.1 GB for the optional image pack                                          |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
 | 8-bit variant   | Experimental: MLX affine 8-bit in every slot; about 26.9 GB installed; needs 16 GB of RAM; [7.6-9.7 tok/s](docs/BENCHMARKS.md#m5-8-bit-and-4-bit-measured-decode) on a 32 GB M5 MacBook Air, where the 4-bit model measured 15.9-18.0 tok/s. See [Model variants](#model-variants) |
 | Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
@@ -117,7 +117,7 @@ The Swift package exposes six products:
   experimental 8-bit variant needs 16 GB of RAM or more
 - macOS 26 with Metal 4
 - Apple Command Line Tools or Xcode with Swift 6.2+ and the macOS 26 SDK or newer
-- Enough free storage for the model installation: about 14.3 GB for the 4-bit
+- Enough free storage for the model installation: about 14.6 GB for the 4-bit
   model, about 26.9 GB for the 8-bit one
 - An internet connection for the first model install
 
@@ -125,13 +125,19 @@ The package is arm64-only. Older macOS and Metal versions are not supported.
 
 ### Model variants
 
-TurboFieldfare installs either of two pinned MLX quantizations of the same
-Gemma 4 26B-A4B IT checkpoint. They share the architecture, tokenizer, and
-tensor names; only the weight bit widths differ.
+TurboFieldfare installs either of two pinned MLX quantizations of Gemma 4
+26B-A4B IT. They share the architecture, tokenizer, and tensor names. The
+4-bit variant is the quantization-aware-trained (QAT) checkpoint Google
+released on 2026-06-05: its attention, embedding and routed experts are 4-bit,
+its router and dense MLP 8-bit. It replaced the plain post-training 4-bit
+upload, so a `gemma4.gturbo` installed from that upload is no longer accepted
+and must be installed again. Chats recorded with it can still be read, not
+continued. Benchmark figures dated before the switch were measured on the plain
+4-bit upload.
 
 | Variant | Source | Download | Installed | Memory |
 | --- | --- | ---: | ---: | --- |
-| 4-bit (default) | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | About 14.6 GB | About 14.3 GB | 8 GB Mac or larger |
+| 4-bit QAT (default) | [`mlx-community/gemma-4-26B-A4B-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-qat-4bit) | About 15.0 GB | About 14.6 GB | 8 GB Mac or larger |
 | 8-bit (experimental) | [`mlx-community/gemma-4-26b-a4b-it-8bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-8bit) | About 27.0 GB | About 26.9 GB | 16 GB Mac or larger |
 
 The 8-bit variant has been validated on one 32 GB M5 MacBook Air. Its greedy
@@ -276,7 +282,7 @@ checkpoint on disk and keeps scratch memory bounded.
 The first installation transfers about 15 GB through bounded Hugging Face
 range requests, or about 27 GB for the 8-bit variant. Network speed and
 Hugging Face response times vary, so it can take a while. The completed
-`.gturbo` installation occupies about 14.3 GB (about 26.9 GB for the 8-bit
+`.gturbo` installation occupies about 14.6 GB (about 26.9 GB for the 8-bit
 variant) and is accepted only after its manifest and file hashes have been
 validated. Installation does not load the model into memory.
 

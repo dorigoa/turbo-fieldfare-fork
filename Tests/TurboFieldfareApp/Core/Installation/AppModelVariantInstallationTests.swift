@@ -24,13 +24,13 @@ import TurboFieldfare
     @Test func theDefaultDescriptorIsStillTheFourBitDownload() {
         let fourBit = AppModelInstallDescriptor.default
         #expect(fourBit == .descriptor(for: .int4))
-        #expect(fourBit.displayName == "Gemma 4 26B-A4B IT 4-bit")
-        #expect(fourBit.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
-        #expect(fourBit.revision == "0d77464eeb233a2da68ebf9d7dc4edaac7db956d")
+        #expect(fourBit.displayName == "Gemma 4 26B-A4B IT QAT 4-bit")
+        #expect(fourBit.repoID == "mlx-community/gemma-4-26B-A4B-it-qat-4bit")
+        #expect(fourBit.revision == "0e3cbab38ce568cf6e23543010d08d03b731910c")
         #expect(fourBit.sourceIndexSHA256
-            == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-        #expect(fourBit.approximateDownloadBytes == 14_620_479_420)
-        #expect(fourBit.installedBytes == 14_291_921_884)
+            == "5455e83705bbdd4e3702c7d4f9d49d4900e84533036628f74500538075dd5c80")
+        #expect(fourBit.approximateDownloadBytes == 14_985_582_430)
+        #expect(fourBit.installedBytes == 14_559_600_000)
         #expect(fourBit.reserveBytes == 1_073_741_824)
         #expect(AppModelInstallDescriptor.descriptor(for: .int8) != fourBit)
     }

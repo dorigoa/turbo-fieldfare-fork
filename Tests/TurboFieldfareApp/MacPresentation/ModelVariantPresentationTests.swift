@@ -35,8 +35,8 @@ import TurboFieldfareMacPresentation
             for: .cannotReplay(reason: .differentModel), currentContext: 8_192,
             recordedVariant: .int4))
         #expect(content.title == "This chat can't be continued.")
-        #expect(content.message.contains("recorded with Gemma-4-26B-4bit,"))
-        #expect(content.message.contains("Model Variant to Gemma-4-26B-4bit"))
+        #expect(content.message.contains("recorded with Gemma-4-26B-4bit-QAT,"))
+        #expect(content.message.contains("Model Variant to Gemma-4-26B-4bit-QAT"))
         // Still a re-read, still named as a different conversation.
         #expect(content.offersReread)
         #expect(content.requiredContext == nil)
