@@ -37,12 +37,18 @@ do {
         visionResidencyPolicy: arguments.visionResidency,
         promptCacheMode: arguments.promptCacheMode,
         runtimeConfiguration: runtimeConfiguration)
+    let metrics = ServerMetrics(
+        modelLabels: ServerMetrics.modelLabels(arguments: arguments,
+                                               variant: backend.modelVariant,
+                                               visionCapability: backend.visionCapability),
+        maxContextTokens: arguments.maxContext)
     let server = TurboFieldfareHTTPServer(
         modelID: arguments.modelID,
         queueLimit: arguments.queueLimit,
         backend: backend,
         visionCapability: backend.visionCapability,
-        family: backend.family)
+        family: backend.family,
+        metrics: metrics)
     if let warning = arguments.exposureWarning {
         FileHandle.standardError.write(Data("\(warning)\n".utf8))
     }

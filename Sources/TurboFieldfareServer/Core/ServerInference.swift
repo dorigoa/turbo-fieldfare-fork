@@ -298,7 +298,8 @@ public actor ServerCoordinator {
         let continuation: CheckedContinuation<Void, Error>
     }
 
-    private let queueLimit: Int
+    /// Read without hopping onto the actor by `/metrics`.
+    let queueLimit: Int
     private var admittedCount = 0
     private var active = false
     private var waiters: [Waiter] = []

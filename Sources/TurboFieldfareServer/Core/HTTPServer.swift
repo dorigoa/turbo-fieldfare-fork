@@ -27,6 +27,7 @@ public actor TurboFieldfareHTTPServer {
     private let visionCapability: String
     private let attachmentRoot: URL
     private let idleTimeout: TimeAmount
+    private let metrics: ServerMetrics
     private let childChannels = ChildChannelRegistry()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
@@ -39,6 +40,7 @@ public actor TurboFieldfareHTTPServer {
                 family: ModelFamily = .gemma4,
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
+                metrics: ServerMetrics = ServerMetrics(),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
@@ -49,6 +51,7 @@ public actor TurboFieldfareHTTPServer {
         self.visionCapability = visionCapability
         self.attachmentRoot = attachmentRoot
         self.idleTimeout = idleTimeout
+        self.metrics = metrics
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
@@ -65,6 +68,7 @@ public actor TurboFieldfareHTTPServer {
         let visionCapability = self.visionCapability
         let attachmentRoot = self.attachmentRoot
         let idleTimeout = self.idleTimeout
+        let metrics = self.metrics
         let bootstrap = ServerBootstrap(group: group)
             // The listen queue is sized to the connection cap so a burst of
             // connects up to the cap waits for the accept loop instead of
@@ -90,11 +94,13 @@ public actor TurboFieldfareHTTPServer {
                         heartbeatInterval: heartbeatInterval,
                         visionCapability: visionCapability,
                         attachmentRoot: attachmentRoot,
+                        metrics: metrics,
                         childChannels: childChannels))
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         let channel = try await bootstrap.bind(host: host, port: port).get()
+        metrics.markStarted()
         self.channel = channel
         return channel
     }
@@ -162,6 +168,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let childChannels: ChildChannelRegistry
     private let visionCapability: String
     private let attachmentRoot: URL
+    private let metrics: ServerMetrics
     private var bodyParser: StreamingChatRequestBody?
     private var bodyError: (any Error)?
     private var receivedBodyBytes = 0
@@ -182,6 +189,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          heartbeatInterval: TimeAmount,
          visionCapability: String,
          attachmentRoot: URL,
+         metrics: ServerMetrics,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
         self.family = family
@@ -190,6 +198,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.heartbeatInterval = heartbeatInterval
         self.visionCapability = visionCapability
         self.attachmentRoot = attachmentRoot
+        self.metrics = metrics
         self.childChannels = childChannels
     }
 
@@ -237,6 +246,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         param: nil, code: "request_too_large")
                 bodyError = nil
                 bodyParser = nil
+                if let head, Self.carriesChatBody(head) {
+                    metrics.recordFailure(status: capError.httpStatus.code)
+                }
                 head = nil
                 discardingUntilClose = true
                 writeError(context, status: capError.httpStatus, capError.envelope,
@@ -261,10 +273,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             bodyParser = nil
             if let bodyError {
                 self.bodyError = nil
+                // Only a chat body is parsed, so only a chat request gets here
+                // with a body error.
                 if let requestError = bodyError as? ServerRequestError {
+                    metrics.recordFailure(status: requestError.httpStatus.code)
                     writeError(context, status: requestError.httpStatus,
                                requestError.envelope)
                 } else {
+                    metrics.recordFailure(status: HTTPResponseStatus.badRequest.code)
                     writeError(context, status: .badRequest,
                                OpenAIErrorEnvelope(message: "malformed JSON request",
                                                    code: "invalid_json"))
@@ -326,6 +342,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                              capabilities: visionCapability == "ready"
                                 ? ["text", "image"] : ["text"])])
             writeCodable(context, status: .ok, response)
+        case (.GET, "/metrics"):
+            writeMetrics(context)
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -335,7 +353,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 return
             }
             handleCompletion(body: body, context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"):
+        case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/v1/chat/completions"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
                                            code: "method_not_allowed"))
@@ -365,6 +383,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let contextBox = SendableContext(context)
             let streamState = StreamState()
             let phaseState = RequestPhaseState()
+            let firstOutput = FirstOutputClock()
             let startStream: @Sendable () -> Void = {
                 guard request.stream,
                       streamState.start(eventLoop: contextBox.value.eventLoop,
@@ -415,6 +434,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             phaseState.set("generating")
                             ServerLog.generating(id: responseID)
                             return try await self.backend.generate(prepared) { event in
+                                firstOutput.mark()
                                 guard request.stream else { return }
                                 switch event {
                                 case .content(let text):
@@ -432,9 +452,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                 }
                             }
                     })
+                    let duration = started.duration(to: .now)
                     ServerLog.completed(id: responseID,
-                                        duration: started.duration(to: .now),
+                                        duration: duration,
                                         completion: completion)
+                    self.metrics.recordCompletion(
+                        completion,
+                        duration: duration,
+                        timeToFirstOutput: firstOutput.value.map { started.duration(to: $0) })
                     if request.stream {
                         streamState.stop()
                         self.finishStream(contextBox.value,
@@ -459,13 +484,33 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 }
             }
         } catch let error as ServerRequestError {
+            metrics.recordFailure(status: error.httpStatus.code)
             writeError(context,
                        status: error.httpStatus,
                        error.envelope)
         } catch {
+            metrics.recordFailure(status: HTTPResponseStatus.badRequest.code)
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
+        }
+    }
+
+    /// Queue state is read from the coordinator, off the event loop; it never
+    /// waits on generation, which runs outside the coordinator's actor.
+    private func writeMetrics(_ context: ChannelHandlerContext) {
+        let contextBox = SendableContext(context)
+        let coordinator = self.coordinator
+        let metrics = self.metrics
+        Task {
+            let running = await coordinator.isActive
+            let waiting = await coordinator.queuedCount
+            let text = metrics.render(queueLimit: coordinator.queueLimit,
+                                      running: running,
+                                      waiting: waiting,
+                                      memory: .current())
+            self.writeData(contextBox.value, status: .ok, data: Data(text.utf8),
+                           contentType: ServerMetrics.contentType)
         }
     }
 
@@ -640,6 +685,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 type: "server_error")
         }
         if primary is CancellationError {
+            metrics.recordCancellation()
             if error is RequestCompletionFailure {
                 // Cancellation classification must not erase cleanup failure.
                 ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
@@ -650,6 +696,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             ServerLog.cancelled(id: id, phase: phase,
                                 duration: started.duration(to: .now))
         } else {
+            metrics.recordFailure(status: status.code)
             ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
         }
         if stream {
@@ -702,11 +749,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeData(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
                            data: Data,
+                           contentType: String = "application/json",
                            closeAfter: Bool = false) {
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             var headers = HTTPHeaders()
-            headers.add(name: "content-type", value: "application/json")
+            headers.add(name: "content-type", value: contentType)
             headers.add(name: "content-length", value: "\(data.count)")
             if closeAfter {
                 headers.add(name: "connection", value: "close")

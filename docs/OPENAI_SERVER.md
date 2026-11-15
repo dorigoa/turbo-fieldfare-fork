@@ -89,6 +89,63 @@ opens the port, and the ready line names the address it bound, for example
 `ready at http://0.0.0.0:8080`. Clients on other machines use this Mac's
 address in the base URL, such as `http://192.168.1.20:8080/v1`.
 
+## Metrics
+
+`GET /metrics` reports the server's state in the Prometheus text format, so
+Prometheus, Grafana Agent, or any compatible scraper can read it, and a quick
+look needs only `curl`:
+
+```bash
+curl --silent --show-error http://127.0.0.1:8080/metrics
+```
+
+Every figure comes from what the server already measures for each request: the
+token counts and the prefill and generation times are the ones the `completed`
+log line prints. Counters start at zero when the server opens its port and
+cover chat completion requests only.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `turbofieldfare_model_info` | gauge | Always 1. Labels name the API model ID, variant, family, manifest model ID, image support, prompt-cache mode and, for Gemma, the expert-cache slots and early expert read. |
+| `turbofieldfare_context_max_tokens` | gauge | The `--max-context` the server started with. |
+| `turbofieldfare_last_context_tokens` | gauge | Context the last completed request filled: prompt plus generated tokens. |
+| `turbofieldfare_last_prefill_tokens_per_second` | gauge | Prefill speed of the last request that prefilled any token; cached tokens are not counted as prefilled. |
+| `turbofieldfare_last_decode_tokens_per_second` | gauge | Generation speed of the last request that generated any token. |
+| `turbofieldfare_requests_running`, `turbofieldfare_requests_waiting` | gauge | The request generating now (0 or 1) and the prepared requests queued behind it. |
+| `turbofieldfare_queue_limit` | gauge | The `--queue-limit`. |
+| `turbofieldfare_requests_total{result}` | counter | Requests that `completed`, were `cancelled` by the client, or `failed`. |
+| `turbofieldfare_request_failures_total{status}` | counter | Failed requests by HTTP status, for example `429` when the queue is full. |
+| `turbofieldfare_completions_total{finish_reason}` | counter | Completed requests by `stop`, `length` or `tool_calls`. |
+| `turbofieldfare_prompt_tokens_total` | counter | Prompt tokens, prompt-cache hits included. |
+| `turbofieldfare_prompt_cached_tokens_total` | counter | Prompt tokens reused from the prompt cache. |
+| `turbofieldfare_prefill_tokens_total` | counter | Prompt tokens actually prefilled: prompt minus cached. |
+| `turbofieldfare_generation_tokens_total` | counter | Generated tokens. |
+| `turbofieldfare_prefill_seconds_total`, `turbofieldfare_decode_seconds_total` | counter | Time spent prefilling and generating. |
+| `turbofieldfare_time_to_first_output_seconds` | histogram | From accepting a request to its first content or tool call, queueing and prefill included. |
+| `turbofieldfare_request_duration_seconds` | histogram | From accepting a request to its completion. |
+| `turbofieldfare_memory_footprint_bytes` | gauge | Memory charged to the process: runtime buffers and KV cache, without the mapped weights. |
+| `turbofieldfare_memory_mapped_resident_bytes` | gauge | Mapped weights currently resident in RAM, which the kernel can drop under pressure. |
+| `process_resident_memory_bytes` | gauge | Resident memory as the kernel reports it. |
+| `turbofieldfare_start_time_seconds` | gauge | Unix time the server opened its port. |
+
+The `last_*` gauges are absent until a request has done that work, rather than
+reporting a speed nobody measured. `turbofieldfare_memory_footprint_bytes` is
+the same measure as the memory figure in the Mac app's HUD; it leaves out the
+mapped weights, which `turbofieldfare_memory_mapped_resident_bytes` counts, and
+the two together are what the process occupies in RAM. Speeds and context fill
+over a window come from the counters, for example in PromQL:
+
+```text
+rate(turbofieldfare_generation_tokens_total[5m]) / rate(turbofieldfare_decode_seconds_total[5m])
+rate(turbofieldfare_prefill_tokens_total[5m]) / rate(turbofieldfare_prefill_seconds_total[5m])
+turbofieldfare_last_context_tokens / turbofieldfare_context_max_tokens
+```
+
+A scrape reads counters the server already keeps and two kernel calls, and it
+never waits for a generation to finish. Like every other endpoint it has no
+authentication: with [`--host`](#listen-on-another-address) it is visible to
+whoever can reach the server.
+
 ## Runtime settings
 
 The server accepts the same runtime flags as the CLI, with the same values and

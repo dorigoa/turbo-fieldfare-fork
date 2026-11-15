@@ -494,6 +494,9 @@ authorize and run every tool call. `--host` listens on another address, such as
 `0.0.0.0` to reach the server from other machines; it has no authentication or
 TLS, so do this only on a network you trust. See
 [Listen on another address](docs/OPENAI_SERVER.md#listen-on-another-address).
+`GET /metrics` reports context fill, prefill and generation speed, queue state,
+and memory in the Prometheus text format; see
+[Metrics](docs/OPENAI_SERVER.md#metrics).
 
 Requests name the 4-bit model as `gemma-4-26b-a4b-it`. An 8-bit model answers
 to its manifest's model ID, `mlx-community/gemma-4-26b-a4b-it-8bit`;

@@ -331,6 +331,58 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// `/metrics` answers in the Prometheus text format and counts what the
+    /// requests before it did: a completed one, and one refused for naming
+    /// another model.
+    @Test func metricsEndpointCountsServedRequests() async throws {
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend(),
+            metrics: ServerMetrics(modelLabels: ["model": "test-model"],
+                                   maxContextTokens: 4_096))
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        for model in ["test-model", "other-model"] {
+            var request = URLRequest(
+                url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = Data(#"""
+            {"model":"\#(model)","messages":[{"role":"user","content":"hi"}]}
+            """#.utf8)
+            _ = try await URLSession.shared.data(for: request)
+        }
+
+        let (data, response) = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/metrics")!)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 200)
+        #expect(http.value(forHTTPHeaderField: "content-type") == ServerMetrics.contentType)
+        let lines = Set(String(decoding: data, as: UTF8.self)
+            .split(separator: "\n").map(String.init))
+        #expect(lines.contains(#"turbofieldfare_model_info{model="test-model"} 1"#))
+        #expect(lines.contains("turbofieldfare_context_max_tokens 4096"))
+        #expect(lines.contains("turbofieldfare_queue_limit 1"))
+        #expect(lines.contains("turbofieldfare_requests_running 0"))
+        #expect(lines.contains(#"turbofieldfare_requests_total{result="completed"} 1"#))
+        #expect(lines.contains(#"turbofieldfare_requests_total{result="failed"} 1"#))
+        #expect(lines.contains(#"turbofieldfare_request_failures_total{status="404"} 1"#))
+        #expect(lines.contains("turbofieldfare_prompt_tokens_total 3"))
+        #expect(lines.contains("turbofieldfare_generation_tokens_total 1"))
+        #expect(lines.contains("turbofieldfare_time_to_first_output_seconds_count 1"))
+        #expect(lines.contains { $0.hasPrefix("turbofieldfare_start_time_seconds ") })
+        #expect(lines.contains { $0.hasPrefix("turbofieldfare_memory_footprint_bytes ") })
+
+        var post = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/metrics")!)
+        post.httpMethod = "POST"
+        let (_, postResponse) = try await URLSession.shared.data(for: post)
+        #expect((postResponse as? HTTPURLResponse)?.statusCode == 405)
+
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",
