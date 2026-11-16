@@ -87,7 +87,7 @@ final class RequestProgressLog: Sendable {
                     line += "context=\(promptTotal + state.decoded)"
                         + (maxContextTokens.map { "/\($0)" } ?? "") + " "
                 }
-                return line + "tg_tok_s=\(Self.rate(rate)) window=\(Self.window(window))"
+                return line + "tok/s=\(Self.rate(rate)) window=\(Self.window(window))"
             }
         }
     }

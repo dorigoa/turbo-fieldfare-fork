@@ -76,7 +76,7 @@ public enum ServerLog {
             + "pp=\(formatSeconds(completion.prefillSeconds)) "
             + "pp_tok_s=\(formatRate(prefillTokensPerSecond)) "
             + "tg=\(formatSeconds(completion.decodeSeconds)) "
-            + "tg_tok_s=\(formatRate(decodeTokensPerSecond)) "
+            + "tok/s=\(formatRate(decodeTokensPerSecond)) "
             + "finish=\(completion.finishReason)"
     }
 
