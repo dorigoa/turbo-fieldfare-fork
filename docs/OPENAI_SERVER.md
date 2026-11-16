@@ -379,6 +379,15 @@ How the translation reads a request:
   ignored.
 - `tool_use` blocks become tool calls and `tool_result` blocks become tool
   messages. Tool call IDs are the server's own, which Claude Code sends back.
+- `role: "system"` turns inside the conversation, which Claude Code 2.1
+  sends, are accepted. The chat templates take a system message only at the
+  start, so a turn's text becomes a `<system-reminder>` in the user turn where
+  it sits (or joins the system prompt when it comes first), its
+  `tool_addition` and `tool_removal` blocks change the tool list, and its
+  `output_config` and `clear_at` are ignored; an empty turn, such as the
+  per-turn effort statement, is dropped. Tools marked `defer_loading` are
+  offered only once a `tool_addition` or a `tool_reference` in a tool result
+  loads them.
 - `tool_choice` `any` or a named tool runs as `auto`: the server cannot force
   a call, so the model sees every tool and decides.
 - For Qwen3.6, `thinking` `{"type":"disabled"}` turns reasoning off, and a

@@ -85,30 +85,44 @@ enum AnthropicMessages {
             chat["stream"] = stream
         }
 
-        var messages: [JSONValue] = []
+        var systemPrompt = ""
         if let system = request["system"], system != .null {
-            let text = try systemText(system)
-            if !text.isEmpty {
-                messages.append(.object(["role": .string("system"), "content": .string(text)]))
-            }
+            systemPrompt = try systemText(system)
         }
         guard case .array(let input)? = request["messages"] else {
             throw invalid(#""messages" must be an array"#, "messages")
         }
+        var tools = try ToolSet(request["tools"])
+        var conversation: [JSONValue] = []
         for (index, message) in input.enumerated() {
-            messages += try translateMessage(message, path: "messages[\(index)]")
+            let path = "messages[\(index)]"
+            if case .string("system")? = message.objectValue?["role"] {
+                let text = try systemTurn(message, path: path, tools: &tools)
+                guard !text.isEmpty else { continue }
+                if conversation.isEmpty {
+                    // Ahead of the conversation it is simply more system prompt.
+                    systemPrompt += (systemPrompt.isEmpty ? "" : "\n\n") + text
+                } else {
+                    conversation.append(.object([
+                        "role": .string("user"),
+                        "content": .string("<system-reminder>\n\(text)\n</system-reminder>"),
+                    ]))
+                }
+                continue
+            }
+            tools.loadReferences(in: message)
+            conversation += try translateMessage(message, path: path)
         }
+        var messages: [JSONValue] = systemPrompt.isEmpty ? [] : [
+            .object(["role": .string("system"), "content": .string(systemPrompt)]),
+        ]
+        messages += mergingAdjacentUserText(conversation)
         chat["messages"] = .array(messages)
 
-        if let tools = request["tools"], tools != .null {
-            guard case .array(let list) = tools else {
-                throw invalid(#""tools" must be an array"#, "tools")
-            }
-            let translated = try list.enumerated().map { index, tool in
-                try translateTool(tool, path: "tools[\(index)]")
-            }
-            if !translated.isEmpty { chat["tools"] = .array(translated) }
+        let translatedTools = try tools.active.map { entry in
+            try translateTool(entry.tool, path: entry.path)
         }
+        if !translatedTools.isEmpty { chat["tools"] = .array(translatedTools) }
         if let choice = request["tool_choice"], choice != .null {
             // `any` and a named tool would force a call, which this server
             // cannot do; they run as `auto`, where the model still sees every
@@ -172,7 +186,12 @@ enum AnthropicMessages {
             throw invalid("\(path) must be an object", path)
         }
         guard case .string(let role)? = fields["role"], role == "user" || role == "assistant" else {
-            throw invalid("\"\(path).role\" must be user or assistant", "\(path).role")
+            let seen: String = {
+                if case .string(let value)? = fields["role"] { return "\"\(value.prefix(32))\"" }
+                return "missing"
+            }()
+            throw invalid("\"\(path).role\" is \(seen); it must be user, assistant, or system",
+                          "\(path).role")
         }
         let blocks: [JSONValue]
         switch fields["content"] {
@@ -254,6 +273,138 @@ enum AnthropicMessages {
         return out
     }
 
+    /// A `role: "system"` turn, which Claude Code sends inside the
+    /// conversation: an instruction that holds until the next user message,
+    /// a per-turn statement such as the effort level, or tools added and
+    /// removed. The chat templates take a system message only at the start,
+    /// so the turn's text is returned for the caller to place, its tool
+    /// changes go to `tools`, and its control fields (`output_config`,
+    /// `clear_at`) have no counterpart here and are ignored.
+    private static func systemTurn(_ message: JSONValue,
+                                   path: String,
+                                   tools: inout ToolSet) throws -> String {
+        let blocks: [JSONValue]
+        switch message.objectValue?["content"] {
+        case nil, .null?:
+            return ""
+        case .string(let text)?:
+            return text
+        case .array(let list)?:
+            blocks = list
+        default:
+            throw invalid("\"\(path).content\" must be a string or an array of blocks",
+                          "\(path).content")
+        }
+        var texts: [String] = []
+        for (index, block) in blocks.enumerated() {
+            let blockPath = "\(path).content[\(index)]"
+            let item = block.objectValue ?? [:]
+            switch item["type"] {
+            case .string("text")?:
+                if case .string(let text)? = item["text"], !text.isEmpty { texts.append(text) }
+            case .string("tool_addition")?:
+                try tools.add(item["tool"], path: "\(blockPath).tool")
+            case .string("tool_removal")?:
+                tools.remove(item["tool"])
+            default:
+                throw invalid("system content block type is not supported", "\(blockPath).type")
+            }
+        }
+        return texts.joined(separator: "\n\n")
+    }
+
+    /// Consecutive user messages with plain text become one, so a system
+    /// turn turned reminder never leaves two user turns in a row.
+    private static func mergingAdjacentUserText(_ messages: [JSONValue]) -> [JSONValue] {
+        var result: [JSONValue] = []
+        for message in messages {
+            if case .object(let current) = message,
+               current["role"] == .string("user"),
+               case .string(let text)? = current["content"],
+               case .object(var previous)? = result.last,
+               previous["role"] == .string("user"),
+               case .string(let earlier)? = previous["content"] {
+                previous["content"] = .string(earlier.isEmpty ? text : "\(earlier)\n\n\(text)")
+                result[result.count - 1] = .object(previous)
+            } else {
+                result.append(message)
+            }
+        }
+        return result
+    }
+
+    /// The tools a request makes available: the top-level `tools`, minus
+    /// those marked `defer_loading` until something loads them, plus and
+    /// minus what system turns add and remove. One list for the whole
+    /// conversation, since the templates render tools once, up front.
+    struct ToolSet {
+        private var order: [String] = []
+        private var tools: [String: (tool: JSONValue, path: String)] = [:]
+        private var enabled: Set<String> = []
+
+        init(_ list: JSONValue?) throws {
+            switch list {
+            case nil, .null?:
+                return
+            case .array(let entries)?:
+                for (index, entry) in entries.enumerated() {
+                    guard case .string(let name)? = entry.objectValue?["name"] else {
+                        throw invalid("tools[\(index)].name must be a string", "tools[\(index)].name")
+                    }
+                    insert(name, entry, path: "tools[\(index)]")
+                    if entry.objectValue?["defer_loading"] != .bool(true) { enabled.insert(name) }
+                }
+            default:
+                throw invalid(#""tools" must be an array"#, "tools")
+            }
+        }
+
+        var active: [(tool: JSONValue, path: String)] {
+            order.filter(enabled.contains).compactMap { tools[$0] }
+        }
+
+        mutating func add(_ tool: JSONValue?, path: String) throws {
+            let fields = tool?.objectValue ?? [:]
+            switch fields["type"] {
+            case .string("tool_definition")?:
+                guard case .object(let definition)? = fields["definition"],
+                      case .string(let name)? = definition["name"] else {
+                    throw invalid("\(path).definition needs a name", "\(path).definition")
+                }
+                insert(name, .object(definition), path: "\(path).definition")
+                enabled.insert(name)
+            case .string("tool_reference")?:
+                if case .string(let name)? = fields["name"], tools[name] != nil {
+                    enabled.insert(name)
+                }
+            default:
+                throw invalid("\(path).type must be tool_definition or tool_reference", path)
+            }
+        }
+
+        mutating func remove(_ tool: JSONValue?) {
+            if case .string(let name)? = tool?.objectValue?["name"] { enabled.remove(name) }
+        }
+
+        /// Deferred tools a tool result loaded with a `tool_reference` block.
+        mutating func loadReferences(in message: JSONValue) {
+            guard case .array(let blocks)? = message.objectValue?["content"] else { return }
+            for block in blocks where block.objectValue?["type"] == .string("tool_result") {
+                guard case .array(let inner)? = block.objectValue?["content"] else { continue }
+                for item in inner where item.objectValue?["type"] == .string("tool_reference") {
+                    if case .string(let name)? = item.objectValue?["tool_name"], tools[name] != nil {
+                        enabled.insert(name)
+                    }
+                }
+            }
+        }
+
+        private mutating func insert(_ name: String, _ tool: JSONValue, path: String) {
+            if tools[name] == nil { order.append(name) }
+            tools[name] = (tool, path)
+        }
+    }
+
     /// An image block as a data-URL `image_url` part. Whether images can be
     /// read at all is the validator's call: without an image pack it refuses
     /// the request rather than answering as though no image had been sent.
@@ -302,6 +453,12 @@ enum AnthropicMessages {
                     return toolResultImagePlaceholder
                 case .string("document")?:
                     return documentPlaceholder
+                case .string("tool_reference")?:
+                    // The tool itself joins the tool list (`ToolSet`).
+                    let name = block.objectValue?["tool_name"].flatMap {
+                        if case .string(let name) = $0 { return name } else { return nil }
+                    } ?? "a tool"
+                    return "[\(name) is now available]"
                 default:
                     throw invalid("\(path).content[\(index)] has an unsupported block type", path)
                 }

@@ -142,7 +142,7 @@ struct AnthropicMessagesTests {
     }
 
     @Test(arguments: [
-        (#"{"max_tokens":1,"messages":[{"role":"system","content":"x"}]}"#, "messages[0].role"),
+        (#"{"max_tokens":1,"messages":[{"role":"developer","content":"x"}]}"#, "messages[0].role"),
         (#"{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"search_result"}]}]}"#,
          "messages[0].content[0].type"),
         (#"{"max_tokens":0,"messages":[]}"#, "max_tokens"),
