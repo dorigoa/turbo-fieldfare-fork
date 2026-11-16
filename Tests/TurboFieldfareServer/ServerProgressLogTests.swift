@@ -34,12 +34,12 @@ struct ServerProgressLogTests {
         // Decode started at 3.5 s: the prefill before it is not decode time.
         #expect(log.tick(at: at(5.5))
             == "request chatcmpl-1 decode generated=41 context=1041/4096 "
-            + "tg_tok_s=20.0 window=2.00s")
+            + "tok/s=20.0 window=2.00s")
 
         log.record(.decoded(count: 161), at: at(8))
         #expect(log.tick(at: at(8.5))
             == "request chatcmpl-1 decode generated=161 context=1161/4096 "
-            + "tg_tok_s=40.0 window=3.00s")
+            + "tok/s=40.0 window=3.00s")
     }
 
     /// A stall is a slow interval, not something averaged away.
@@ -49,9 +49,9 @@ struct ServerProgressLogTests {
         log.record(.decoded(count: 1), at: at(0.5))
         log.record(.decoded(count: 31), at: at(3))
         #expect(log.tick(at: at(3)) == "request r decode generated=31 context=41 "
-            + "tg_tok_s=12.0 window=2.50s")
+            + "tok/s=12.0 window=2.50s")
         #expect(log.tick(at: at(6)) == "request r decode generated=31 context=41 "
-            + "tg_tok_s=0.0 window=3.00s")
+            + "tok/s=0.0 window=3.00s")
     }
 
     /// A reply served from a fully cached prompt may report no prefill: the
@@ -60,7 +60,7 @@ struct ServerProgressLogTests {
         let log = RequestProgressLog(id: "r", maxContextTokens: 4_096)
         log.record(.decoded(count: 1), at: at(0))
         log.record(.decoded(count: 7), at: at(1))
-        #expect(log.tick(at: at(3)) == "request r decode generated=7 tg_tok_s=2.0 window=3.00s")
+        #expect(log.tick(at: at(3)) == "request r decode generated=7 tok/s=2.0 window=3.00s")
     }
 
     @Test func intervalFlagDefaultsToThreeSeconds() throws {

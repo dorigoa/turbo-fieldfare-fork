@@ -52,7 +52,7 @@ import Testing
         #expect(line.contains("pp=675.595s"))
         #expect(line.contains("pp_tok_s=177.640"))
         #expect(line.contains("tg=0.250s"))
-        #expect(line.contains("tg_tok_s=4.000"))
+        #expect(line.contains("tok/s=4.000"))
         #expect(line.contains("finish=stop"))
     }
 
@@ -74,7 +74,7 @@ import Testing
         #expect(line.contains("cached=75000"))
         // 25,000 computed tokens over 2.5s, not 100,000 over 2.5s.
         #expect(line.contains("pp_tok_s=10000.000"))
-        #expect(line.contains("tg_tok_s=8.000"))
+        #expect(line.contains("tok/s=8.000"))
     }
 
     /// A fully cached prompt does no prefill work at all, and a request that
@@ -93,7 +93,7 @@ import Testing
         #expect(line.contains("pp=0.000s"))
         #expect(line.contains("pp_tok_s=0.000"))
         #expect(line.contains("tg=0.000s"))
-        #expect(line.contains("tg_tok_s=0.000"))
+        #expect(line.contains("tok/s=0.000"))
         #expect(!line.contains("nan"))
         #expect(!line.contains("inf"))
     }
@@ -115,7 +115,7 @@ import Testing
         // The request id legitimately contains a hyphen, so assert on the rate
         // fields rather than scanning the whole line for a minus sign.
         #expect(!line.contains("pp_tok_s=-"))
-        #expect(!line.contains("tg_tok_s=-"))
+        #expect(!line.contains("tok/s=-"))
     }
 
     @Test func aCancelledRequestReadsAsCancelledRatherThanFailed() {

@@ -29,6 +29,7 @@ public actor TurboFieldfareHTTPServer {
     private let idleTimeout: TimeAmount
     private let metrics: ServerMetrics
     private let progressLogInterval: TimeAmount?
+    private let acceptAnyModel: Bool
     private let childChannels = ChildChannelRegistry()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
@@ -43,6 +44,7 @@ public actor TurboFieldfareHTTPServer {
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
                 metrics: ServerMetrics = ServerMetrics(),
                 progressLogInterval: TimeAmount? = nil,
+                acceptAnyModel: Bool = false,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
@@ -55,6 +57,7 @@ public actor TurboFieldfareHTTPServer {
         self.idleTimeout = idleTimeout
         self.metrics = metrics
         self.progressLogInterval = progressLogInterval
+        self.acceptAnyModel = acceptAnyModel
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
@@ -73,6 +76,7 @@ public actor TurboFieldfareHTTPServer {
         let idleTimeout = self.idleTimeout
         let metrics = self.metrics
         let progressLogInterval = self.progressLogInterval
+        let acceptAnyModel = self.acceptAnyModel
         let bootstrap = ServerBootstrap(group: group)
             // The listen queue is sized to the connection cap so a burst of
             // connects up to the cap waits for the accept loop instead of
@@ -100,6 +104,7 @@ public actor TurboFieldfareHTTPServer {
                         attachmentRoot: attachmentRoot,
                         metrics: metrics,
                         progressLogInterval: progressLogInterval,
+                        acceptAnyModel: acceptAnyModel,
                         childChannels: childChannels))
                 }
             }
@@ -175,6 +180,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let attachmentRoot: URL
     private let metrics: ServerMetrics
     private let progressLogInterval: TimeAmount?
+    private let acceptAnyModel: Bool
     private var bodyParser: StreamingChatRequestBody?
     private var bodyError: (any Error)?
     private var receivedBodyBytes = 0
@@ -197,6 +203,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          attachmentRoot: URL,
          metrics: ServerMetrics,
          progressLogInterval: TimeAmount?,
+         acceptAnyModel: Bool,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
         self.family = family
@@ -207,6 +214,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.attachmentRoot = attachmentRoot
         self.metrics = metrics
         self.progressLogInterval = progressLogInterval
+        self.acceptAnyModel = acceptAnyModel
         self.childChannels = childChannels
     }
 
@@ -405,11 +413,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                   body: ParsedChatRequestBody,
                                   context: ChannelHandlerContext) {
         do {
-            let decoded = try OpenAIChatRequest.decodeRequest(from: body.json, family: family)
+            let decoded = try OpenAIChatRequest.decodeRequest(
+                from: body.json, family: family, acceptAnyModel: acceptAnyModel)
             let request = try OpenAIRequestValidator.validate(
                 decoded,
                 modelID: modelID,
                 family: family,
+                acceptAnyModel: acceptAnyModel,
                 preStagedImages: body.stagedImages,
                 attachmentLease: body.lease)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")

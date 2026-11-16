@@ -12,7 +12,9 @@ extension OpenAIChatRequest {
     /// that branches on it is unaffected; the message and `param` now name the
     /// field by its JSON path and say what it should be. They never quote a
     /// value from the request, so they are safe to log.
-    static func decodeRequest(from body: Data, family: ModelFamily) throws -> OpenAIChatRequest {
+    static func decodeRequest(from body: Data,
+                              family: ModelFamily,
+                              acceptAnyModel: Bool = false) throws -> OpenAIChatRequest {
         guard body.contains(where: { !Self.isJSONWhitespace($0) }) else {
             throw ServerRequestError.invalid(message: "request body is empty",
                                              param: nil, code: "invalid_json")
@@ -21,6 +23,7 @@ extension OpenAIChatRequest {
         // The key sweep in the request decoder asks the family whether
         // `chat_template_kwargs` is a field at all (D11).
         decoder.userInfo[modelFamilyUserInfoKey] = family
+        decoder.userInfo[acceptAnyModelUserInfoKey] = acceptAnyModel
         do {
             return try decoder.decode(OpenAIChatRequest.self, from: body)
         } catch let error as DecodingError {

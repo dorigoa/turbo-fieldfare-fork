@@ -60,7 +60,8 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
 
 Requests must name the server's API model ID, which `GET /v1/models` lists.
 See [Model ID](#model-id) for the 8-bit value. `model` is required: a request
-without it gets HTTP 400 with `missing required field "model"`. A body that
+without it gets HTTP 400 with `missing required field "model"`, unless the
+server runs with [`--accept-any-model`](#model-id). A body that
 does not decode is answered with code `invalid_json`, a message naming the
 field and what it must be, and the field's path in `param`, for example
 `"seed" must be a non-negative integer` or `request body is not valid JSON
@@ -201,6 +202,14 @@ repository, so a client still set up for the 4-bit name is refused instead of
 being served a different variant without notice. `--model-id <id>` replaces
 the ID for either variant. `GET /v1/models` lists the ID in use, and responses
 echo it in their `model` field.
+
+`--accept-any-model` turns the check off, as llama-server works: requests are
+served whatever `model` they name, `default_model` or a client's own default,
+and may leave it out. A `model` that is present must still be a string.
+Responses still carry the server's API model ID in `model`, so a client can see
+which model answered. Use it for clients that cannot set the model name; it
+gives up the protection above, where a client set up for another model or
+variant is refused rather than served this one.
 
 ## Qwen3.6
 
@@ -456,7 +465,7 @@ Each accepted request logs `accepted`, `prepared`, `queued` when it waits, and
 
 - `completed`, with the prompt, cached, and generated token counts, prefill
   time and speed (`pp=`, `pp_tok_s=`), generation time and speed (`tg=`,
-  `tg_tok_s=`), and `finish=`.
+  `tok/s=`), and `finish=`.
 - `cancelled by client`, with the phase it reached.
 - `failed`, with the phase, HTTP status, and error.
 
@@ -466,7 +475,7 @@ averaged into the final figure:
 
 ```text
 request chatcmpl-… prefill prompt=12800/30000 pp_tok_s=452.3 window=3.00s
-request chatcmpl-… decode generated=345 context=30345/262144 tg_tok_s=41.2 window=3.00s
+request chatcmpl-… decode generated=345 context=30345/262144 tok/s=41.2 window=3.00s
 ```
 
 `prompt=` counts prompt tokens in the KV so far, prompt-cache hits included,

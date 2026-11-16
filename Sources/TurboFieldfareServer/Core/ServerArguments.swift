@@ -22,6 +22,8 @@ public struct ServerArguments: Equatable, Sendable {
     /// Seconds between progress lines while a request runs; 0 turns them off
     /// (`--progress-log-interval`).
     public let progressLogInterval: Int
+    /// Serve requests whatever `model` they name, or none (`--accept-any-model`).
+    public let acceptAnyModel: Bool
     public let visionPack: String?
     public let visionResidency: VisionResidencyPolicy
     /// The variant the model's manifest recorded at parse time; nil when the
@@ -47,6 +49,9 @@ public struct ServerArguments: Equatable, Sendable {
                                  no authentication or TLS, so any other address
                                  lets every machine that reaches it run the model.
       --port <1...65535>         Port (default 8080).
+      --accept-any-model         Serve requests that name another model or none,
+                                 as llama-server does; responses still name the
+                                 model that answered.
       --model-id <id>            API model identifier (default gemma-4-26b-a4b-it
                                  for a 4-bit model; an 8-bit model uses its
                                  manifest's model ID).
@@ -144,10 +149,17 @@ public struct ServerArguments: Equatable, Sendable {
         var earlyExpertRead = RuntimeConfiguration.production.earlyExpertRead
         var logOutput = ServerLogOutput.stdout
         var progressLogInterval = 3
+        var acceptAnyModel = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+            // The one flag that takes no value.
+            if flag == "--accept-any-model" {
+                acceptAnyModel = true
+                index += 1
+                continue
+            }
             guard index + 1 < input.count else {
                 throw ServerArgumentError.invalid("\(flag) requires a value")
             }
@@ -313,6 +325,7 @@ public struct ServerArguments: Equatable, Sendable {
                                earlyExpertRead: earlyExpertRead,
                                logOutput: logOutput,
                                progressLogInterval: progressLogInterval,
+                               acceptAnyModel: acceptAnyModel,
                                visionPack: visionPack,
                                visionResidency: visionResidency,
                                modelVariant: modelVariant)

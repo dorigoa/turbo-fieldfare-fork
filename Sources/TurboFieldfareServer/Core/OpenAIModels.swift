@@ -206,6 +206,8 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     /// the decision whether `chat_template_kwargs` is unknown belongs to the
     /// family, and the sweep runs before any typed field could say so.
     /// Absent means Gemma, the behavior from before Qwen.
+    static let acceptAnyModelUserInfoKey = CodingUserInfoKey(
+        rawValue: "TurboFieldfareServer.acceptAnyModel")!
     static let modelFamilyUserInfoKey = CodingUserInfoKey(
         rawValue: "com.turbofieldfare.server.modelFamily")!
 
@@ -343,7 +345,14 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         }
 
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        model = try container.decode(String.self, forKey: .model)
+        // Under `--accept-any-model` a request may leave `model` out; it is
+        // then empty, which nothing past the validator reads. A `model` that
+        // is present must still be a string.
+        if decoder.userInfo[Self.acceptAnyModelUserInfoKey] as? Bool == true {
+            model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
+        } else {
+            model = try container.decode(String.self, forKey: .model)
+        }
         messages = try container.decode([OpenAIChatMessage].self, forKey: .messages)
         stream = try container.decodeIfPresent(Bool.self, forKey: .stream)
         streamOptions = try container.decodeIfPresent(
@@ -568,21 +577,28 @@ private enum OpenAIToolName {
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
-                                family: ModelFamily = .gemma4) throws -> ValidatedChatRequest {
+                                family: ModelFamily = .gemma4,
+                                acceptAnyModel: Bool = false) throws -> ValidatedChatRequest {
         try validate(
             request,
             modelID: modelID,
             family: family,
+            acceptAnyModel: acceptAnyModel,
             preStagedImages: [:],
             attachmentLease: nil)
     }
 
+    /// `acceptAnyModel` skips the model-name check, as `--accept-any-model`
+    /// asks: the server has one model, and the response still names it.
     static func validate(_ request: OpenAIChatRequest,
                          modelID: String,
                          family: ModelFamily = .gemma4,
+                         acceptAnyModel: Bool = false,
                          preStagedImages: [String: ServerStagedImage],
                          attachmentLease: ServerAttachmentLease?) throws -> ValidatedChatRequest {
-        guard request.model == modelID else { throw ServerRequestError.unknownModel }
+        guard acceptAnyModel || request.model == modelID else {
+            throw ServerRequestError.unknownModel
+        }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
         }
