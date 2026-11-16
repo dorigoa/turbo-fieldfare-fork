@@ -19,14 +19,16 @@ struct ServerProgressLogTests {
         #expect(log.tick(at: at(6)) == nil)
     }
 
-    /// Each line covers the time since the previous one, and the first line
-    /// of a phase starts at that phase's first report.
+    /// A decode line covers the time since the previous one, and the first
+    /// line of a phase starts at that phase's first report. The prefill line
+    /// gives the share done, the average rate over the chunks so far, and the
+    /// time left.
     @Test func eachLineReportsTheIntervalSinceThePreviousOne() {
         let log = RequestProgressLog(id: "chatcmpl-1", maxContextTokens: 4_096)
         log.record(.prefill(done: 256, total: 1_000), at: at(0.5))
         log.record(.prefill(done: 768, total: 1_000), at: at(1.5))
         #expect(log.tick(at: at(2.5))
-            == "request chatcmpl-1 prefill prompt=768/1000 pp_tok_s=256.0 window=2.00s")
+            == "request chatcmpl-1 prefill prompt=768/1000 (76%) pp_tok_s=512.0 eta=0s")
 
         log.record(.prefill(done: 1_000, total: 1_000), at: at(3))
         log.record(.decoded(count: 1), at: at(3.5))
@@ -40,6 +42,40 @@ struct ServerProgressLogTests {
         #expect(log.tick(at: at(8.5))
             == "request chatcmpl-1 decode generated=161 context=1161/4096 "
             + "tok/s=40.0 window=3.00s")
+    }
+
+    /// The case that read as a loop: 256-token chunks landing every 5.4 s
+    /// against a 3 s interval. Only intervals in which a chunk landed print a
+    /// line, and the rate is the chunks' own, not 0.0 then 85.3.
+    @Test func slowChunksPrintOneSteadyLinePerChunk() {
+        let log = RequestProgressLog(id: "msg_1", maxContextTokens: 262_144)
+        var lines: [String] = []
+        var chunk = 0
+        for tick in 1...12 {
+            let now = Double(tick) * 3
+            while Double(chunk + 1) * 5.4 <= now {
+                chunk += 1
+                log.record(.prefill(done: min(chunk * 256, 4_648), total: 4_648),
+                           at: at(Double(chunk) * 5.4))
+            }
+            if let line = log.tick(at: at(now)) { lines.append(line) }
+        }
+        #expect(lines.count == chunk)
+        #expect(lines.first == "request msg_1 prefill prompt=256/4648 (5%)")
+        #expect(lines[1] == "request msg_1 prefill prompt=512/4648 (11%) pp_tok_s=47.4 eta=87s")
+        #expect(lines.allSatisfy { !$0.contains("pp_tok_s=0.0") })
+        #expect(lines.last == "request msg_1 prefill prompt=1536/4648 (33%) pp_tok_s=47.4 eta=66s")
+    }
+
+    /// With no chunk for 30 s the prefill says so, once per 30 s.
+    @Test func aPrefillWithNoNewChunkSaysSo() {
+        let log = RequestProgressLog(id: "r", maxContextTokens: nil)
+        log.record(.prefill(done: 128, total: 1_024), at: at(0))
+        #expect(log.tick(at: at(3)) == "request r prefill prompt=128/1024 (12%)")
+        #expect(log.tick(at: at(6)) == nil)
+        #expect(log.tick(at: at(30)) == "request r prefill prompt=128/1024 (12%) no new chunk for 30s")
+        #expect(log.tick(at: at(33)) == nil)
+        #expect(log.tick(at: at(60)) == "request r prefill prompt=128/1024 (12%) no new chunk for 60s")
     }
 
     /// A stall is a slow interval, not something averaged away.
