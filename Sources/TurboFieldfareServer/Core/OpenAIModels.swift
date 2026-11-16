@@ -783,7 +783,9 @@ public enum OpenAIRequestValidator {
                                     attachmentLeases: validatedMessages.leases)
     }
 
-    private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {
+    /// Internal so the Messages translation can test a reduced schema before
+    /// it commits to one.
+    static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {
         guard tool.type == "function" else {
             throw invalid("only function tools are supported", "tools", "unsupported_tool")
         }

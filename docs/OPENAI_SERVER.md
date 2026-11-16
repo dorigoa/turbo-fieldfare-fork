@@ -1,7 +1,8 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one model,
-Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` by default and has no
+`TurboFieldfareServer` exposes a local Chat Completions API, and Anthropic's
+[Messages API](#anthropic-messages-api-and-claude-code) for Claude Code, for
+one model, Gemma 4 or [Qwen3.6](#qwen36). It binds to `127.0.0.1` by default and has no
 authentication or TLS. Do not expose it through a proxy or tunnel; to reach it
 from another machine on a network you trust, see
 [Listen on another address](#listen-on-another-address).
@@ -350,6 +351,84 @@ does. With it, `pi -p @photo.png "What is in this image?"` sends the image as a
 base64 data URL in an `image_url` part, which is the shape this server accepts;
 its RPC interface takes an explicit `images` array and produces the same
 request.
+
+## Anthropic Messages API and Claude Code
+
+The server also speaks Anthropic's Messages API, which Claude Code and the
+Anthropic SDKs use:
+
+| Endpoint | Answers |
+| --- | --- |
+| `POST /v1/messages` | A message, or with `"stream": true` the Anthropic server-sent events: `message_start`, the content blocks, `message_delta`, `message_stop` |
+| `POST /v1/messages/count_tokens` | `{"input_tokens": N}` for the request as `/v1/messages` would render it, without generating or queueing |
+| `GET /v1/models` | The model list in Anthropic's shape when the request carries an `anthropic-version` header |
+
+A Messages request is translated into a Chat Completions request and runs
+through the same validator, queue, prompt cache, logs, progress lines, and
+`/metrics` as one. Errors come back in Anthropic's shape, for example
+`{"type":"error","error":{"type":"not_found_error",...}}` for a model the
+server does not serve, so Claude Code's message about a missing model means
+the name did not match. The `x-api-key` and `Authorization` headers are
+ignored: the server has no authentication.
+
+How the translation reads a request:
+
+- `system`, text blocks, `max_tokens`, `temperature`, `top_p`, `top_k`,
+  `stop_sequences`, `stream`, `tools`, and `tool_choice` carry over.
+  `cache_control`, `metadata`, and other fields the server has no use for are
+  ignored.
+- `tool_use` blocks become tool calls and `tool_result` blocks become tool
+  messages. Tool call IDs are the server's own, which Claude Code sends back.
+- `tool_choice` `any` or a named tool runs as `auto`: the server cannot force
+  a call, so the model sees every tool and decides.
+- For Qwen3.6, `thinking` `{"type":"disabled"}` turns reasoning off, and a
+  `budget_tokens` of up to 256, 1,024, or 4,096 maps to the `low`, `medium`,
+  or `high` reasoning depth; a larger budget reasons unbounded. Reasoning is
+  not returned as `thinking` blocks. Gemma ignores `thinking`.
+- Tool schemas are reduced to what the chat templates render: `$schema` and
+  references are dropped, untyped nodes get a type, and unions other than
+  string constants or one type plus null collapse to their common type or
+  first branch. A schema that still cannot be rendered becomes an open object
+  with the original schema appended to the tool description, so the model
+  still reads every parameter.
+- Image blocks in user messages follow the [image rules](#images): without a
+  companion pack the request is refused. An image or document inside a tool
+  result, and a document block anywhere, is replaced by a line telling the
+  model it was left out.
+- Server tools such as `web_search` and content blocks the server does not
+  know are refused with an error that names the field.
+
+To run Claude Code against the server, start the server with
+`--accept-any-model`, since Claude Code may name other models for its side
+requests, and point a settings profile at it, for example
+`~/.claude/turbo.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://192.168.1.20:8080",
+    "ANTHROPIC_AUTH_TOKEN": "local",
+    "ANTHROPIC_MODEL": "Qwen3.6-35B",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-35B",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B",
+    "API_TIMEOUT_MS": "1800000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+```bash
+claude --settings ~/.claude/turbo.json
+```
+
+Claude Code's first request prefills its whole system prompt and tool list,
+which can run to tens of thousands of tokens, so expect the first answer to
+take a while; the progress lines show how far the prefill has got. A later
+turn reuses the cached prefix when its history matches what the server
+retained, and the log names the reason when it does not. The server keeps one
+prefix, so Claude Code's side requests, such as title generation, can replace
+it and cost a full prefill on the next turn.
 
 ## Prompt reuse
 

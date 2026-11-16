@@ -166,6 +166,12 @@ public actor TurboFieldfareHTTPServer {
     }
 }
 
+/// Which API a completion request arrived through, and so how it is answered.
+private enum ChatDialect: Sendable {
+    case openAI
+    case anthropic
+}
+
 private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -182,6 +188,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let progressLogInterval: TimeAmount?
     private let acceptAnyModel: Bool
     private var bodyParser: StreamingChatRequestBody?
+    /// A Messages body, read whole (see `carriesAnthropicBody`).
+    private var rawBody: Data?
     private var bodyError: (any Error)?
     private var receivedBodyBytes = 0
     /// Past the wire cap the drain toward `.end` is unbounded - a chunked
@@ -229,8 +237,31 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     static func carriesChatBody(_ head: HTTPRequestHead) -> Bool {
         head.method == .POST
             && requestPath(head) == chatCompletionsPath
-            && head.headers.first(name: "content-type")?
-                .lowercased().hasPrefix("application/json") == true
+            && sendsJSON(head)
+    }
+
+    static func sendsJSON(_ head: HTTPRequestHead) -> Bool {
+        head.headers.first(name: "content-type")?
+            .lowercased().hasPrefix("application/json") == true
+    }
+
+    static func isAnthropicPath(_ head: HTTPRequestHead) -> Bool {
+        let path = requestPath(head)
+        return path == AnthropicMessages.messagesPath || path == AnthropicMessages.countTokensPath
+    }
+
+    /// A Messages body is read whole rather than through the streaming
+    /// parser: its images are base64 blocks, not the data URLs the parser
+    /// stages to disk, and the translation needs the whole request anyway.
+    /// The wire cap bounds it like any other body.
+    static func carriesAnthropicBody(_ head: HTTPRequestHead) -> Bool {
+        head.method == .POST && isAnthropicPath(head) && sendsJSON(head)
+    }
+
+    /// A request that asks for a completion, in either API.
+    static func isCompletionRequest(_ head: HTTPRequestHead) -> Bool {
+        carriesChatBody(head)
+            || (carriesAnthropicBody(head) && requestPath(head) == AnthropicMessages.messagesPath)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -246,6 +277,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                            visionCapability: visionCapability,
                                            family: family)
                 : nil
+            rawBody = Self.carriesAnthropicBody(head) ? Data() : nil
             bodyError = nil
             receivedBodyBytes = 0
         case .body(var part):
@@ -262,13 +294,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         param: nil, code: "request_too_large")
                 bodyError = nil
                 bodyParser = nil
+                rawBody = nil
                 let rejectedHead = head
                 head = nil
                 discardingUntilClose = true
                 if let rejectedHead {
                     reject(context, head: rejectedHead,
                            status: capError.httpStatus, capError.envelope,
-                           isChatRequest: Self.carriesChatBody(rejectedHead),
+                           isChatRequest: Self.isCompletionRequest(rejectedHead),
                            closeAfter: true)
                 } else {
                     writeError(context, status: capError.httpStatus, capError.envelope,
@@ -277,6 +310,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 return
             }
             guard bodyError == nil else { return }
+            if rawBody != nil {
+                rawBody!.append(contentsOf: part.readableBytesView)
+                return
+            }
             guard let parser = bodyParser else { return }
             do { try parser.feed(&part) }
             catch {
@@ -292,6 +329,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // Cleared on every path below: a retained parser pins its staged
             // images until the connection closes.
             bodyParser = nil
+            let raw = rawBody
+            rawBody = nil
             if let bodyError {
                 self.bodyError = nil
                 // Only a chat body is parsed, so only a chat request gets here
@@ -308,17 +347,19 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 return
             }
             do {
-                let parsed = try parser?.finish()
+                let parsed = try raw.map {
+                    ParsedChatRequestBody(json: $0, stagedImages: [:], lease: nil)
+                } ?? parser?.finish()
                     ?? ParsedChatRequestBody(json: Data(), stagedImages: [:], lease: nil)
                 route(head: head, body: parsed, context: context)
             } catch let error as ServerRequestError {
                 reject(context, head: head, status: error.httpStatus, error.envelope,
-                       isChatRequest: Self.carriesChatBody(head))
+                       isChatRequest: Self.isCompletionRequest(head))
             } catch {
                 reject(context, head: head, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"),
-                       isChatRequest: Self.carriesChatBody(head))
+                       isChatRequest: Self.isCompletionRequest(head))
             }
         }
     }
@@ -337,6 +378,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         activeTask = nil
         // Frees the staged images of a request abandoned mid-body.
         bodyParser = nil
+        rawBody = nil
         bodyError = nil
         head = nil
         childChannels.remove(context.channel)
@@ -354,6 +396,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 "status": "ok",
                 "vision": visionCapability,
             ])
+        case (.GET, "/v1/models") where head.headers.contains(name: "anthropic-version"):
+            writeJSON(context, status: .ok, object: AnthropicMessages.modelList(modelID: modelID))
         case (.GET, "/v1/models"):
             let response = OpenAIModelList(
                 object: "list",
@@ -375,8 +419,22 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                        isChatRequest: true)
                 return
             }
-            handleCompletion(head: head, body: body, context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/v1/chat/completions"):
+            handleCompletion(head: head, body: body, context: context, dialect: .openAI)
+        case (.POST, AnthropicMessages.messagesPath), (.POST, AnthropicMessages.countTokensPath):
+            guard Self.sendsJSON(head) else {
+                reject(context, head: head, status: .unsupportedMediaType,
+                       OpenAIErrorEnvelope(message: "content-type must be application/json",
+                                           code: "unsupported_media_type"),
+                       isChatRequest: path == AnthropicMessages.messagesPath)
+                return
+            }
+            if path == AnthropicMessages.messagesPath {
+                handleCompletion(head: head, body: body, context: context, dialect: .anthropic)
+            } else {
+                handleCountTokens(head: head, body: body, context: context)
+            }
+        case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/v1/chat/completions"),
+             (_, AnthropicMessages.messagesPath), (_, AnthropicMessages.countTokensPath):
             reject(context, head: head, status: .methodNotAllowed,
                    OpenAIErrorEnvelope(message: "method not allowed",
                                        code: "method_not_allowed"),
@@ -406,15 +464,28 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                            method: head.method.rawValue,
                            path: String(Self.requestPath(head).prefix(200)),
                            error: envelope.error)
-        writeError(context, status: status, envelope, closeAfter: closeAfter)
+        if Self.isAnthropicPath(head) {
+            writeAnthropicError(context, status: status, message: envelope.error.message,
+                                closeAfter: closeAfter)
+        } else {
+            writeError(context, status: status, envelope, closeAfter: closeAfter)
+        }
     }
 
+    /// One completion request in either API. A Messages request is first
+    /// translated into the chat request; from there both share validation,
+    /// the queue, generation, logs and metrics, and only the bytes written
+    /// back differ.
     private func handleCompletion(head: HTTPRequestHead,
                                   body: ParsedChatRequestBody,
-                                  context: ChannelHandlerContext) {
+                                  context: ChannelHandlerContext,
+                                  dialect: ChatDialect) {
         do {
+            let chatJSON = dialect == .anthropic
+                ? try AnthropicMessages.chatRequestJSON(from: body.json, family: family)
+                : body.json
             let decoded = try OpenAIChatRequest.decodeRequest(
-                from: body.json, family: family, acceptAnyModel: acceptAnyModel)
+                from: chatJSON, family: family, acceptAnyModel: acceptAnyModel)
             let request = try OpenAIRequestValidator.validate(
                 decoded,
                 modelID: modelID,
@@ -422,7 +493,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 acceptAnyModel: acceptAnyModel,
                 preStagedImages: body.stagedImages,
                 attachmentLease: body.lease)
-            let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+            let hex = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+            let responseID = (dialect == .anthropic ? "msg_" : "chatcmpl-") + hex
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
             let streamState = StreamState()
@@ -431,18 +503,29 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let progressLog = progressLogInterval.map { _ in
                 RequestProgressLog(id: responseID, maxContextTokens: metrics.maxContextTokens)
             }
+            let anthropic = dialect == .anthropic
+                ? AnthropicStreamEncoder(id: responseID, model: modelID) : nil
+            let preparedTokens = PreparedTokenCount()
             let startStream: @Sendable () -> Void = {
                 guard request.stream,
                       streamState.start(eventLoop: contextBox.value.eventLoop,
                                         interval: self.heartbeatInterval,
                                         ping: {
-                          self.writeHeartbeat(contextBox.value)
+                          self.writeHeartbeat(contextBox.value, dialect: dialect)
                       }) else { return }
-                let future = self.beginStream(
-                    contextBox.value,
-                    self.chunk(id: responseID, created: created,
-                               delta: ["role": "assistant"],
-                               finishReason: nil))
+                let future: EventLoopFuture<Void>
+                if let anthropic {
+                    future = self.beginEventStream(
+                        contextBox.value,
+                        anthropic.messageStart(inputTokens: preparedTokens.value ?? 0)
+                            + AnthropicStreamEncoder.ping)
+                } else {
+                    future = self.beginStream(
+                        contextBox.value,
+                        self.chunk(id: responseID, created: created,
+                                   delta: ["role": "assistant"],
+                                   finishReason: nil))
+                }
                 streamState.setStartFuture(future)
             }
             let onQueued: @Sendable () -> Void = {
@@ -468,6 +551,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         onQueued: onQueued,
                         prepare: {
                             let prepared = try await self.backend.prepare(request)
+                            preparedTokens.set(prepared.promptTokenCount)
                             phaseState.set("prepared")
                             ServerLog.prepared(id: responseID,
                                                promptTokens: prepared.promptTokenCount)
@@ -504,17 +588,25 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                 guard request.stream else { return }
                                 switch event {
                                 case .content(let text):
-                                    self.writeStreamChunk(
-                                        contextBox.value,
-                                        self.chunk(id: responseID, created: created,
-                                                   delta: ["content": text],
-                                                   finishReason: nil))
+                                    if let anthropic {
+                                        self.writeEvents(contextBox.value, anthropic.text(text))
+                                    } else {
+                                        self.writeStreamChunk(
+                                            contextBox.value,
+                                            self.chunk(id: responseID, created: created,
+                                                       delta: ["content": text],
+                                                       finishReason: nil))
+                                    }
                                 case .toolCall(let call):
-                                    self.writeToolCall(contextBox.value,
-                                                       id: responseID,
-                                                       created: created,
-                                                       toolIndex: streamState.nextToolIndex(),
-                                                       call: call)
+                                    if let anthropic {
+                                        self.writeEvents(contextBox.value, anthropic.toolCall(call))
+                                    } else {
+                                        self.writeToolCall(contextBox.value,
+                                                           id: responseID,
+                                                           created: created,
+                                                           toolIndex: streamState.nextToolIndex(),
+                                                           call: call)
+                                    }
                                 case .prefill, .decoded:
                                     break
                                 }
@@ -530,11 +622,20 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         timeToFirstOutput: firstOutput.value.map { started.duration(to: $0) })
                     if request.stream {
                         streamState.stop()
-                        self.finishStream(contextBox.value,
-                                          id: responseID,
-                                          created: created,
-                                          completion: completion,
-                                          includeUsage: request.includeUsage)
+                        if let anthropic {
+                            self.finishEventStream(contextBox.value, anthropic.finish(completion))
+                        } else {
+                            self.finishStream(contextBox.value,
+                                              id: responseID,
+                                              created: created,
+                                              completion: completion,
+                                              includeUsage: request.includeUsage)
+                        }
+                    } else if dialect == .anthropic {
+                        self.writeJSON(contextBox.value, status: .ok,
+                                       object: AnthropicMessages.message(
+                                           id: responseID, model: self.modelID,
+                                           completion: completion))
                     } else {
                         self.writeCompletion(contextBox.value,
                                              id: responseID,
@@ -548,7 +649,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                           id: responseID,
                                           phase: phaseState.value,
                                           stream: streamState.isStarted,
-                                          started: started)
+                                          started: started,
+                                          dialect: dialect)
                 }
             }
         } catch let error as ServerRequestError {
@@ -559,6 +661,56 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                    OpenAIErrorEnvelope(message: "malformed JSON request",
                                        code: "invalid_json"),
                    isChatRequest: true)
+        }
+    }
+
+    /// `POST /v1/messages/count_tokens`: the request rendered and tokenized
+    /// exactly as `/v1/messages` would, without generating. It does not wait
+    /// for the generation queue and is not counted as a completion.
+    private func handleCountTokens(head: HTTPRequestHead,
+                                   body: ParsedChatRequestBody,
+                                   context: ChannelHandlerContext) {
+        do {
+            let chatJSON = try AnthropicMessages.chatRequestJSON(
+                from: body.json, family: family, counting: true)
+            let decoded = try OpenAIChatRequest.decodeRequest(
+                from: chatJSON, family: family, acceptAnyModel: acceptAnyModel)
+            let request = try OpenAIRequestValidator.validate(
+                decoded, modelID: modelID, family: family, acceptAnyModel: acceptAnyModel,
+                preStagedImages: [:], attachmentLease: nil)
+            let contextBox = SendableContext(context)
+            inFlightRequests += 1
+            activeTask = childChannels.startTask {
+                defer {
+                    contextBox.value.eventLoop.execute { self.inFlightRequests -= 1 }
+                }
+                do {
+                    let prepared = try await self.backend.prepare(request)
+                    guard let count = prepared.promptTokenCount else {
+                        throw ServerRequestError.invalid(
+                            message: "token counting is not available for requests with images",
+                            param: "messages", code: "unsupported_value")
+                    }
+                    self.writeJSON(contextBox.value, status: .ok, object: ["input_tokens": count])
+                } catch {
+                    let requestError = requestPrimaryError(error) as? ServerRequestError
+                    let status = requestError?.httpStatus ?? .internalServerError
+                    let message = requestError?.envelope.error.message
+                        ?? "token count failed; see the TurboFieldfareServer log"
+                    ServerLog.rejected(status: status.code, method: head.method.rawValue,
+                                       path: AnthropicMessages.countTokensPath,
+                                       error: OpenAIErrorEnvelope(message: message,
+                                                                  code: "count_tokens").error)
+                    self.writeAnthropicError(contextBox.value, status: status, message: message)
+                }
+            }
+        } catch let error as ServerRequestError {
+            reject(context, head: head, status: error.httpStatus, error.envelope,
+                   isChatRequest: false)
+        } catch {
+            reject(context, head: head, status: .badRequest,
+                   OpenAIErrorEnvelope(message: "malformed JSON request", code: "invalid_json"),
+                   isChatRequest: false)
         }
     }
 
@@ -724,11 +876,63 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
-    private func writeHeartbeat(_ context: ChannelHandlerContext) {
-        let buffer = context.channel.allocator.buffer(string: ": ping\n\n")
+    private func writeHeartbeat(_ context: ChannelHandlerContext, dialect: ChatDialect) {
+        let ping = dialect == .anthropic ? AnthropicStreamEncoder.ping : ": ping\n\n"
+        let buffer = context.channel.allocator.buffer(string: ping)
         context.writeAndFlush(
             wrapOutboundOut(.body(.byteBuffer(buffer))),
             promise: nil)
+    }
+
+    /// Opens an event stream with already-encoded server-sent events.
+    private func beginEventStream(_ context: ChannelHandlerContext,
+                                  _ events: String) -> EventLoopFuture<Void> {
+        var headers = HTTPHeaders()
+        headers.add(name: "content-type", value: "text/event-stream")
+        headers.add(name: "cache-control", value: "no-cache")
+        headers.add(name: "connection", value: "keep-alive")
+        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        let contextBox = SendableContext(context)
+        let promise = context.eventLoop.makePromise(of: Void.self)
+        context.eventLoop.execute {
+            contextBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
+            let buffer = contextBox.value.channel.allocator.buffer(string: events)
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: promise)
+        }
+        return promise.futureResult
+    }
+
+    private func writeEvents(_ context: ChannelHandlerContext, _ events: String) {
+        guard !events.isEmpty else { return }
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            let buffer = contextBox.value.channel.allocator.buffer(string: events)
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        }
+    }
+
+    private func finishEventStream(_ context: ChannelHandlerContext, _ events: String) {
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            guard contextBox.value.channel.isActive else { return }
+            if !events.isEmpty {
+                let buffer = contextBox.value.channel.allocator.buffer(string: events)
+                contextBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))),
+                                       promise: nil)
+            }
+            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+        }
+    }
+
+    private func writeAnthropicError(_ context: ChannelHandlerContext,
+                                     status: HTTPResponseStatus,
+                                     message: String,
+                                     closeAfter: Bool = false) {
+        let object = AnthropicMessages.errorObject(status: status.code, message: message)
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        writeData(context, status: status, data: data, closeAfter: closeAfter)
     }
 
     private func handleAsyncError(_ error: Error,
@@ -736,7 +940,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                   id: String,
                                   phase: String,
                                   stream: Bool,
-                                  started: ContinuousClock.Instant) {
+                                  started: ContinuousClock.Instant,
+                                  dialect: ChatDialect) {
         let primary = requestPrimaryError(error)
         let envelope: OpenAIErrorEnvelope
         let status: HTTPResponseStatus
@@ -765,11 +970,17 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             metrics.recordFailure(status: status.code)
             ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
         }
-        if stream {
+        switch (dialect, stream) {
+        case (.anthropic, true):
+            finishEventStream(context, AnthropicStreamEncoder.error(
+                status: status.code, message: envelope.error.message))
+        case (.anthropic, false):
+            writeAnthropicError(context, status: status, message: envelope.error.message)
+        case (.openAI, true):
             finishStreamWithError(context, envelope: envelope)
-            return
+        case (.openAI, false):
+            writeError(context, status: status, envelope)
         }
-        writeError(context, status: status, envelope)
     }
 
     private func finishStreamWithError(_ context: ChannelHandlerContext,

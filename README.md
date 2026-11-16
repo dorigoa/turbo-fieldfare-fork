@@ -494,6 +494,9 @@ authorize and run every tool call. `--host` listens on another address, such as
 `0.0.0.0` to reach the server from other machines; it has no authentication or
 TLS, so do this only on a network you trust. See
 [Listen on another address](docs/OPENAI_SERVER.md#listen-on-another-address).
+It also serves Anthropic's Messages API (`POST /v1/messages`), so Claude Code
+can use the local model; see
+[Anthropic Messages API and Claude Code](docs/OPENAI_SERVER.md#anthropic-messages-api-and-claude-code).
 `GET /metrics` reports context fill, prefill and generation speed, queue state,
 and memory in the Prometheus text format; see
 [Metrics](docs/OPENAI_SERVER.md#metrics).
