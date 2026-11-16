@@ -28,6 +28,29 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
     }
 }
 
+/// Reports prefill and decode progress the way the model session does,
+/// spaced out so a short progress interval fires while it runs.
+private actor ProgressReportingBackend: ServerInferenceBackend {
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        onEvent(.prefill(done: 2, total: 3))
+        try await Task.sleep(nanoseconds: 60_000_000)
+        onEvent(.prefill(done: 3, total: 3))
+        for count in 1...3 {
+            onEvent(.decoded(count: count))
+            try await Task.sleep(nanoseconds: 40_000_000)
+        }
+        onEvent(.content("hello"))
+        return ServerCompletion(
+            content: "hello",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: 3, totalTokens: 6))
+    }
+}
+
 private actor MultipleToolBackend: ServerInferenceBackend {
     func generate(
         _ request: ValidatedChatRequest,
@@ -411,6 +434,45 @@ struct HTTPServerTests {
             from: URL(string: "http://127.0.0.1:\(port)/metrics")!).0
         #expect(String(decoding: metrics, as: UTF8.self)
             .contains(#"turbofieldfare_request_failures_total{status="400"} 1"#))
+
+        try await server.shutdown()
+    }
+
+    /// Progress events feed the log and nothing else: the stream carries
+    /// only the reply, and the first output is the reply's, not a progress
+    /// report. The interval is short so the ticker runs during the request.
+    @Test func progressEventsNeverReachTheClient() async throws {
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ProgressReportingBackend(),
+            progressLogInterval: .milliseconds(50))
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        let contentChunks = text.components(separatedBy: #""content":"#).count - 1
+        #expect(contentChunks == 1)
+        #expect(text.contains(#""content":"hello""#))
+        #expect(!text.contains("prefill"))
+        #expect(!text.contains("decoded"))
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        let metrics = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/metrics")!).0
+        let lines = String(decoding: metrics, as: UTF8.self)
+        #expect(lines.contains(#"turbofieldfare_requests_total{result="completed"} 1"#))
+        // Stamped by the reply after at least 180 ms of progress, not by the
+        // first progress report.
+        #expect(lines.contains(#"turbofieldfare_time_to_first_output_seconds_bucket{le="0.1"} 0"#))
 
         try await server.shutdown()
     }

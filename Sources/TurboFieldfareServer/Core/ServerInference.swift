@@ -5,6 +5,13 @@ import TurboFieldfare
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
     case toolCall(ParsedToolCall)
+    /// Prefill progress as the runtime reports it, per chunk: prompt tokens
+    /// in the KV so far, prompt-cache hits included, of the prompt's total.
+    /// For the progress log only; never sent to the client.
+    case prefill(done: Int, total: Int)
+    /// Tokens decoded so far, reasoning included, reported per token. For the
+    /// progress log only; never sent to the client.
+    case decoded(count: Int)
 }
 
 public struct ServerCompletion: Equatable, Sendable {
@@ -1203,9 +1210,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                         }
                     }
                     switch progress {
-                    case .prefill:
-                        break
-                    case .token(_, let tokenID, let delta):
+                    case .prefill(let done, let total):
+                        onEvent(.prefill(done: done, total: total))
+                    case .token(let index, let tokenID, let delta):
+                        onEvent(.decoded(count: index + 1))
                         let events: [StructuredAssistantEvent]
                         if let gemmaDecoder {
                             events = try gemmaDecoder.consume(tokenID: tokenID, delta: delta)

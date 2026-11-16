@@ -460,6 +460,22 @@ Each accepted request logs `accepted`, `prepared`, `queued` when it waits, and
 - `cancelled by client`, with the phase it reached.
 - `failed`, with the phase, HTTP status, and error.
 
+While a request runs, a progress line every 3 seconds gives the speed over
+just those seconds, so a stall shows as a slow interval instead of being
+averaged into the final figure:
+
+```text
+request chatcmpl-… prefill prompt=12800/30000 pp_tok_s=452.3 window=3.00s
+request chatcmpl-… decode generated=345 context=30345/262144 tg_tok_s=41.2 window=3.00s
+```
+
+`prompt=` counts prompt tokens in the KV so far, prompt-cache hits included,
+of the prompt's total; `generated=` counts reasoning tokens too, since Qwen3.6
+decodes them at the same cost. `context=` is prompt plus generated tokens
+against `--max-context`. The counts are the runtime's own progress reports,
+per prefill chunk and per token. Set the interval with
+`--progress-log-interval <seconds>`, or `0` to turn the lines off.
+
 A request refused before it is accepted logs `request rejected` with the HTTP
 status, method, path, error code, `param`, and the reason the client received,
 for example a missing field or an unknown route. Prompt-cache misses and model

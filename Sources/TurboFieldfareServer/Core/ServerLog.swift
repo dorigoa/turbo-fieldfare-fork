@@ -37,6 +37,12 @@ public enum ServerLog {
         write("request \(id) generating")
     }
 
+    /// A running request's progress over the last interval, as
+    /// `RequestProgressLog` words it. Counts and speeds only.
+    static func progress(_ line: String) {
+        write(line)
+    }
+
     static func completed(id: String,
                           duration: Duration,
                           completion: ServerCompletion) {

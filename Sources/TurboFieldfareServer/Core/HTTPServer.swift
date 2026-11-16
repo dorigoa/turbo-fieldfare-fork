@@ -28,6 +28,7 @@ public actor TurboFieldfareHTTPServer {
     private let attachmentRoot: URL
     private let idleTimeout: TimeAmount
     private let metrics: ServerMetrics
+    private let progressLogInterval: TimeAmount?
     private let childChannels = ChildChannelRegistry()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
@@ -41,6 +42,7 @@ public actor TurboFieldfareHTTPServer {
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
                 metrics: ServerMetrics = ServerMetrics(),
+                progressLogInterval: TimeAmount? = nil,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
@@ -52,6 +54,7 @@ public actor TurboFieldfareHTTPServer {
         self.attachmentRoot = attachmentRoot
         self.idleTimeout = idleTimeout
         self.metrics = metrics
+        self.progressLogInterval = progressLogInterval
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
@@ -69,6 +72,7 @@ public actor TurboFieldfareHTTPServer {
         let attachmentRoot = self.attachmentRoot
         let idleTimeout = self.idleTimeout
         let metrics = self.metrics
+        let progressLogInterval = self.progressLogInterval
         let bootstrap = ServerBootstrap(group: group)
             // The listen queue is sized to the connection cap so a burst of
             // connects up to the cap waits for the accept loop instead of
@@ -95,6 +99,7 @@ public actor TurboFieldfareHTTPServer {
                         visionCapability: visionCapability,
                         attachmentRoot: attachmentRoot,
                         metrics: metrics,
+                        progressLogInterval: progressLogInterval,
                         childChannels: childChannels))
                 }
             }
@@ -169,6 +174,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let visionCapability: String
     private let attachmentRoot: URL
     private let metrics: ServerMetrics
+    private let progressLogInterval: TimeAmount?
     private var bodyParser: StreamingChatRequestBody?
     private var bodyError: (any Error)?
     private var receivedBodyBytes = 0
@@ -190,6 +196,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          visionCapability: String,
          attachmentRoot: URL,
          metrics: ServerMetrics,
+         progressLogInterval: TimeAmount?,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
         self.family = family
@@ -199,6 +206,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.visionCapability = visionCapability
         self.attachmentRoot = attachmentRoot
         self.metrics = metrics
+        self.progressLogInterval = progressLogInterval
         self.childChannels = childChannels
     }
 
@@ -410,6 +418,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let streamState = StreamState()
             let phaseState = RequestPhaseState()
             let firstOutput = FirstOutputClock()
+            let progressLog = progressLogInterval.map { _ in
+                RequestProgressLog(id: responseID, maxContextTokens: metrics.maxContextTokens)
+            }
             let startStream: @Sendable () -> Void = {
                 guard request.stream,
                       streamState.start(eventLoop: contextBox.value.eventLoop,
@@ -459,7 +470,26 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             try Task.checkCancellation()
                             phaseState.set("generating")
                             ServerLog.generating(id: responseID)
+                            // A line every interval while the backend reports
+                            // progress; a backend that reports none logs none.
+                            let ticker = progressLog.flatMap { log in
+                                self.progressLogInterval.map { interval in
+                                    contextBox.value.eventLoop.scheduleRepeatedTask(
+                                        initialDelay: interval, delay: interval
+                                    ) { _ in
+                                        if let line = log.tick() { ServerLog.progress(line) }
+                                    }
+                                }
+                            }
+                            defer { ticker?.cancel() }
                             return try await self.backend.generate(prepared) { event in
+                                switch event {
+                                case .prefill, .decoded:
+                                    progressLog?.record(event)
+                                    return
+                                case .content, .toolCall:
+                                    break
+                                }
                                 firstOutput.mark()
                                 guard request.stream else { return }
                                 switch event {
@@ -475,6 +505,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                                        created: created,
                                                        toolIndex: streamState.nextToolIndex(),
                                                        call: call)
+                                case .prefill, .decoded:
+                                    break
                                 }
                             }
                     })

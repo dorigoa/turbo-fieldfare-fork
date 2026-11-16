@@ -19,6 +19,9 @@ public struct ServerArguments: Equatable, Sendable {
     public let earlyExpertRead: RuntimeEarlyExpertRead
     /// Where request and lifecycle log lines go (`--log-output`).
     public let logOutput: ServerLogOutput
+    /// Seconds between progress lines while a request runs; 0 turns them off
+    /// (`--progress-log-interval`).
+    public let progressLogInterval: Int
     public let visionPack: String?
     public let visionResidency: VisionResidencyPolicy
     /// The variant the model's manifest recorded at parse time; nil when the
@@ -75,6 +78,10 @@ public struct ServerArguments: Equatable, Sendable {
       --log-output <stdout|stderr>
                                  Where the request log goes (default stdout).
                                  Errors and warnings always go to stderr.
+      --progress-log-interval <0...3600>
+                                 Seconds between progress lines while a request
+                                 prefills or generates, each with the speed over
+                                 that interval (default 3; 0 turns them off).
       --help                     Show this help.
     """
 
@@ -136,6 +143,7 @@ public struct ServerArguments: Equatable, Sendable {
         var rdadvisePolicy = RDAdvicePolicyMode.off
         var earlyExpertRead = RuntimeConfiguration.production.earlyExpertRead
         var logOutput = ServerLogOutput.stdout
+        var progressLogInterval = 3
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -247,6 +255,12 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--log-output must be stdout or stderr")
                 }
                 logOutput = parsed
+            case "--progress-log-interval":
+                guard let parsed = Int(value), (0...3_600).contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--progress-log-interval must be between 0 and 3600 seconds")
+                }
+                progressLogInterval = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -298,6 +312,7 @@ public struct ServerArguments: Equatable, Sendable {
                                rdadvisePolicy: rdadvisePolicy,
                                earlyExpertRead: earlyExpertRead,
                                logOutput: logOutput,
+                               progressLogInterval: progressLogInterval,
                                visionPack: visionPack,
                                visionResidency: visionResidency,
                                modelVariant: modelVariant)

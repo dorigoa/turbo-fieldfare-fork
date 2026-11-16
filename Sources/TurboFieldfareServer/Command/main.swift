@@ -49,7 +49,9 @@ do {
         backend: backend,
         visionCapability: backend.visionCapability,
         family: backend.family,
-        metrics: metrics)
+        metrics: metrics,
+        progressLogInterval: arguments.progressLogInterval > 0
+            ? .seconds(Int64(arguments.progressLogInterval)) : nil)
     if let warning = arguments.exposureWarning {
         FileHandle.standardError.write(Data("\(warning)\n".utf8))
     }
