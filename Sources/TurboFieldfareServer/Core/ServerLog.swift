@@ -1,6 +1,25 @@
 import Foundation
+import Synchronization
 
-enum ServerLog {
+/// Where the server's log lines go (`--log-output`). Fatal errors, the usage
+/// text and the `--host` exposure warning stay on stderr either way.
+public enum ServerLogOutput: String, CaseIterable, Sendable {
+    case stdout
+    case stderr
+}
+
+public enum ServerLog {
+    /// stdout by default, so `> server.log` captures the log with the ready
+    /// line; stderr keeps the log apart from the ready line for a script that
+    /// reads stdout.
+    private static let output = Mutex(ServerLogOutput.stdout)
+
+    public static func setOutput(_ destination: ServerLogOutput) {
+        output.withLock { $0 = destination }
+    }
+
+    static var currentOutput: ServerLogOutput { output.withLock { $0 } }
+
     static func accepted(id: String, streaming: Bool) {
         write("request \(id) accepted streaming=\(streaming)")
     }
@@ -119,6 +138,29 @@ enum ServerLog {
         "request \(id) cancelled by client in \(format(duration)) phase=\(phase)"
     }
 
+    /// A request refused before it was accepted: a body that does not
+    /// decode, a field the validator refuses, a route or method the server
+    /// does not serve. Without this line such a request left no trace at all,
+    /// and the client's error was the only record of it. The reason is the
+    /// error message the client received, which names fields and never quotes
+    /// request content.
+    static func rejected(status: UInt,
+                         method: String,
+                         path: String,
+                         error: OpenAIErrorEnvelope.Detail) {
+        write(rejectedMessage(status: status, method: method, path: path, error: error))
+    }
+
+    static func rejectedMessage(status: UInt,
+                                method: String,
+                                path: String,
+                                error: OpenAIErrorEnvelope.Detail) -> String {
+        "request rejected status=\(status) method=\(method) path=\(path) "
+            + "code=\(error.code)"
+            + (error.param.map { " param=\($0)" } ?? "")
+            + " reason=\(error.message)"
+    }
+
     static func failed(id: String,
                        phase: String,
                        status: UInt,
@@ -141,8 +183,14 @@ enum ServerLog {
         String(format: "%.3f", rate)
     }
 
+    /// One `write` per line, so lines from concurrent requests never
+    /// interleave mid-line, and nothing is held in a buffer: a redirected log
+    /// is current while the server runs.
     private static func write(_ message: String) {
-        let line = "[\(Date().formatted(.iso8601))] \(message)\n"
-        FileHandle.standardError.write(Data(line.utf8))
+        let line = Data("[\(Date().formatted(.iso8601))] \(message)\n".utf8)
+        switch currentOutput {
+        case .stdout: FileHandle.standardOutput.write(line)
+        case .stderr: FileHandle.standardError.write(line)
+        }
     }
 }

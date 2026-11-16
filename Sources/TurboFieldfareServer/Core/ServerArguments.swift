@@ -17,6 +17,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let prefillChunkTokens: Int
     public let rdadvisePolicy: RDAdvicePolicyMode
     public let earlyExpertRead: RuntimeEarlyExpertRead
+    /// Where request and lifecycle log lines go (`--log-output`).
+    public let logOutput: ServerLogOutput
     public let visionPack: String?
     public let visionResidency: VisionResidencyPolicy
     /// The variant the model's manifest recorded at parse time; nil when the
@@ -70,6 +72,9 @@ public struct ServerArguments: Equatable, Sendable {
                                  (default off).
       --early-expert-read <s>    Prefetch predicted next-layer expert weights:
                                  off or router (default off).
+      --log-output <stdout|stderr>
+                                 Where the request log goes (default stdout).
+                                 Errors and warnings always go to stderr.
       --help                     Show this help.
     """
 
@@ -130,6 +135,7 @@ public struct ServerArguments: Equatable, Sendable {
         var prefillChunkTokens = 128
         var rdadvisePolicy = RDAdvicePolicyMode.off
         var earlyExpertRead = RuntimeConfiguration.production.earlyExpertRead
+        var logOutput = ServerLogOutput.stdout
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -236,6 +242,11 @@ public struct ServerArguments: Equatable, Sendable {
                         "--early-expert-read must be off or router")
                 }
                 earlyExpertRead = parsed
+            case "--log-output":
+                guard let parsed = ServerLogOutput(rawValue: value) else {
+                    throw ServerArgumentError.invalid("--log-output must be stdout or stderr")
+                }
+                logOutput = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -286,6 +297,7 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunkTokens: prefillChunkTokens,
                                rdadvisePolicy: rdadvisePolicy,
                                earlyExpertRead: earlyExpertRead,
+                               logOutput: logOutput,
                                visionPack: visionPack,
                                visionResidency: visionResidency,
                                modelVariant: modelVariant)

@@ -3,11 +3,11 @@ import Foundation
 import TurboFieldfare
 import TurboFieldfareServerCore
 
-// Every request line goes to stderr, which is unbuffered, while the ready line
-// below goes to stdout, which is fully buffered when it is not a terminal. A
-// server started with its output redirected therefore showed an empty log for
-// its whole life and printed "ready" only as it exited - exactly inverted from
-// what an operator needs. Line buffering puts the line where it is useful.
+// The ready line below goes to stdout, which is fully buffered when it is not
+// a terminal. A server started with its output redirected therefore printed
+// "ready" only as it exited - exactly inverted from what an operator needs.
+// Line buffering puts the line where it is useful. The request log is written
+// line by line without a buffer, to stdout unless `--log-output stderr`.
 setvbuf(stdout, nil, _IOLBF, 0)
 
 let arguments: ServerArguments
@@ -17,6 +17,7 @@ do {
     // Resolved here so an unusable flag combination exits with usage instead of
     // failing after the model has started loading.
     runtimeConfiguration = try arguments.resolvedRuntimeConfiguration()
+    ServerLog.setOutput(arguments.logOutput)
 } catch ServerArgumentError.help {
     print(ServerArguments.usage)
     exit(0)

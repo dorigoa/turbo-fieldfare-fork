@@ -383,6 +383,38 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// The request from the bug report, sent as `curl -d` sent it: the
+    /// answer names the missing field instead of calling the JSON malformed,
+    /// and the refusal is counted.
+    @Test func missingModelIsNamedOverHTTP() async throws {
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"messages":[{"role":"user","content":"Spiegami la relatività ristretta in 600 parole"}],"max_tokens":1000}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        let envelope = try JSONDecoder().decode(OpenAIErrorEnvelope.self, from: data)
+        #expect(envelope.error.message == #"missing required field "model""#)
+        #expect(envelope.error.param == "model")
+
+        let metrics = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/metrics")!).0
+        #expect(String(decoding: metrics, as: UTF8.self)
+            .contains(#"turbofieldfare_request_failures_total{status="400"} 1"#))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",

@@ -246,13 +246,18 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         param: nil, code: "request_too_large")
                 bodyError = nil
                 bodyParser = nil
-                if let head, Self.carriesChatBody(head) {
-                    metrics.recordFailure(status: capError.httpStatus.code)
-                }
+                let rejectedHead = head
                 head = nil
                 discardingUntilClose = true
-                writeError(context, status: capError.httpStatus, capError.envelope,
+                if let rejectedHead {
+                    reject(context, head: rejectedHead,
+                           status: capError.httpStatus, capError.envelope,
+                           isChatRequest: Self.carriesChatBody(rejectedHead),
                            closeAfter: true)
+                } else {
+                    writeError(context, status: capError.httpStatus, capError.envelope,
+                               closeAfter: true)
+                }
                 return
             }
             guard bodyError == nil else { return }
@@ -276,14 +281,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 // Only a chat body is parsed, so only a chat request gets here
                 // with a body error.
                 if let requestError = bodyError as? ServerRequestError {
-                    metrics.recordFailure(status: requestError.httpStatus.code)
-                    writeError(context, status: requestError.httpStatus,
-                               requestError.envelope)
+                    reject(context, head: head, status: requestError.httpStatus,
+                           requestError.envelope, isChatRequest: true)
                 } else {
-                    metrics.recordFailure(status: HTTPResponseStatus.badRequest.code)
-                    writeError(context, status: .badRequest,
-                               OpenAIErrorEnvelope(message: "malformed JSON request",
-                                                   code: "invalid_json"))
+                    reject(context, head: head, status: .badRequest,
+                           OpenAIErrorEnvelope(message: "malformed JSON request",
+                                               code: "invalid_json"),
+                           isChatRequest: true)
                 }
                 return
             }
@@ -292,11 +296,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     ?? ParsedChatRequestBody(json: Data(), stagedImages: [:], lease: nil)
                 route(head: head, body: parsed, context: context)
             } catch let error as ServerRequestError {
-                writeError(context, status: error.httpStatus, error.envelope)
+                reject(context, head: head, status: error.httpStatus, error.envelope,
+                       isChatRequest: Self.carriesChatBody(head))
             } catch {
-                writeError(context, status: .badRequest,
-                           OpenAIErrorEnvelope(message: "malformed JSON request",
-                                               code: "invalid_json"))
+                reject(context, head: head, status: .badRequest,
+                       OpenAIErrorEnvelope(message: "malformed JSON request",
+                                           code: "invalid_json"),
+                       isChatRequest: Self.carriesChatBody(head))
             }
         }
     }
@@ -347,31 +353,51 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
-                writeError(context, status: .unsupportedMediaType,
-                           OpenAIErrorEnvelope(message: "content-type must be application/json",
-                                               code: "unsupported_media_type"))
+                reject(context, head: head, status: .unsupportedMediaType,
+                       OpenAIErrorEnvelope(message: "content-type must be application/json",
+                                           code: "unsupported_media_type"),
+                       isChatRequest: true)
                 return
             }
-            handleCompletion(body: body, context: context)
+            handleCompletion(head: head, body: body, context: context)
         case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/v1/chat/completions"):
-            writeError(context, status: .methodNotAllowed,
-                       OpenAIErrorEnvelope(message: "method not allowed",
-                                           code: "method_not_allowed"))
+            reject(context, head: head, status: .methodNotAllowed,
+                   OpenAIErrorEnvelope(message: "method not allowed",
+                                       code: "method_not_allowed"),
+                   isChatRequest: false)
         default:
-            writeError(context, status: .notFound,
-                       OpenAIErrorEnvelope(message: "route not found",
-                                           code: "not_found"))
+            reject(context, head: head, status: .notFound,
+                   OpenAIErrorEnvelope(message: "route not found",
+                                       code: "not_found"),
+                   isChatRequest: false)
         }
     }
 
-    private func handleCompletion(body: ParsedChatRequestBody,
+    /// Answers a request the server refuses before accepting it, logs the
+    /// refusal, and counts it in `/metrics` when it was a chat completion
+    /// request. The only place such a refusal is answered, so none of them
+    /// goes unrecorded.
+    private func reject(_ context: ChannelHandlerContext,
+                        head: HTTPRequestHead,
+                        status: HTTPResponseStatus,
+                        _ envelope: OpenAIErrorEnvelope,
+                        isChatRequest: Bool,
+                        closeAfter: Bool = false) {
+        if isChatRequest {
+            metrics.recordFailure(status: status.code)
+        }
+        ServerLog.rejected(status: status.code,
+                           method: head.method.rawValue,
+                           path: String(Self.requestPath(head).prefix(200)),
+                           error: envelope.error)
+        writeError(context, status: status, envelope, closeAfter: closeAfter)
+    }
+
+    private func handleCompletion(head: HTTPRequestHead,
+                                  body: ParsedChatRequestBody,
                                   context: ChannelHandlerContext) {
         do {
-            let decoder = JSONDecoder()
-            // The key sweep in the request decoder asks the family whether
-            // `chat_template_kwargs` is a field at all (D11).
-            decoder.userInfo[OpenAIChatRequest.modelFamilyUserInfoKey] = family
-            let decoded = try decoder.decode(OpenAIChatRequest.self, from: body.json)
+            let decoded = try OpenAIChatRequest.decodeRequest(from: body.json, family: family)
             let request = try OpenAIRequestValidator.validate(
                 decoded,
                 modelID: modelID,
@@ -484,15 +510,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 }
             }
         } catch let error as ServerRequestError {
-            metrics.recordFailure(status: error.httpStatus.code)
-            writeError(context,
-                       status: error.httpStatus,
-                       error.envelope)
+            reject(context, head: head, status: error.httpStatus, error.envelope,
+                   isChatRequest: true)
         } catch {
-            metrics.recordFailure(status: HTTPResponseStatus.badRequest.code)
-            writeError(context, status: .badRequest,
-                       OpenAIErrorEnvelope(message: "malformed JSON request",
-                                           code: "invalid_json"))
+            reject(context, head: head, status: .badRequest,
+                   OpenAIErrorEnvelope(message: "malformed JSON request",
+                                       code: "invalid_json"),
+                   isChatRequest: true)
         }
     }
 

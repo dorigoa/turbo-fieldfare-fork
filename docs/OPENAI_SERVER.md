@@ -29,8 +29,9 @@ The server loads the model before opening the port. Wait for
 `TurboFieldfareServer ready`, then keep the process running while clients use
 it. The ready line names the API model ID (`model=`), and at its end the
 model's variant (`variant=4-bit` or `variant=8-bit`) and the model ID its
-manifest records (`manifest_model_id=`). Before that, stderr logs
-`model opened` with the same two fields once the weights are open.
+manifest records (`manifest_model_id=`). Before that, the
+[log](#logs) reports `model opened` with the same two fields once the weights
+are open.
 
 To serve the experimental 8-bit variant, pass its directory. The server reads
 the variant from the model's manifest; there is no variant flag:
@@ -58,7 +59,12 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Requests must name the server's API model ID, which `GET /v1/models` lists.
-See [Model ID](#model-id) for the 8-bit value.
+See [Model ID](#model-id) for the 8-bit value. `model` is required: a request
+without it gets HTTP 400 with `missing required field "model"`. A body that
+does not decode is answered with code `invalid_json`, a message naming the
+field and what it must be, and the field's path in `param`, for example
+`"seed" must be a non-negative integer` or `request body is not valid JSON
+(line 1, column 3)`.
 
 By default, the server runs one generation and admits up to four additional
 requests for preparation or queueing. The limit is enforced before prompt
@@ -433,9 +439,32 @@ for the calculation and diagnostic override, and the
 results and validation limits. On an 8 GB Mac, run one model process at a
 time and watch memory pressure.
 
-For long requests, stderr reports the request lifecycle as prepared, queued,
-generating, completed, or failed. It includes token counts and timing, but not
-prompt text, tool arguments, headers, or request bodies.
+## Logs
+
+The server logs one line per event to stdout, with an ISO 8601 timestamp, so
+`> server.log` captures it together with the ready line. Pass
+`--log-output stderr` to keep the log apart from the ready line, for a script
+that reads stdout. Startup errors, the usage text, and the
+[`--host`](#listen-on-another-address) warning always go to stderr.
+
+```bash
+.build/release/TurboFieldfareServer --model scratch/gemma4.gturbo >> server.log
+```
+
+Each accepted request logs `accepted`, `prepared`, `queued` when it waits, and
+`generating`, then ends with one of these:
+
+- `completed`, with the prompt, cached, and generated token counts, prefill
+  time and speed (`pp=`, `pp_tok_s=`), generation time and speed (`tg=`,
+  `tg_tok_s=`), and `finish=`.
+- `cancelled by client`, with the phase it reached.
+- `failed`, with the phase, HTTP status, and error.
+
+A request refused before it is accepted logs `request rejected` with the HTTP
+status, method, path, error code, `param`, and the reason the client received,
+for example a missing field or an unknown route. Prompt-cache misses and model
+loading events are logged too. Lines carry token counts, timings, and field
+names, never prompt text, tool arguments, headers, or request bodies.
 
 ## Images
 
