@@ -74,7 +74,7 @@ public enum ServerLog {
             + "cached=\(usage.promptTokensDetails.cachedTokens) "
             + "completion=\(usage.completionTokens) "
             + "pp=\(formatSeconds(completion.prefillSeconds)) "
-            + "pp_tok_s=\(formatRate(prefillTokensPerSecond)) "
+            + "tok/s=\(formatRate(prefillTokensPerSecond)) "
             + "tg=\(formatSeconds(completion.decodeSeconds)) "
             + "tok/s=\(formatRate(decodeTokensPerSecond)) "
             + "finish=\(completion.finishReason)"

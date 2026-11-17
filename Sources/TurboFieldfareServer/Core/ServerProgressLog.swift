@@ -134,7 +134,7 @@ final class RequestProgressLog: Sendable {
         let elapsed = Self.seconds(first.time.duration(to: latest.time))
         if elapsed > 0, latest.count > first.count {
             let rate = Double(latest.count - first.count) / elapsed
-            line += " pp_tok_s=\(Self.rate(rate))"
+            line += " tok/s=\(Self.rate(rate))"
             if let total = state.promptTotal, total > latest.count {
                 line += " eta=" + String(format: "%.0f", Double(total - latest.count) / rate) + "s"
             }
