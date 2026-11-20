@@ -47,7 +47,12 @@ extension AppModel {
         conversationBindingGeneration &+= 1
 
         let identity: ConversationIdentity?
-        if AppModelInstallationProbe.status(at: modelDirectory) == .complete {
+        // The active variant's descriptor, as at launch: the default one is the
+        // 4-bit Gemma checkpoint, which reads every other variant as partial and
+        // left a switched-to model without an identity, so its chats were never
+        // saved.
+        if AppModelInstallationProbe.status(
+            at: modelDirectory, descriptor: .descriptor(for: modelVariant)) == .complete {
             do {
                 identity = try conversationIdentityProvider(modelDirectory)
             } catch {
