@@ -49,10 +49,10 @@ import Testing
 
         #expect(line.contains("prompt=120013"))
         #expect(line.contains("cached=0"))
-        #expect(line.contains("pp=675.595s"))
-        #expect(line.contains("pp_tok_s=177.640"))
-        #expect(line.contains("tg=0.250s"))
-        #expect(line.contains("tok/s=4.000"))
+        // Both rates print as `tok/s=`; the field before each one, `pp=` or
+        // `tg=`, says which phase it measures.
+        #expect(line.contains("pp=675.595s tok/s=177.640"))
+        #expect(line.contains("tg=0.250s tok/s=4.000"))
         #expect(line.contains("finish=stop"))
     }
 
@@ -73,8 +73,8 @@ import Testing
         #expect(line.contains("prompt=100000"))
         #expect(line.contains("cached=75000"))
         // 25,000 computed tokens over 2.5s, not 100,000 over 2.5s.
-        #expect(line.contains("pp_tok_s=10000.000"))
-        #expect(line.contains("tok/s=8.000"))
+        #expect(line.contains("pp=2.500s tok/s=10000.000"))
+        #expect(line.contains("tg=0.500s tok/s=8.000"))
     }
 
     /// A fully cached prompt does no prefill work at all, and a request that
@@ -90,10 +90,8 @@ import Testing
                                    prefillSeconds: 0,
                                    decodeSeconds: 0))
 
-        #expect(line.contains("pp=0.000s"))
-        #expect(line.contains("pp_tok_s=0.000"))
-        #expect(line.contains("tg=0.000s"))
-        #expect(line.contains("tok/s=0.000"))
+        #expect(line.contains("pp=0.000s tok/s=0.000"))
+        #expect(line.contains("tg=0.000s tok/s=0.000"))
         #expect(!line.contains("nan"))
         #expect(!line.contains("inf"))
     }
@@ -111,10 +109,10 @@ import Testing
                                    prefillSeconds: 1,
                                    decodeSeconds: 1))
 
-        #expect(line.contains("pp_tok_s=0.000"))
+        #expect(line.contains("pp=1.000s tok/s=0.000"))
         // The request id legitimately contains a hyphen, so assert on the rate
-        // fields rather than scanning the whole line for a minus sign.
-        #expect(!line.contains("pp_tok_s=-"))
+        // fields rather than scanning the whole line for a minus sign; both
+        // rates print as `tok/s=`, so this covers the prefill one too.
         #expect(!line.contains("tok/s=-"))
     }
 

@@ -28,7 +28,7 @@ struct ServerProgressLogTests {
         log.record(.prefill(done: 256, total: 1_000), at: at(0.5))
         log.record(.prefill(done: 768, total: 1_000), at: at(1.5))
         #expect(log.tick(at: at(2.5))
-            == "request chatcmpl-1 prefill prompt=768/1000 (76%) pp_tok_s=512.0 eta=0s")
+            == "request chatcmpl-1 prefill prompt=768/1000 (76%) tok/s=512.0 eta=0s")
 
         log.record(.prefill(done: 1_000, total: 1_000), at: at(3))
         log.record(.decoded(count: 1), at: at(3.5))
@@ -62,9 +62,9 @@ struct ServerProgressLogTests {
         }
         #expect(lines.count == chunk)
         #expect(lines.first == "request msg_1 prefill prompt=256/4648 (5%)")
-        #expect(lines[1] == "request msg_1 prefill prompt=512/4648 (11%) pp_tok_s=47.4 eta=87s")
-        #expect(lines.allSatisfy { !$0.contains("pp_tok_s=0.0") })
-        #expect(lines.last == "request msg_1 prefill prompt=1536/4648 (33%) pp_tok_s=47.4 eta=66s")
+        #expect(lines[1] == "request msg_1 prefill prompt=512/4648 (11%) tok/s=47.4 eta=87s")
+        #expect(lines.allSatisfy { !$0.contains("tok/s=0.0") })
+        #expect(lines.last == "request msg_1 prefill prompt=1536/4648 (33%) tok/s=47.4 eta=66s")
     }
 
     /// With no chunk for 30 s the prefill says so, once per 30 s.

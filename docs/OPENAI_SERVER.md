@@ -552,15 +552,16 @@ Each accepted request logs `accepted`, `prepared`, `queued` when it waits, and
 `generating`, then ends with one of these:
 
 - `completed`, with the prompt, cached, and generated token counts, prefill
-  time and speed (`pp=`, `pp_tok_s=`), generation time and speed (`tg=`,
-  `tok/s=`), and `finish=`.
+  time and speed (`pp=` then `tok/s=`), generation time and speed (`tg=` then
+  `tok/s=`), and `finish=`. Both speeds print as `tok/s=`; the field before
+  each one says which phase it measures.
 - `cancelled by client`, with the phase it reached.
 - `failed`, with the phase, HTTP status, and error.
 
 While a request runs, progress lines report how far it has got:
 
 ```text
-request msg_… prefill prompt=2560/4648 (55%) pp_tok_s=47.4 eta=44s
+request msg_… prefill prompt=2560/4648 (55%) tok/s=47.4 eta=44s
 request msg_… decode generated=345 context=4993/262144 tok/s=41.2 window=3.00s
 ```
 
@@ -568,7 +569,7 @@ A decode line comes every 3 seconds and gives the speed over just those
 seconds, so a stall shows as a slow interval instead of being averaged into
 the final figure. Prefill advances a chunk at a time, and a chunk can take
 longer than 3 seconds, so a prefill line comes only when a chunk has landed:
-`pp_tok_s` is the average over the chunks so far and `eta` the time left at
+its `tok/s` is the average over the chunks so far and `eta` the time left at
 that rate. A prefill with no new chunk for 30 seconds logs `no new chunk for
 30s` instead, every 30 seconds.
 

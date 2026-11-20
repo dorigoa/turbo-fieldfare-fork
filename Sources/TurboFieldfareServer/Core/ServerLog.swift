@@ -50,7 +50,7 @@ public enum ServerLog {
     }
 
     /// Split out so the throughput arithmetic can be checked without a log sink
-    /// and without a decode. `pp_tok_s` divides by the tokens actually
+    /// and without a decode. The prefill `tok/s` divides by the tokens actually
     /// prefilled: a prompt-cache hit contributes no prefill work, so counting
     /// cached tokens as prefilled would report a rate the runtime never
     /// achieved. Carries counts and durations only, never content.

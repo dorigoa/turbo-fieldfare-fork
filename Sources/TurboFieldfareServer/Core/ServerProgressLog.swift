@@ -14,7 +14,7 @@ import Synchronization
 /// exactly the interval since the previous line, and a stall shows as a slow
 /// interval. Prefill reports once per chunk, and a chunk can take longer than
 /// the interval: 256 tokens at 47 tok/s is 5.4 s against 3 s. Rated per
-/// interval, that printed the same `prompt=` with `pp_tok_s=0.0` line after
+/// interval, that printed the same `prompt=` with `tok/s=0.0` line after
 /// line between chunks, which read as a prefill stuck in a loop. A prefill
 /// line is therefore written only when a chunk has landed, its rate is the
 /// average over the chunks so far, timed by when they landed, with the share
