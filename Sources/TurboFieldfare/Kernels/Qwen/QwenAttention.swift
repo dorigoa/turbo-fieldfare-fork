@@ -18,7 +18,12 @@ import Metal
 ///   attn     causal GQA attention over the cache, FP32 online softmax,
 ///            decode (queryTokens = 1) and prefill (queryTokens = T) share
 ///            the code path: query token t attends cache positions
-///            [0, kvStart + t].
+///            [0, kvStart + t]. Shapes the grouped kernel covers (headDim a
+///            multiple of 128 up to 256, at most 8 query heads per KV head —
+///            the real model is 256 and 16/2) run `qwen_attention_grouped`,
+///            split over position chunks in decode and merged by
+///            `qwen_attention_combine`; any other shape runs the original
+///            one-threadgroup-per-head `qwen_attention`.
 ///   gate     elementwise out = attn * sigmoid(gate).
 ///
 /// `q_norm`/`k_norm` reuse `QwenNorms.encodePerHead` (S12, headDim 256,
@@ -31,14 +36,74 @@ final class QwenAttention {
     private let psoRope: MTLComputePipelineState
     private let psoKvWrite: MTLComputePipelineState
     private let psoAttention: MTLComputePipelineState
+    private let psoGrouped: MTLComputePipelineState
+    private let psoCombine: MTLComputePipelineState
     private let psoGate: MTLComputePipelineState
+    private let device: MTLDevice
+
+    /// Per-chunk online-softmax state of a split decode: m and d are
+    /// [rows][chunks] FP32, o is [rows][chunks][headDim] FP32. Allocated on the
+    /// first split decode and grown only if a larger shape arrives; every layer
+    /// of a token reuses them because the encoders of one command buffer run
+    /// in order.
+    private var mPartial: MTLBuffer?
+    private var dPartial: MTLBuffer?
+    private var oPartial: MTLBuffer?
+
+    /// Most chunks a decode is split into, and the fewest positions a chunk
+    /// holds. Chosen on an M4 Max at the real geometry (16/2 heads of 256, ten
+    /// layers): 64 chunks was fastest from about 3K positions to 128K, and
+    /// below that a chunk of about 16 positions was the sweet spot.
+    static let maxDecodeChunks = 64
+    static let minDecodeChunkLength = 16
 
     init(context: MetalContext) throws {
         self.psoSplitQG = try context.pipeline("qwen_split_qg")
         self.psoRope = try context.pipeline("qwen_rope_partial")
         self.psoKvWrite = try context.pipeline("qwen_kv_write")
         self.psoAttention = try context.pipeline("qwen_attention")
+        self.psoGrouped = try context.pipeline("qwen_attention_grouped")
+        self.psoCombine = try context.pipeline("qwen_attention_combine")
         self.psoGate = try context.pipeline("qwen_attn_gate")
+        self.device = context.device
+    }
+
+    /// Whether `qwen_attention_grouped` covers this shape: one half4 column
+    /// block per 128 dims (at most two), one SIMD group per query head of a
+    /// GQA group (at most eight).
+    static func groupedKernelCovers(queryHeads: Int, kvHeads: Int, headDim: Int) -> Bool {
+        guard kvHeads > 0, queryHeads % kvHeads == 0 else { return false }
+        let qPerKV = queryHeads / kvHeads
+        return headDim % 128 == 0 && headDim <= 256 && qPerKV >= 1 && qPerKV <= 8
+    }
+
+    /// Chunks for a decode over `kvLen` positions: at least
+    /// `minDecodeChunkLength` positions each, at most `maxDecodeChunks`, and
+    /// no empty chunk (the count is recomputed from the rounded length).
+    static func decodeSplit(kvLen: Int) -> (chunks: Int, chunkLength: Int) {
+        let len = max(1, kvLen)
+        let wanted = min(maxDecodeChunks, max(1, (len + minDecodeChunkLength - 1) / minDecodeChunkLength))
+        let chunkLength = (len + wanted - 1) / wanted
+        return ((len + chunkLength - 1) / chunkLength, chunkLength)
+    }
+
+    private func partialBuffers(rows: Int, chunks: Int, headDim: Int)
+        -> (MTLBuffer, MTLBuffer, MTLBuffer)? {
+        let states = rows * chunks * MemoryLayout<Float>.size
+        let vectors = states * headDim
+        if let m = mPartial, let d = dPartial, let o = oPartial,
+           m.length >= states, o.length >= vectors {
+            return (m, d, o)
+        }
+        guard let m = device.makeBuffer(length: states, options: .storageModePrivate),
+              let d = device.makeBuffer(length: states, options: .storageModePrivate),
+              let o = device.makeBuffer(length: vectors, options: .storageModePrivate)
+        else { return nil }
+        m.label = "qwen attention split m"
+        d.label = "qwen attention split d"
+        o.label = "qwen attention split o"
+        mPartial = m; dPartial = d; oPartial = o
+        return (m, d, o)
     }
 
     /// Separate query and gate of a `q_proj` output: `qg` FP16
@@ -156,8 +221,9 @@ final class QwenAttention {
     /// `out` FP16 like q. Query token t attends cache positions
     /// [0, kvStart + t]; decode is queryTokens = 1, prefill T (call after
     /// encodeKVWrite on the same command buffer). FP32 online softmax,
-    /// GQA ratio queryHeads/kvHeads (real 16/2 = 8). headDim must be <= 256
-    /// (the kernel gives one dimension to each of 256 threads).
+    /// GQA ratio queryHeads/kvHeads (real 16/2 = 8). headDim must be <= 256.
+    /// Covered shapes take the grouped kernel (split over position chunks when
+    /// queryTokens = 1); the rest take the original per-head kernel.
     func encodeAttention(commandBuffer: MTLCommandBuffer,
                          q: MTLBuffer, qOffset: Int = 0,
                          kvK: MTLBuffer, kvKOffset: Int = 0,
@@ -179,6 +245,18 @@ final class QwenAttention {
         precondition(posStride >= headStride && headStride >= headDim,
                      "strides must not overlap between heads/positions")
         guard queryTokens > 0 else { return }
+        if Self.groupedKernelCovers(queryHeads: queryHeads, kvHeads: kvHeads, headDim: headDim) {
+            encodeGroupedAttention(commandBuffer: commandBuffer,
+                                   q: q, qOffset: qOffset,
+                                   kvK: kvK, kvKOffset: kvKOffset,
+                                   kvV: kvV, kvVOffset: kvVOffset,
+                                   out: out, outOffset: outOffset,
+                                   queryHeads: queryHeads, kvHeads: kvHeads,
+                                   headDim: headDim, queryTokens: queryTokens,
+                                   kvStart: kvStart, posStride: posStride,
+                                   headStride: headStride, scale: scale)
+            return
+        }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoAttention)
         enc.setBuffer(q,    offset: qOffset,    index: 0)
@@ -205,6 +283,82 @@ final class QwenAttention {
                                  threadsPerThreadgroup: MTLSize(width: 256,
                                                                 height: 1, depth: 1))
         enc.endEncoding()
+    }
+
+    private func encodeGroupedAttention(commandBuffer: MTLCommandBuffer,
+                                        q: MTLBuffer, qOffset: Int,
+                                        kvK: MTLBuffer, kvKOffset: Int,
+                                        kvV: MTLBuffer, kvVOffset: Int,
+                                        out: MTLBuffer, outOffset: Int,
+                                        queryHeads: Int, kvHeads: Int,
+                                        headDim: Int, queryTokens: Int,
+                                        kvStart: UInt32, posStride: Int,
+                                        headStride: Int, scale: Float) {
+        // Prefill already has a threadgroup per (KV head, token); only a
+        // single-token decode needs the cache split to fill the GPU.
+        var chunks = 1
+        var chunkLength = Int(kvStart) + queryTokens
+        var partials: (MTLBuffer, MTLBuffer, MTLBuffer)?
+        if queryTokens == 1 {
+            let split = Self.decodeSplit(kvLen: Int(kvStart) + 1)
+            if split.chunks > 1,
+               let buffers = partialBuffers(rows: queryHeads, chunks: split.chunks,
+                                            headDim: headDim) {
+                chunks = split.chunks
+                chunkLength = split.chunkLength
+                partials = buffers
+            }
+        }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoGrouped)
+        enc.setBuffer(q,    offset: qOffset,    index: 0)
+        enc.setBuffer(kvK,  offset: kvKOffset,  index: 1)
+        enc.setBuffer(kvV,  offset: kvVOffset,  index: 2)
+        enc.setBuffer(out,  offset: outOffset,  index: 3)
+        // Unused when chunks == 1, but every declared buffer gets a binding.
+        enc.setBuffer(partials?.0 ?? out, offset: 0, index: 4)
+        enc.setBuffer(partials?.1 ?? out, offset: 0, index: 5)
+        enc.setBuffer(partials?.2 ?? out, offset: 0, index: 6)
+        var qh = UInt32(queryHeads)
+        var kh = UInt32(kvHeads)
+        var hd = UInt32(headDim)
+        var qt = UInt32(queryTokens)
+        var ks = kvStart
+        var ps = UInt32(posStride)
+        var hs = UInt32(headStride)
+        var sc = scale
+        var cl = UInt32(chunkLength)
+        var nc = UInt32(chunks)
+        enc.setBytes(&qh, length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBytes(&kh, length: MemoryLayout<UInt32>.size, index: 8)
+        enc.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 9)
+        enc.setBytes(&qt, length: MemoryLayout<UInt32>.size, index: 10)
+        enc.setBytes(&ks, length: MemoryLayout<UInt32>.size, index: 11)
+        enc.setBytes(&ps, length: MemoryLayout<UInt32>.size, index: 12)
+        enc.setBytes(&hs, length: MemoryLayout<UInt32>.size, index: 13)
+        enc.setBytes(&sc, length: MemoryLayout<Float>.size,  index: 14)
+        enc.setBytes(&cl, length: MemoryLayout<UInt32>.size, index: 15)
+        enc.setBytes(&nc, length: MemoryLayout<UInt32>.size, index: 16)
+        enc.dispatchThreadgroups(MTLSize(width: kvHeads, height: chunks, depth: queryTokens),
+                                 threadsPerThreadgroup: MTLSize(width: 32 * (queryHeads / kvHeads),
+                                                                height: 1, depth: 1))
+        enc.endEncoding()
+
+        guard let partials, chunks > 1,
+              let combine = commandBuffer.makeComputeCommandEncoder() else { return }
+        combine.setComputePipelineState(psoCombine)
+        combine.setBuffer(partials.0, offset: 0, index: 0)
+        combine.setBuffer(partials.1, offset: 0, index: 1)
+        combine.setBuffer(partials.2, offset: 0, index: 2)
+        combine.setBuffer(out, offset: outOffset, index: 3)
+        var rows = UInt32(queryHeads)
+        combine.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 4)
+        combine.setBytes(&nc, length: MemoryLayout<UInt32>.size, index: 5)
+        combine.setBytes(&rows, length: MemoryLayout<UInt32>.size, index: 6)
+        combine.dispatchThreadgroups(MTLSize(width: queryHeads, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: min(256, headDim),
+                                                                    height: 1, depth: 1))
+        combine.endEncoding()
     }
 
     /// Output gate (plan 3.5): `out = attn * sigmoid(gate)` elementwise over

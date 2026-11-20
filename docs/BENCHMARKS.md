@@ -220,9 +220,15 @@ requires `endOfTurn` on every measured footer, so they are not results.
 
 Qwen3.6's rate falls further with prompt length than Gemma's does, from 27.7 to
 14.2 tok/s between 62 and 2,940 prompt tokens against Gemma's 44.8 to 39.4.
-That is consistent with the two geometries — ten full-attention layers over the
-whole context against twenty-five ring-capped sliding-window layers — but one
-measured run per case does not separate it from run-to-run variation.
+The cause was the decode attention kernel, not the geometry. It gave each of the
+16 query heads one threadgroup and walked the cache one position at a time,
+which a kernel-only measurement on this M4 Max put at about 1.1 µs per position
+per layer: 28 ms per token at 3,000 positions, enough to explain most of the
+gap, and 388 ms at 32,768. The grouped split-KV kernel that replaced it
+measures 0.65 ms for the ten attention layers at 4,096 positions, 4.5 ms at
+32,768 and 17.7 ms at 131,072, on the same synthetic data and to the same
+reference error. The rows above were measured before that change and have not
+been re-run.
 
 Peak physical footprint on the same host, with a 3,015-token prompt and 256
 generated tokens at 16 slots: Gemma 4-bit 2.210 GiB at a 4K context; Qwen3.6

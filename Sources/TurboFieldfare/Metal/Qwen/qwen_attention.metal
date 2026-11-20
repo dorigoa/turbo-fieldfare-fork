@@ -161,6 +161,183 @@ kernel void qwen_attention(
     }
 }
 
+// Grouped split-KV attention, the production path for every shape it covers
+// (headDim a multiple of 128 up to 256, at most 8 query heads per KV head).
+//
+// `qwen_attention` above gives each query head its own threadgroup and walks
+// the whole cache one position at a time with two threadgroup barriers per
+// position: in decode that is 16 threadgroups on the whole GPU, measured at
+// ~1.1 µs per position per layer, so its cost grew with the context and
+// dominated the token time well before the context was full. Here:
+//
+//   - one threadgroup per (KV head, chunk of positions, query token);
+//   - SIMD group g serves query head kvHead * qPerKV + g, so the 8 query heads
+//     of a GQA group share every K/V row the threadgroup reads;
+//   - lane l owns the half4 columns l and l + 32 of a 256-wide head, so one
+//     row is one coalesced load per column block and the per-position dot is a
+//     single simd_sum — no threadgroup barrier anywhere in the loop;
+//   - with numChunks > 1 (decode) each threadgroup writes the un-normalized
+//     online-softmax state of its chunk and qwen_attention_combine merges the
+//     chunks; with numChunks == 1 (prefill) the output is written directly.
+//
+// Same algorithm and FP32 accumulation as qwen_attention: scores carry
+// `scale`, softmax is the online max/rescale recurrence. Query token t of a
+// call attends cache positions [0, kvStart + t].
+constant constexpr uint kQwenAttnMaxVecs = 2;   // half4 columns per lane: headDim / 128
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void qwen_attention_grouped(
+    device const half*  q          [[buffer(0)]],   // [T][queryHeads*headDim]
+    device const half*  kvK        [[buffer(1)]],   // cache, D5 strides
+    device const half*  kvV        [[buffer(2)]],
+    device       half*  out        [[buffer(3)]],   // [T][queryHeads*headDim] (numChunks == 1)
+    device       float* mOut       [[buffer(4)]],   // [T*queryHeads][numChunks] (numChunks > 1)
+    device       float* dOut       [[buffer(5)]],
+    device       float* oOut       [[buffer(6)]],   // [T*queryHeads][numChunks][headDim]
+    constant     uint&  queryHeads [[buffer(7)]],
+    constant     uint&  kvHeads    [[buffer(8)]],
+    constant     uint&  headDim    [[buffer(9)]],
+    constant     uint&  queryTokens [[buffer(10)]],
+    constant     uint&  kvStart    [[buffer(11)]],
+    constant     uint&  posStride  [[buffer(12)]],
+    constant     uint&  headStride [[buffer(13)]],
+    constant     float& scale      [[buffer(14)]],
+    constant     uint&  chunkLen   [[buffer(15)]],
+    constant     uint&  numChunks  [[buffer(16)]],
+    uint3 tg   [[threadgroup_position_in_grid]],    // (kvHead, chunk, token)
+    uint  lane [[thread_index_in_simdgroup]],
+    uint  sg   [[simdgroup_index_in_threadgroup]]
+) {
+    const uint kvh = tg.x, chunk = tg.y, t = tg.z;
+    const uint qPerKV = queryHeads / kvHeads;
+    // No threadgroup barriers below, so idle SIMD groups may leave early.
+    if (kvh >= kvHeads || t >= queryTokens || sg >= qPerKV) return;
+    const uint h = kvh * qPerKV + sg;
+    const uint vecs = headDim / 128u;
+    const uint kvLen = kvStart + t + 1u;
+    const uint pStart = chunk * chunkLen;
+    const uint pEnd = min(pStart + chunkLen, kvLen);
+
+    device const half4* qrow =
+        (device const half4*)(q + ((size_t)t * queryHeads + h) * (size_t)headDim);
+    float4 qv[kQwenAttnMaxVecs];
+    float4 acc[kQwenAttnMaxVecs];
+    for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+        qv[j] = j < vecs ? float4(qrow[lane + 32u * j]) : float4(0.f);
+        acc[j] = float4(0.f);
+    }
+
+    float m = -1e30f;
+    float d = 0.f;
+    const size_t headOffset = (size_t)kvh * (size_t)headStride;
+    // Four positions per step: the four K rows (and then the four V rows) are
+    // independent loads, so each lane keeps several in flight instead of
+    // waiting out one memory latency per position. One rescale per step.
+    uint p = pStart;
+    for (; p + 4u <= pEnd; p += 4u) {
+        float s[4];
+        for (uint r = 0u; r < 4u; ++r) {
+            const size_t base = (size_t)(p + r) * (size_t)posStride + headOffset;
+            device const half4* krow = (device const half4*)(kvK + base);
+            float part = 0.f;
+            for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+                if (j < vecs) part += dot(qv[j], float4(krow[lane + 32u * j]));
+            }
+            s[r] = simd_sum(part) * scale;
+        }
+        const float mNew = max(max(m, max(s[0], s[1])), max(s[2], s[3]));
+        const float alpha = exp(m - mNew);
+        float e[4];
+        for (uint r = 0u; r < 4u; ++r) e[r] = exp(s[r] - mNew);
+        d = d * alpha + ((e[0] + e[1]) + (e[2] + e[3]));
+        for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+            if (j >= vecs) continue;
+            float4 add = float4(0.f);
+            for (uint r = 0u; r < 4u; ++r) {
+                const size_t base = (size_t)(p + r) * (size_t)posStride + headOffset;
+                add += e[r] * float4(((device const half4*)(kvV + base))[lane + 32u * j]);
+            }
+            acc[j] = acc[j] * alpha + add;
+        }
+        m = mNew;
+    }
+    for (; p < pEnd; ++p) {
+        const size_t base = (size_t)p * (size_t)posStride + headOffset;
+        device const half4* krow = (device const half4*)(kvK + base);
+        device const half4* vrow = (device const half4*)(kvV + base);
+        float part = 0.f;
+        for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+            if (j < vecs) part += dot(qv[j], float4(krow[lane + 32u * j]));
+        }
+        const float s = simd_sum(part) * scale;
+        const float mNew = max(m, s);
+        const float alpha = exp(m - mNew);
+        const float e = exp(s - mNew);
+        d = d * alpha + e;
+        for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+            if (j < vecs) acc[j] = acc[j] * alpha + e * float4(vrow[lane + 32u * j]);
+        }
+        m = mNew;
+    }
+
+    if (numChunks == 1u) {
+        device half4* orow =
+            (device half4*)(out + ((size_t)t * queryHeads + h) * (size_t)headDim);
+        const float inv = 1.f / d;
+        for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+            if (j < vecs) orow[lane + 32u * j] = half4(acc[j] * inv);
+        }
+        return;
+    }
+    // An empty chunk leaves (m, d, acc) = (-1e30, 0, 0); the combine weighs
+    // it by exp(-1e30 - mGlobal) = 0.
+    const size_t pi = ((size_t)t * queryHeads + h) * (size_t)numChunks + chunk;
+    if (lane == 0u) { mOut[pi] = m; dOut[pi] = d; }
+    device float4* orow = (device float4*)(oOut + pi * (size_t)headDim);
+    for (uint j = 0u; j < kQwenAttnMaxVecs; ++j) {
+        if (j < vecs) orow[lane + 32u * j] = acc[j];
+    }
+}
+
+// Merge the per-chunk states of qwen_attention_grouped: one threadgroup per
+// (query token, query head) row,
+//   mG = max_c m_c,  w_c = exp(m_c - mG),  out = sum_c w_c o_c / sum_c w_c d_c,
+// with a single FP16 rounding at the end.
+constant constexpr uint kQwenAttnMaxChunks = 128;
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void qwen_attention_combine(
+    device const float* mIn       [[buffer(0)]],
+    device const float* dIn       [[buffer(1)]],
+    device const float* oIn       [[buffer(2)]],
+    device       half*  out       [[buffer(3)]],   // [rows][headDim]
+    constant     uint&  headDim   [[buffer(4)]],
+    constant     uint&  numChunks [[buffer(5)]],
+    constant     uint&  rows      [[buffer(6)]],
+    uint row  [[threadgroup_position_in_grid]],
+    uint tid  [[thread_index_in_threadgroup]],
+    uint tsize [[threads_per_threadgroup]]
+) {
+    if (row >= rows) return;
+    threadgroup float w[kQwenAttnMaxChunks];
+    device const float* mRow = mIn + (size_t)row * numChunks;
+    device const float* dRow = dIn + (size_t)row * numChunks;
+    float mG = -1e30f;
+    for (uint c = 0u; c < numChunks; ++c) mG = max(mG, mRow[c]);
+    for (uint c = tid; c < numChunks; c += tsize) w[c] = exp(mRow[c] - mG);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float denom = 0.f;
+    for (uint c = 0u; c < numChunks; ++c) denom += dRow[c] * w[c];
+    const float inv = 1.f / denom;
+    device const float* oRow = oIn + (size_t)row * numChunks * (size_t)headDim;
+    device half* dst = out + (size_t)row * (size_t)headDim;
+    for (uint i = tid; i < headDim; i += tsize) {
+        float acc = 0.f;
+        for (uint c = 0u; c < numChunks; ++c) acc += oRow[(size_t)c * headDim + i] * w[c];
+        dst[i] = half(acc * inv);
+    }
+}
+
 // Output gate (plan 3.5): out = attn * sigmoid(gate), elementwise over the
 // flattened [T][queryHeads*headDim] layout; `gate` is the second half of the
 // q_proj output recovered by qwen_split_qg. Sigmoid in FP32 with a single

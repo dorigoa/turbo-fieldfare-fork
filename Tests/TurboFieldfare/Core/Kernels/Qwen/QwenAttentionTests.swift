@@ -384,6 +384,39 @@ import TurboFieldfareValidationSupport
                               seed: 0xB46)
     }
 
+    @Test func attention_splitDecode() throws {
+        // Decode split over position chunks and merged by the combine kernel:
+        // 17 positions (2 chunks of 9), 101 (7 of 15, a tail shorter than the
+        // four-position step) and 1030 (61 of 17), at the real geometry.
+        for kvStart in [16, 100, 1029] {
+            try Self.runAttention(queryHeads: Self.queryHeads, kvHeads: Self.kvHeads,
+                                  headDim: Self.headDim, queryTokens: 1, kvStart: kvStart,
+                                  seed: 0xB48 &+ UInt64(kvStart))
+        }
+    }
+
+    @Test func attention_uncoveredShapeKeepsThePerHeadKernel() throws {
+        // headDim 64 is outside the grouped kernel's half4 column layout.
+        #expect(!QwenAttention.groupedKernelCovers(queryHeads: 4, kvHeads: 2, headDim: 64))
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 64,
+                              queryTokens: 1, kvStart: 40, seed: 0xB49)
+        try Self.runAttention(queryHeads: 4, kvHeads: 2, headDim: 64,
+                              queryTokens: 6, kvStart: 3, seed: 0xB4A)
+    }
+
+    @Test func decodeSplitNeverLeavesAnEmptyChunk() {
+        #expect(QwenAttention.groupedKernelCovers(queryHeads: Self.queryHeads,
+                                                  kvHeads: Self.kvHeads, headDim: Self.headDim))
+        for kvLen in [1, 2, 15, 16, 17, 100, 1023, 1024, 1025, 4097, 131_072, 262_144] {
+            let split = QwenAttention.decodeSplit(kvLen: kvLen)
+            #expect(split.chunks >= 1 && split.chunks <= QwenAttention.maxDecodeChunks)
+            #expect(split.chunks * split.chunkLength >= kvLen, "kvLen \(kvLen) not covered")
+            #expect((split.chunks - 1) * split.chunkLength < kvLen, "kvLen \(kvLen) has an empty chunk")
+        }
+        #expect(QwenAttention.decodeSplit(kvLen: 16).chunks == 1)
+        #expect(QwenAttention.decodeSplit(kvLen: 131_072).chunks == 64)
+    }
+
     @Test func attention_cache4096() throws {
         // Decode at position 4096 with a full 4096-position cache (the D5
         // attention context size).
