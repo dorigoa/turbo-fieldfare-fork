@@ -227,8 +227,12 @@ per layer: 28 ms per token at 3,000 positions, enough to explain most of the
 gap, and 388 ms at 32,768. The grouped split-KV kernel that replaced it
 measures 0.65 ms for the ten attention layers at 4,096 positions, 4.5 ms at
 32,768 and 17.7 ms at 131,072, on the same synthetic data and to the same
-reference error. The rows above were measured before that change and have not
-been re-run.
+reference error. The rows above were measured before that change. Re-run on
+2026-11-20 with the same protocol, `--no-thinking` and one measured run after a
+discarded warmup, the three cases decode at 30.990, 33.050 and 32.227 tok/s
+(498, 743 and 557 tokens, all `endOfTurn`), so the long prompt no longer costs
+speed. A reasoning-on generation of 8,192 tokens with the same prompt and seed
+decodes at 10.76 tok/s with the old kernel and 23.11 tok/s with the new one.
 
 Peak physical footprint on the same host, with a 3,015-token prompt and 256
 generated tokens at 16 slots: Gemma 4-bit 2.210 GiB at a 4K context; Qwen3.6
