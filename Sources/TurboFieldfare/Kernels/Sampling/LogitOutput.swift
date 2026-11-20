@@ -103,6 +103,9 @@ enum SampleTopK64Error: Error {
 final class SampleTopK64 {
     private static let tileSize = 1024
     private static let keptPerTile = 64
+    /// Largest Top-K this path honours: the final stage cuts its sorted
+    /// top-64 to any K up to this.
+    static let maxTopK = keptPerTile
 
     private let ctx: MetalContext
     private let stage1PSO: MTLComputePipelineState
@@ -164,7 +167,10 @@ final class SampleTopK64 {
                        outToken: MTLBuffer,
                        temperature: Float,
                        topP: Float,
-                       seed: UInt64) {
+                       seed: UInt64,
+                       topK: Int = SampleTopK64.maxTopK) {
+        precondition((1...Self.maxTopK).contains(topK),
+                     "SampleTopK64 honours a Top-K of 1...\(Self.maxTopK)")
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
         if let enc = commandBuffer.makeComputeCommandEncoder() {
@@ -205,6 +211,8 @@ final class SampleTopK64 {
             enc.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
             enc.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
             enc.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
+            var k = UInt32(topK)
+            enc.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 7)
             enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                      threadsPerThreadgroup: threads)
             enc.endEncoding()

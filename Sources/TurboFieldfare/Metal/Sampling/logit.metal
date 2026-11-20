@@ -550,6 +550,11 @@ void sample_topk64_final(
     constant float& temperature [[buffer(4)]],
     constant float& top_p [[buffer(5)]],
     constant uint64_t& seed [[buffer(6)]],
+    // Top-K up to 64: the sorted top-64 already holds the top K in the
+    // generic kernel's order, so cutting it here gives the same candidate set
+    // without the generic kernel's one full-vocabulary pass per slot.
+    // 0 or anything above 64 means 64.
+    constant uint& top_k [[buffer(7)]],
     uint lid [[thread_position_in_threadgroup]]) {
     threadgroup float values[1024];
     threadgroup uint indices[1024];
@@ -562,8 +567,9 @@ void sample_topk64_final(
     sample_topk64_sort_tile(values, indices, lid);
 
     if (lid == 0) {
+        const uint k_cap = (top_k == 0u || top_k > 64u) ? 64u : top_k;
         uint kept = 0;
-        while (kept < 64
+        while (kept < k_cap
                && indices[kept] != 0xFFFFFFFFu
                && isfinite(values[kept])) {
             kept += 1;

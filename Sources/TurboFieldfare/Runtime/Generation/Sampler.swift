@@ -136,14 +136,20 @@ final class Sampler {
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
+        // Any Top-K up to 64 takes the tiled top-64 path, which cuts its sorted
+        // candidates to K. The generic kernel runs in one threadgroup and makes
+        // one full-vocabulary pass per Top-K slot: measured at 12.1 ms per token
+        // for Qwen's default Top-K 20 over 248,320 entries on an M4 Max, against
+        // 0.2 ms here, about a third of a whole decode step.
         if config.temperature > 0,
-           config.topK == 64 {
+           let topK = config.topK, topK <= SampleTopK64.maxTopK {
             topK64Kernel.encode(commandBuffer: commandBuffer,
                                 probs: probs,
                                 outToken: outToken,
                                 temperature: config.temperature,
                                 topP: config.topP ?? 1.0,
-                                seed: seed)
+                                seed: seed,
+                                topK: topK)
         } else {
             sampleKernel.encode(commandBuffer: commandBuffer,
                                 probs: probs, outToken: outToken, v: v,
