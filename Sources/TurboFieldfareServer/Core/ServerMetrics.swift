@@ -17,6 +17,12 @@ import TurboFieldfare
 /// `rate(turbofieldfare_generation_tokens_total[5m])
 ///  / rate(turbofieldfare_decode_seconds_total[5m])`; the `last_*` gauges give
 /// the same figures for the most recent request without a query.
+///
+/// The counters move only when a request completes, which for a long prompt or
+/// a long reply can be minutes. The `running_*` gauges show the request that is
+/// generating while it runs, from the runtime's progress events (prefill per
+/// chunk, decode per token: the ones the progress log reads), so a scraper
+/// polling every few seconds sees what the server is doing and how fast.
 public final class ServerMetrics: Sendable {
     public static let contentType = "text/plain; version=0.0.4; charset=utf-8"
 
@@ -64,6 +70,50 @@ public final class ServerMetrics: Sendable {
         var lastDecodeTokensPerSecond: Double?
         var firstOutput = Histogram(bounds: ServerMetrics.firstOutputBuckets)
         var duration = Histogram(bounds: ServerMetrics.durationBuckets)
+        /// Requests that started generating, the running one included.
+        var generationsStarted: UInt64 = 0
+        /// The request generating now; nil when idle.
+        var running: Running?
+    }
+
+    struct ProgressSample {
+        let time: ContinuousClock.Instant
+        let count: Int
+    }
+
+    /// The request generating now, as its progress events report it.
+    /// Generation is serialized, so there is at most one.
+    struct Running {
+        let id: UInt64
+        var decoding = false
+        /// Prompt tokens in the KV so far, prompt-cache hits included, of the
+        /// prompt's total: the runtime's own count, reported per chunk.
+        var promptDone: Int?
+        var promptTotal: Int?
+        var generated = 0
+        /// The first and the latest report of each phase, which time it. The
+        /// first report opens the phase, so its tokens (the cached prefix, the
+        /// first chunk) are not divided by time spent before it.
+        var prefillFirst: ProgressSample?
+        var prefillLatest: ProgressSample?
+        var decodeFirst: ProgressSample?
+        var decodeLatest: ProgressSample?
+
+        /// Average over the chunks so far, as the progress log's prefill line.
+        var prefillTokensPerSecond: Double? {
+            Self.rate(prefillFirst, prefillLatest)
+        }
+
+        /// Average since the first generated token.
+        var decodeTokensPerSecond: Double? {
+            Self.rate(decodeFirst, decodeLatest)
+        }
+
+        private static func rate(_ first: ProgressSample?, _ latest: ProgressSample?) -> Double? {
+            guard let first, let latest, latest.count > first.count else { return nil }
+            let seconds = ServerMetrics.seconds(first.time.duration(to: latest.time))
+            return seconds > 0 ? Double(latest.count - first.count) / seconds : nil
+        }
     }
 
     private let state = Mutex(State())
@@ -140,6 +190,51 @@ public final class ServerMetrics: Sendable {
         state.withLock { $0.cancelled += 1 }
     }
 
+    /// A request starts generating: from now on it is the running one, in
+    /// prefill until its first generated token. Returns the id `endRunning`
+    /// takes.
+    @discardableResult
+    func beginRunning() -> UInt64 {
+        state.withLock { state in
+            state.generationsStarted += 1
+            state.running = Running(id: state.generationsStarted)
+            return state.generationsStarted
+        }
+    }
+
+    /// A `.prefill` or `.decoded` event of the running request; anything else,
+    /// or no running request, is ignored.
+    func recordProgress(_ event: ServerInferenceEvent, at now: ContinuousClock.Instant = .now) {
+        state.withLock { state in
+            guard var running = state.running else { return }
+            switch event {
+            case .prefill(let done, let total):
+                let sample = ProgressSample(time: now, count: done)
+                if running.prefillFirst == nil { running.prefillFirst = sample }
+                running.prefillLatest = sample
+                running.promptDone = done
+                running.promptTotal = total
+            case .decoded(let count):
+                let sample = ProgressSample(time: now, count: count)
+                if running.decodeFirst == nil { running.decodeFirst = sample }
+                running.decodeLatest = sample
+                running.decoding = true
+                running.generated = count
+            case .content, .toolCall:
+                return
+            }
+            state.running = running
+        }
+    }
+
+    /// The request `id` stopped generating, however it ended. A later request
+    /// that already began is left alone.
+    func endRunning(_ id: UInt64) {
+        state.withLock { state in
+            if state.running?.id == id { state.running = nil }
+        }
+    }
+
     func recordFailure(status: UInt) {
         state.withLock {
             $0.failed += 1
@@ -180,6 +275,44 @@ public final class ServerMetrics: Sendable {
         out.family("turbofieldfare_requests_waiting", .gauge,
                    "Prepared requests waiting for the running one to finish.")
         out.sample("turbofieldfare_requests_waiting", waiting)
+
+        out.family("turbofieldfare_generations_started_total", .counter,
+                   "Requests that started generating, the running one included: "
+                       + "when it changes, the running_* gauges are about another request.")
+        out.sample("turbofieldfare_generations_started_total", state.generationsStarted)
+        out.family("turbofieldfare_running_phase", .gauge,
+                   "What the server is doing now, 1 on that phase: idle, prefill "
+                       + "(reading the prompt) or decode (generating).")
+        let phase = state.running.map { $0.decoding ? "decode" : "prefill" } ?? "idle"
+        for name in ["idle", "prefill", "decode"] {
+            out.sample("turbofieldfare_running_phase", labels: [("phase", name)],
+                       name == phase ? 1 : 0)
+        }
+        if let running = state.running {
+            if let total = running.promptTotal, let done = running.promptDone {
+                out.family("turbofieldfare_running_prompt_tokens", .gauge,
+                           "Prompt length of the running request.")
+                out.sample("turbofieldfare_running_prompt_tokens", total)
+                out.family("turbofieldfare_running_prompt_done_tokens", .gauge,
+                           "Prompt tokens of the running request in the KV so far, "
+                               + "prompt-cache hits included, reported per chunk.")
+                out.sample("turbofieldfare_running_prompt_done_tokens", done)
+            }
+            out.family("turbofieldfare_running_generated_tokens", .gauge,
+                       "Tokens the running request has generated so far, reasoning included.")
+            out.sample("turbofieldfare_running_generated_tokens", running.generated)
+            if let rate = running.prefillTokensPerSecond {
+                out.family("turbofieldfare_running_prefill_tokens_per_second", .gauge,
+                           "Prefill speed of the running request: the average over its "
+                               + "chunks so far, timed by when they landed.")
+                out.sample("turbofieldfare_running_prefill_tokens_per_second", rate)
+            }
+            if let rate = running.decodeTokensPerSecond {
+                out.family("turbofieldfare_running_decode_tokens_per_second", .gauge,
+                           "Generation speed of the running request since its first token.")
+                out.sample("turbofieldfare_running_decode_tokens_per_second", rate)
+            }
+        }
 
         out.family("turbofieldfare_requests_total", .counter,
                    "Chat completion requests by how they ended.")
@@ -264,7 +397,7 @@ public final class ServerMetrics: Sendable {
         return out.text
     }
 
-    private static func seconds(_ duration: Duration) -> Double {
+    fileprivate static func seconds(_ duration: Duration) -> Double {
         Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18
     }

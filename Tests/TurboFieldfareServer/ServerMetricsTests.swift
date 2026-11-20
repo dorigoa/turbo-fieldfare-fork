@@ -114,6 +114,80 @@ struct ServerMetricsTests {
         #expect(lines.contains("turbofieldfare_time_to_first_output_seconds_count 0"))
     }
 
+    /// With no request generating, the server says idle and nothing about a
+    /// running request.
+    @Test func idleServerHasNoRunningGauges() {
+        let lines = Self.lines(Self.render(ServerMetrics()))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="idle"} 1"#))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="prefill"} 0"#))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="decode"} 0"#))
+        #expect(lines.contains("turbofieldfare_generations_started_total 0"))
+        #expect(!lines.contains {
+            $0.hasPrefix("turbofieldfare_running_") && !$0.hasPrefix("turbofieldfare_running_phase")
+        })
+    }
+
+    /// The running request moves from prefill to decode as its progress
+    /// events arrive, and its speeds are timed from the first report of each
+    /// phase: the cached prefix and the first chunk are not divided by time
+    /// spent before them.
+    @Test func runningRequestIsReportedWhileItRuns() {
+        let metrics = ServerMetrics()
+        let t0 = ContinuousClock.now
+        let id = metrics.beginRunning()
+        var lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="prefill"} 1"#))
+        #expect(lines.contains("turbofieldfare_generations_started_total 1"))
+        #expect(lines.contains("turbofieldfare_running_generated_tokens 0"))
+        #expect(!lines.contains { $0.hasPrefix("turbofieldfare_running_prompt_tokens ") })
+
+        // 1,000 cached tokens plus a first chunk of 256, then two more chunks in 2 s.
+        metrics.recordProgress(.prefill(done: 1_256, total: 2_000), at: t0)
+        metrics.recordProgress(.prefill(done: 1_512, total: 2_000), at: t0 + .seconds(1))
+        metrics.recordProgress(.prefill(done: 1_768, total: 2_000), at: t0 + .seconds(2))
+        lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains("turbofieldfare_running_prompt_tokens 2000"))
+        #expect(lines.contains("turbofieldfare_running_prompt_done_tokens 1768"))
+        #expect(lines.contains("turbofieldfare_running_prefill_tokens_per_second 256.0"))
+        #expect(!lines.contains { $0.hasPrefix("turbofieldfare_running_decode_tokens_per_second") })
+
+        for count in 1...41 {
+            metrics.recordProgress(.decoded(count: count),
+                                   at: t0 + .seconds(3) + .milliseconds(50 * (count - 1)))
+        }
+        metrics.recordProgress(.content("ignored"), at: t0 + .seconds(9))
+        lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="decode"} 1"#))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="prefill"} 0"#))
+        #expect(lines.contains("turbofieldfare_running_generated_tokens 41"))
+        // 40 tokens after the first one, in 2 s.
+        #expect(lines.contains("turbofieldfare_running_decode_tokens_per_second 20.0"))
+
+        metrics.endRunning(id)
+        lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="idle"} 1"#))
+        #expect(!lines.contains { $0.hasPrefix("turbofieldfare_running_generated_tokens") })
+        #expect(lines.contains("turbofieldfare_generations_started_total 1"))
+    }
+
+    /// The end of an earlier request does not clear one that already began,
+    /// and progress with no running request is dropped.
+    @Test func staleEndLeavesTheNewRequestRunning() {
+        let metrics = ServerMetrics()
+        metrics.recordProgress(.decoded(count: 5))
+        #expect(Self.lines(Self.render(metrics))
+            .contains(#"turbofieldfare_running_phase{phase="idle"} 1"#))
+        let first = metrics.beginRunning()
+        let second = metrics.beginRunning()
+        metrics.endRunning(first)
+        var lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="prefill"} 1"#))
+        #expect(lines.contains("turbofieldfare_generations_started_total 2"))
+        metrics.endRunning(second)
+        lines = Self.lines(Self.render(metrics))
+        #expect(lines.contains(#"turbofieldfare_running_phase{phase="idle"} 1"#))
+    }
+
     @Test func failuresAreCountedByStatusAndCancellationsApart() {
         let metrics = ServerMetrics()
         metrics.recordFailure(status: 429)

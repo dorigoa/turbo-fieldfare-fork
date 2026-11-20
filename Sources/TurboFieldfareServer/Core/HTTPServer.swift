@@ -564,6 +564,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             try Task.checkCancellation()
                             phaseState.set("generating")
                             ServerLog.generating(id: responseID)
+                            // /metrics' running_* gauges follow this request
+                            // until it stops generating, however it ends.
+                            let runningID = self.metrics.beginRunning()
+                            defer { self.metrics.endRunning(runningID) }
                             // A line every interval while the backend reports
                             // progress; a backend that reports none logs none.
                             let ticker = progressLog.flatMap { log in
@@ -580,6 +584,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                 switch event {
                                 case .prefill, .decoded:
                                     progressLog?.record(event)
+                                    self.metrics.recordProgress(event)
                                     return
                                 case .content, .toolCall:
                                     break
