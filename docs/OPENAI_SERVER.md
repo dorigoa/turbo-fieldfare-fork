@@ -154,6 +154,48 @@ never waits for a generation to finish. Like every other endpoint it has no
 authentication: with [`--host`](#listen-on-another-address) it is visible to
 whoever can reach the server.
 
+## llama-server props and slots
+
+Some clients probe a local server with llama-server's own endpoints to learn
+its context size and whether it is busy. The server answers `GET /props` and
+`GET /slots` in the shape llama.cpp documents in its server README; there is
+no other standard for them.
+
+```bash
+curl --silent --show-error http://127.0.0.1:8080/props
+curl --silent --show-error http://127.0.0.1:8080/slots
+```
+
+`/props` names the model (`model_alias` is the API model ID, `model_path` the
+`--model` directory), the installed `chat_template`, `modalities.vision`
+(true when the image pack is loaded), `total_slots`, and
+`default_generation_settings`: `n_ctx` is the `--max-context`, and `params`
+holds the sampling a request gets when it names none. `build_info` is
+`turbofieldfare`.
+
+`/slots` is an array with a single slot, because generation is serialized; the
+queue behind it is in [`/metrics`](#metrics). While a request generates,
+`is_processing` is true, `id_task` numbers the generation, `params` are that
+request's `temperature`, `top_k`, `top_p`, `repeat_penalty`, `seed`, `stop`
+and `n_predict` (its maximum completion tokens), and `next_token` counts the
+tokens generated so far (`n_decoded`, reasoning included) and left
+(`n_remain`). When idle, `id_task` is -1 and `params` are the defaults.
+`/slots?fail_on_no_slot=1` answers 503 with `unavailable_error` while a
+request holds the slot; like llama-server, any non-empty value turns it on.
+That 503 is not logged or counted as a failed request.
+
+Only what this server knows is reported. `seed` is 4294967295, llama-server's
+value for a fresh seed per request, unless the request set one. `samplers` lists
+the runtime's stages in the order it applies them: `penalties`, `top_p`,
+`top_k`, `temperature`. Samplers the runtime does not have, such as `min_p`,
+`typical_p`, `xtc`, `dry`, `mirostat` and the presence and frequency
+penalties, appear at the values that switch them off in llama.cpp.
+`has_new_line` is always false, because the server does not track it. Neither
+endpoint returns prompt or generated text, and `bos_token`, `eos_token` and
+`media_marker` are left out. `next_token` is an object, as llama.cpp's README
+and web UI describe it. `POST /props` and the `POST /slots/{id}` save, restore
+and erase actions are not supported.
+
 ## Runtime settings
 
 The server accepts the same runtime flags as the CLI, with the same values and
@@ -490,6 +532,8 @@ Endpoints:
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `GET /props` and `GET /slots`, in llama-server's shape (see
+  [llama-server props and slots](#llama-server-props-and-slots))
 
 Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set

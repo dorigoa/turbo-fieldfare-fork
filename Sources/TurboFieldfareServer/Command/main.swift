@@ -52,7 +52,8 @@ do {
         metrics: metrics,
         progressLogInterval: arguments.progressLogInterval > 0
             ? .seconds(Int64(arguments.progressLogInterval)) : nil,
-        acceptAnyModel: arguments.acceptAnyModel)
+        acceptAnyModel: arguments.acceptAnyModel,
+        model: ServerModelDescription.load(modelDirectory: modelURL, family: backend.family))
     if let warning = arguments.exposureWarning {
         FileHandle.standardError.write(Data("\(warning)\n".utf8))
     }

@@ -85,6 +85,9 @@ public final class ServerMetrics: Sendable {
     /// Generation is serialized, so there is at most one.
     struct Running {
         let id: UInt64
+        /// The request's sampling, which `/slots` reports; nil when the
+        /// caller did not say.
+        var settings: ServerSamplingSettings?
         var decoding = false
         /// Prompt tokens in the KV so far, prompt-cache hits included, of the
         /// prompt's total: the runtime's own count, reported per chunk.
@@ -194,12 +197,17 @@ public final class ServerMetrics: Sendable {
     /// prefill until its first generated token. Returns the id `endRunning`
     /// takes.
     @discardableResult
-    func beginRunning() -> UInt64 {
+    func beginRunning(settings: ServerSamplingSettings? = nil) -> UInt64 {
         state.withLock { state in
             state.generationsStarted += 1
-            state.running = Running(id: state.generationsStarted)
+            state.running = Running(id: state.generationsStarted, settings: settings)
             return state.generationsStarted
         }
+    }
+
+    /// The request generating now, as `/slots` reports it; nil when idle.
+    var running: Running? {
+        state.withLock { $0.running }
     }
 
     /// A `.prefill` or `.decoded` event of the running request; anything else,

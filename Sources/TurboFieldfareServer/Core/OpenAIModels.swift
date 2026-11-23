@@ -714,29 +714,31 @@ public enum OpenAIRequestValidator {
         }
 
         // D10/U4: the sampling defaults are the family's reference
-        // generation. Gemma's long-standing 0.2/64/0.95 is untouched; Qwen
-        // answers with the checkpoint's 1.0/20/0.95, the same figures the
-        // CLI uses (S22).
-        let temperature = request.temperature ?? (family == .qwen35Moe ? 1.0 : 0.2)
+        // generation, kept in `ServerSamplingSettings` so `/props` reports
+        // the same figures.
+        let temperature = request.temperature
+            ?? ServerSamplingSettings.defaultTemperature(for: family)
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
         }
-        let topP = request.topP ?? 0.95
+        let topP = request.topP ?? ServerSamplingSettings.defaultTopP
         guard topP > 0, topP <= 1 else {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? (family == .qwen35Moe ? 20 : 64)
+        let topK = request.topK ?? ServerSamplingSettings.defaultTopK(for: family)
         guard (1...256).contains(topK) else {
             throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
         }
-        let repetitionPenalty = request.repetitionPenalty ?? 1
+        let repetitionPenalty = request.repetitionPenalty
+            ?? ServerSamplingSettings.defaultRepetitionPenalty
         guard repetitionPenalty > 0 else {
             throw invalid("repetition_penalty must be positive",
                           "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        let maximum = request.maxCompletionTokens ?? request.maxTokens
+            ?? ServerSamplingSettings.defaultMaxTokens
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",

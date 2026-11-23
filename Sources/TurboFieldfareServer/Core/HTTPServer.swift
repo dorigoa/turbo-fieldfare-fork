@@ -30,6 +30,7 @@ public actor TurboFieldfareHTTPServer {
     private let metrics: ServerMetrics
     private let progressLogInterval: TimeAmount?
     private let acceptAnyModel: Bool
+    private let llamaProperties: LlamaServerProperties
     private let childChannels = ChildChannelRegistry()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
@@ -45,6 +46,7 @@ public actor TurboFieldfareHTTPServer {
                 metrics: ServerMetrics = ServerMetrics(),
                 progressLogInterval: TimeAmount? = nil,
                 acceptAnyModel: Bool = false,
+                model: ServerModelDescription = ServerModelDescription(),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
@@ -58,6 +60,12 @@ public actor TurboFieldfareHTTPServer {
         self.metrics = metrics
         self.progressLogInterval = progressLogInterval
         self.acceptAnyModel = acceptAnyModel
+        self.llamaProperties = LlamaServerProperties(
+            modelID: modelID,
+            family: family,
+            contextTokens: metrics.maxContextTokens ?? 0,
+            visionReady: visionCapability == "ready",
+            model: model)
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
@@ -77,6 +85,7 @@ public actor TurboFieldfareHTTPServer {
         let metrics = self.metrics
         let progressLogInterval = self.progressLogInterval
         let acceptAnyModel = self.acceptAnyModel
+        let llamaProperties = self.llamaProperties
         let bootstrap = ServerBootstrap(group: group)
             // The listen queue is sized to the connection cap so a burst of
             // connects up to the cap waits for the accept loop instead of
@@ -105,6 +114,7 @@ public actor TurboFieldfareHTTPServer {
                         metrics: metrics,
                         progressLogInterval: progressLogInterval,
                         acceptAnyModel: acceptAnyModel,
+                        llamaProperties: llamaProperties,
                         childChannels: childChannels))
                 }
             }
@@ -187,6 +197,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let metrics: ServerMetrics
     private let progressLogInterval: TimeAmount?
     private let acceptAnyModel: Bool
+    private let llamaProperties: LlamaServerProperties
     private var bodyParser: StreamingChatRequestBody?
     /// A Messages body, read whole (see `carriesAnthropicBody`).
     private var rawBody: Data?
@@ -212,6 +223,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          metrics: ServerMetrics,
          progressLogInterval: TimeAmount?,
          acceptAnyModel: Bool,
+         llamaProperties: LlamaServerProperties,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
         self.family = family
@@ -223,6 +235,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.metrics = metrics
         self.progressLogInterval = progressLogInterval
         self.acceptAnyModel = acceptAnyModel
+        self.llamaProperties = llamaProperties
         self.childChannels = childChannels
     }
 
@@ -410,6 +423,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeCodable(context, status: .ok, response)
         case (.GET, "/metrics"):
             writeMetrics(context)
+        case (.GET, "/props"):
+            writeJSON(context, status: .ok, object: llamaProperties.props())
+        case (.GET, "/slots"):
+            writeSlots(context, head: head)
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -433,7 +450,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             } else {
                 handleCountTokens(head: head, body: body, context: context)
             }
-        case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/v1/chat/completions"),
+        case (_, "/health"), (_, "/v1/models"), (_, "/metrics"), (_, "/props"), (_, "/slots"),
+             (_, "/v1/chat/completions"),
              (_, AnthropicMessages.messagesPath), (_, AnthropicMessages.countTokensPath):
             reject(context, head: head, status: .methodNotAllowed,
                    OpenAIErrorEnvelope(message: "method not allowed",
@@ -564,9 +582,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             try Task.checkCancellation()
                             phaseState.set("generating")
                             ServerLog.generating(id: responseID)
-                            // /metrics' running_* gauges follow this request
-                            // until it stops generating, however it ends.
-                            let runningID = self.metrics.beginRunning()
+                            // /metrics' running_* gauges and /slots follow
+                            // this request until it stops generating, however
+                            // it ends.
+                            let runningID = self.metrics.beginRunning(
+                                settings: ServerSamplingSettings(request: request))
                             defer { self.metrics.endRunning(runningID) }
                             // A line every interval while the backend reports
                             // progress; a backend that reports none logs none.
@@ -734,6 +754,34 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                       memory: .current())
             self.writeData(contextBox.value, status: .ok, data: Data(text.utf8),
                            contentType: ServerMetrics.contentType)
+        }
+    }
+
+    /// `GET /slots`, read like `/metrics`: the slot is busy while the
+    /// coordinator has a request in it. With `fail_on_no_slot` set to any
+    /// non-empty value, as llama-server reads it, a busy slot answers 503.
+    /// That 503 is the answer to a status probe, not a refused request, so it
+    /// is neither logged nor counted: a balancer polling a busy server would
+    /// otherwise fill the log.
+    private func writeSlots(_ context: ChannelHandlerContext, head: HTTPRequestHead) {
+        let contextBox = SendableContext(context)
+        let coordinator = self.coordinator
+        let metrics = self.metrics
+        let properties = self.llamaProperties
+        let failOnNoSlot = URLComponents(string: head.uri)?.queryItems?
+            .first { $0.name == "fail_on_no_slot" }?.value.map { !$0.isEmpty } ?? false
+        Task {
+            let processing = await coordinator.isActive
+            if failOnNoSlot, processing {
+                self.writeError(contextBox.value, status: .serviceUnavailable,
+                                OpenAIErrorEnvelope(message: "no slot available",
+                                                    code: "no_slot_available",
+                                                    type: "unavailable_error"))
+                return
+            }
+            self.writeJSON(contextBox.value, status: .ok,
+                           object: properties.slots(processing: processing,
+                                                    running: metrics.running))
         }
     }
 
